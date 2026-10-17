@@ -447,6 +447,9 @@ mod tests {
     fn setup(st: &AppState) {
         let args = json!({ "shopName": "Tienda", "adminName": "Ana", "password": "1234", "samples": true, "lang": "es" });
         dispatch(st, "setup", args).unwrap();
+        // the daily backup taken at login must land in the test's own folder
+        let backups = st.data_dir.join("backups");
+        dispatch(st, "settings.save", json!({ "backupDir": backups.to_string_lossy() })).unwrap();
     }
 
     fn sale() -> Value {
@@ -473,6 +476,7 @@ mod tests {
         let jordi = dispatch(&st, "users.save", json!({ "name": "Jordi", "role": "cashier", "password": "4321" })).unwrap();
         dispatch(&st, "logout", json!({})).unwrap();
         dispatch(&st, "login", json!({ "userId": jordi["id"], "password": "4321" })).unwrap();
+        assert_eq!(st.data_dir.join("backups").read_dir().unwrap().count(), 1);
 
         for cmd in ["users.list", "settings.save", "products.save", "reports.summary", "tickets.void", "backup.now", "printers.test"] {
             assert_eq!(dispatch(&st, cmd, json!({})).unwrap_err(), "E_FORBIDDEN", "{cmd}");
