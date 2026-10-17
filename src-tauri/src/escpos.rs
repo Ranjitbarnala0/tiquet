@@ -90,29 +90,51 @@ pub fn document(lines: &[Line], logo: Option<&Logo>, o: &Opts) -> Vec<u8> {
 }
 
 // GS v 0 in bands: some clones drop images taller than their buffer
-fn raster(b: &mut Vec<u8>, logo: &Logo, cols: usize) {
-    let Some(bits) = logo.raster() else { return };
-    let (src_w, h) = (logo.w as usize, logo.h as usize);
-    let src_row = src_w.div_ceil(8);
-    let out_w = (cols * 12).min(576);
+// A logo wider than the paper is scaled down, the way the preview shows it:
+// each output dot is black when at least half of the dots it covers are.
+fn fit(bits: &[u8], w: usize, h: usize, out_w: usize) -> (Vec<u8>, usize, usize) {
+    let row = w.div_ceil(8);
+    if w <= out_w {
+        return (bits.to_vec(), w, h);
+    }
+    let out_h = (h * out_w).div_ceil(w).max(1);
     let out_row = out_w.div_ceil(8);
-    let (crop, pad) = if src_w > out_w { ((src_w - out_w) / 2, 0) } else { (0, (out_w - src_w) / 2) };
+    let mut out = vec![0u8; out_row * out_h];
+    for oy in 0..out_h {
+        let (y0, y1) = (oy * h / out_h, ((oy + 1) * h / out_h).max(oy * h / out_h + 1));
+        for ox in 0..out_w {
+            let (x0, x1) = (ox * w / out_w, ((ox + 1) * w / out_w).max(ox * w / out_w + 1));
+            let mut black = 0;
+            for y in y0..y1.min(h) {
+                for x in x0..x1.min(w) {
+                    black += ((bits[y * row + x / 8] >> (7 - x % 8)) & 1) as usize;
+                }
+            }
+            if black * 2 >= (y1 - y0) * (x1 - x0) {
+                out[oy * out_row + ox / 8] |= 0x80 >> (ox % 8);
+            }
+        }
+    }
+    (out, out_w, out_h)
+}
+
+fn raster(b: &mut Vec<u8>, logo: &Logo, cols: usize) {
+    let Some(src) = logo.raster() else { return };
+    let paper = (cols * 12).min(576);
+    let (bits, w, h) = fit(&src, logo.w as usize, logo.h as usize, paper);
+    let row = w.div_ceil(8);
+    let out_row = paper.div_ceil(8);
+    let pad = (paper - w) / 2;
 
     let mut y = 0;
     while y < h {
         let band = (h - y).min(128);
         b.extend_from_slice(&[GS, b'v', b'0', 0, out_row as u8, (out_row >> 8) as u8, band as u8, (band >> 8) as u8]);
-        for row in y..y + band {
+        for r in y..y + band {
             let mut out = vec![0u8; out_row];
-            for ox in 0..out_w {
-                if ox < pad {
-                    continue;
-                }
-                let sx = ox - pad + crop;
-                if sx >= src_w {
-                    break;
-                }
-                if (bits[row * src_row + sx / 8] >> (7 - sx % 8)) & 1 == 1 {
+            for x in 0..w {
+                if (bits[r * row + x / 8] >> (7 - x % 8)) & 1 == 1 {
+                    let ox = x + pad;
                     out[ox / 8] |= 0x80 >> (ox % 8);
                 }
             }
@@ -223,14 +245,20 @@ mod tests {
             let shop = ShopInfo { name: "Óptica Ñandú".into(), footer: "¡Gracias! 5 € de descuento".into(), ..Default::default() };
             let v = TicketView {
                 shop: &shop,
+                kind: "sale",
                 number: "T2026-000001",
                 issued_at: "2026-10-16T17:00:00",
                 user_name: "Begoña",
                 lines: &lines,
                 totals: &totals,
                 payment: Some(&pay),
+                refund_of: None,
+                reason: None,
+                show_vat: true,
                 copy: false,
                 voided: false,
+                customer: None,
+                training: false,
             };
             let preview = layout::ticket(&v, &s, true);
             let lg = logo();
@@ -250,6 +278,22 @@ mod tests {
             assert!(cmds.contains(&"RASTER 72x128".to_string()) && cmds.contains(&"RASTER 72x2".to_string()));
             assert_eq!(cmds.last().unwrap(), "GS V");
         }
+    }
+
+    #[test]
+    fn a_logo_wider_than_the_paper_is_scaled_not_cut() {
+        // 576 dots wide, left half black: on 58 mm paper (384 dots) it must
+        // still show both halves, half black and half white
+        let (w, h) = (576usize, 4usize);
+        let mut row = vec![0u8; w / 8];
+        row[..w / 16].fill(0xFF);
+        let bits: Vec<u8> = row.iter().cycle().take(row.len() * h).copied().collect();
+        let lg = Logo { w: w as u32, h: h as u32, bits: base64::engine::general_purpose::STANDARD.encode(&bits), png: String::new() };
+        let mut b = Vec::new();
+        raster(&mut b, &lg, 32);
+        assert_eq!(&b[..8], &[GS, b'v', b'0', 0, 48, 0, 3, 0]);
+        let first = &b[8..8 + 48];
+        assert!(first[..24].iter().all(|&x| x == 0xFF) && first[24..].iter().all(|&x| x == 0), "{first:?}");
     }
 
     #[test]

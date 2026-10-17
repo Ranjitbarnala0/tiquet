@@ -1,0 +1,62 @@
+name: Release
+
+# Builds the installer on a clean Windows machine for every version tag, so
+# what users download never depends on a developer's PC.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      - name: Version matches the tag
+        shell: pwsh
+        run: |
+          $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          if ("v$v" -ne $env:GITHUB_REF_NAME) { throw "tauri.conf.json says $v but the tag is $env:GITHUB_REF_NAME" }
+
+      - run: npm run build
+
+      - name: Core tests
+        working-directory: src-tauri
+        run: cargo test --lib --locked
+
+      - name: Build the installer
+        run: npm run tauri build
+
+      # the packaged app boots its UI, opens a fresh database through the core
+      # and reports back, without showing a window
+      - name: Start the built app once
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'selftest.json'
+          $p = Start-Process -FilePath src-tauri/target/release/tiquet.exe -ArgumentList '--selftest', $report -PassThru
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); throw 'the app did not finish its self-test' }
+          Get-Content $report
+          if (-not (Get-Content $report -Raw | ConvertFrom-Json).ok) { throw 'self-test failed' }
+
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $hash = (Get-FileHash $setup.FullName -Algorithm SHA256).Hash.ToLower()
+          $sum = "$($setup.FullName).sha256"
+          "$hash  $($setup.Name)" | Set-Content -Encoding ascii $sum
+          $notes = (Get-Content .github/release-notes.md -Raw) + "`n`nSHA-256 of ``$($setup.Name)``: ``$hash``"
+          Set-Content -Encoding utf8 notes.md $notes
+          gh release create $env:GITHUB_REF_NAME $setup.FullName $sum --title "Tiquet $($env:GITHUB_REF_NAME.TrimStart('v'))" --notes-file notes.md

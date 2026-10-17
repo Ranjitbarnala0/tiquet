@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Tiquet",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "identifier": "es.tiquet.caja",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -16,11 +16,12 @@
         "title": "Tiquet",
         "width": 1366,
         "height": 820,
-        "minWidth": 1100,
-        "minHeight": 680,
+        "minWidth": 960,
+        "minHeight": 520,
         "center": true,
         "maximized": true,
-        "visible": false
+        "visible": false,
+        "generalAutofillEnabled": false
       }
     ],
     "security": {
@@ -29,7 +30,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "publisher": "Tiquet",
     "category": "Business",
     "shortDescription": "Caja y tickets para comercio",
@@ -41,10 +44,15 @@
       "icons/icon.ico"
     ],
     "windows": {
-      "webviewInstallMode": { "type": "embedBootstrapper" },
+      "webviewInstallMode": {
+        "type": "embedBootstrapper"
+      },
       "nsis": {
         "installMode": "currentUser",
-        "languages": ["Spanish", "English"],
+        "languages": [
+          "Spanish",
+          "English"
+        ],
         "displayLanguageSelector": false
       }
     }

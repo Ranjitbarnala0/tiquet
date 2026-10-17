@@ -1,4 +1,4 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { tr, type Lang } from './i18n';
@@ -25,6 +25,33 @@ export function Mark({ size = 28 }: { size?: number }) {
   );
 }
 
+// Keeps Tab inside an open dialog. It only steps in while focus is in this
+// dialog or lost on the page, so a dialog opened on top of another keeps its
+// own focus.
+export function useTrap(ref: RefObject<HTMLElement>, on = true) {
+  useEffect(() => {
+    if (!on) return;
+    const k = (e: KeyboardEvent) => {
+      const box = ref.current;
+      if (e.key !== 'Tab' || !box) return;
+      const active = document.activeElement;
+      const inside = box.contains(active);
+      if (!inside && active !== document.body) return;
+      const els = [...box.querySelectorAll<HTMLElement>('button, input, select, textarea, a[href], [tabindex]:not([tabindex="-1"])')].filter(
+        (el) => !el.hasAttribute('disabled') && el.offsetParent !== null,
+      );
+      if (!els.length) return;
+      const [first, last] = [els[0], els[els.length - 1]];
+      if (e.shiftKey ? !inside || active === first : !inside || active === last) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      }
+    };
+    window.addEventListener('keydown', k, true);
+    return () => window.removeEventListener('keydown', k, true);
+  }, [ref, on]);
+}
+
 function useEscape(onClose: () => void) {
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
@@ -39,11 +66,17 @@ function useEscape(onClose: () => void) {
   }, [onClose]);
 }
 
-export function Modal(props: { title: string; onClose: () => void; children: ReactNode; actions?: ReactNode; wide?: boolean }) {
-  useEscape(props.onClose);
+const stay = () => {};
+
+// `locked` is for something that must be acknowledged: no X, Esc or backdrop
+export function Modal(props: { title: string; onClose: () => void; children: ReactNode; actions?: ReactNode; wide?: boolean; locked?: boolean }) {
+  useEscape(props.locked ? stay : props.onClose);
+  const box = useRef<HTMLDivElement>(null);
+  useTrap(box);
   return createPortal(
-    <div className="modal-back" onMouseDown={props.onClose}>
+    <div className="modal-back" onMouseDown={props.locked ? undefined : props.onClose}>
       <div
+        ref={box}
         className={`modal${props.wide ? ' wide' : ''}`}
         role="dialog"
         aria-modal="true"
@@ -52,9 +85,11 @@ export function Modal(props: { title: string; onClose: () => void; children: Rea
       >
         <div className="modal-head">
           <h3>{props.title}</h3>
-          <button className="icon-btn" onClick={props.onClose} aria-label={tr('Cerrar', 'Close')}>
-            <X size={18} />
-          </button>
+          {!props.locked && (
+            <button className="icon-btn" onClick={props.onClose} aria-label={tr('Cerrar', 'Close')}>
+              <X size={18} />
+            </button>
+          )}
         </div>
         <div className="modal-body">{props.children}</div>
         {props.actions && <div className="modal-foot">{props.actions}</div>}
@@ -64,19 +99,39 @@ export function Modal(props: { title: string; onClose: () => void; children: Rea
   );
 }
 
-export function Drawer(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
-  useEscape(props.onClose);
+// With `dirty`, closing it (X, Esc, a click outside) asks before throwing
+// the edits away.
+export function Drawer(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; dirty?: boolean }) {
+  const [asking, setAsking] = useState(false);
+  const close = () => (props.dirty ? setAsking(true) : props.onClose());
+  useEscape(close);
+  const box = useRef<HTMLElement>(null);
+  useTrap(box);
   return createPortal(
-    <div className="modal-back drawer-back" onMouseDown={props.onClose}>
-      <aside className="drawer" role="dialog" aria-modal="true" aria-label={props.title} onMouseDown={(e) => e.stopPropagation()}>
+    <div className="modal-back drawer-back" onMouseDown={close}>
+      <aside ref={box} className="drawer" role="dialog" aria-modal="true" aria-label={props.title} onMouseDown={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <h3>{props.title}</h3>
-          <button className="icon-btn" onClick={props.onClose} aria-label={tr('Cerrar', 'Close')}>
+          <button className="icon-btn" onClick={close} aria-label={tr('Cerrar', 'Close')}>
             <X size={18} />
           </button>
         </div>
         <div className="drawer-body">{props.children}</div>
-        {props.footer && <div className="drawer-foot">{props.footer}</div>}
+        {asking ? (
+          <div className="drawer-foot discard" role="alertdialog" aria-label={tr('¿Descartar los cambios?', 'Discard the changes?')}>
+            <span>{tr('¿Descartar los cambios?', 'Discard the changes?')}</span>
+            <div className="row-gap">
+              <button className="btn btn-ghost" autoFocus onClick={() => setAsking(false)}>
+                {tr('Seguir editando', 'Keep editing')}
+              </button>
+              <button className="btn btn-danger" onClick={props.onClose}>
+                {tr('Descartar', 'Discard')}
+              </button>
+            </div>
+          </div>
+        ) : (
+          props.footer && <div className="drawer-foot">{props.footer}</div>
+        )}
       </aside>
     </div>,
     document.body,

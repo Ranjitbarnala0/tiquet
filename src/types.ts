@@ -1,7 +1,8 @@
-import type { Lang } from './i18n';
+import type { Lang, PrinterState } from './i18n';
 
 export type Role = 'admin' | 'cashier';
 export type Method = 'cash' | 'card' | 'bizum';
+export type TicketKind = 'sale' | 'refund';
 
 export interface User {
   id: number;
@@ -16,6 +17,8 @@ export interface UserRow extends User {
 
 export interface Boot {
   needsSetup: boolean;
+  canRecover: boolean;
+  installId: string;
   users: User[];
   lang: Lang;
   shopName: string;
@@ -25,6 +28,7 @@ export interface Boot {
 
 export interface Settings {
   shopName: string;
+  legalName: string;
   shopAddress: string;
   shopPhone: string;
   shopNif: string;
@@ -43,6 +47,34 @@ export interface Settings {
   backupDir: string;
   autoBackup: boolean;
   lang: Lang;
+  autoLockMin: number;
+  training: boolean;
+}
+
+export interface Customer {
+  name: string;
+  nif: string;
+  address: string;
+}
+
+export interface CashSession {
+  id: number;
+  openedAt: string;
+  openedBy: string;
+  floatCents: number;
+  closedAt: string | null;
+  closedBy: string | null;
+  expectedCents: number | null;
+  countedCents: number | null;
+  note: string | null;
+}
+
+export interface CashDrawer {
+  session: CashSession | null;
+  moves: { at: string; byName: string; cents: number; reason: string }[];
+  cashCents: number;
+  movesCents: number;
+  expectedCents: number;
 }
 
 export interface Logo {
@@ -69,6 +101,18 @@ export interface SaleLine {
   qty: number;
   unitCents: number;
   vatBp: number;
+  // stored tickets only
+  id?: number;
+  refunded?: number;
+}
+
+export interface Recent {
+  productId: number | null;
+  name: string;
+  unitCents: number;
+  vatBp: number;
+  at: string;
+  times: number;
 }
 
 export interface CartLine extends SaleLine {
@@ -104,8 +148,24 @@ export interface Preview {
   paymentError: string | null;
 }
 
+export interface PrintRow {
+  at: string;
+  copy: boolean;
+  status: 'sent' | 'printed' | 'failed' | 'unknown';
+  detail: string | null;
+}
+
+export interface TicketRef {
+  id: number;
+  number: string;
+  issuedAt: string;
+  totalCents: number;
+  voided: boolean;
+}
+
 export interface TicketRecord {
   id: number;
+  kind: TicketKind;
   number: string;
   issuedAt: string;
   userName: string;
@@ -115,11 +175,24 @@ export interface TicketRecord {
   voidedAt: string | null;
   voidedBy: string | null;
   voidReason: string | null;
+  refundOf: TicketRef | null;
+  refundReason: string | null;
+  refunds: TicketRef[];
   lines: SaleLine[];
+  prints: PrintRow[];
+  customer: Customer | null;
+  training: boolean;
+}
+
+export interface RefundPreview {
+  lines: PLine[];
+  totals: Totals;
+  number: string;
 }
 
 export interface TicketSummary {
   id: number;
+  kind: TicketKind;
   number: string;
   issuedAt: string;
   userName: string;
@@ -127,17 +200,39 @@ export interface TicketSummary {
   itemCount: number;
   paymentMethod: Method;
   voided: boolean;
+  printed: 'printed' | 'unknown' | 'failed' | 'none';
+  invoice: boolean;
 }
 
 export interface Finalized {
   ticket: TicketRecord;
+  duplicate?: boolean;
   printed: boolean;
   printError: string | null;
+  printWarning: string | null;
+}
+
+export interface PrinterEntry {
+  name: string;
+  port: string;
+  driver: string;
+  virtual: boolean;
+  default: boolean;
+}
+
+export interface PrinterStatus {
+  name: string;
+  state: PrinterState;
+  jobs: number;
+  last: PrintRow | null;
 }
 
 export interface Summary {
   totalCents: number;
+  salesCents: number;
+  refundCents: number;
   tickets: number;
+  refunds: number;
   items: number;
   voided: number;
   firstNumber: string | null;
@@ -146,4 +241,9 @@ export interface Summary {
   byDay: { date: string; count: number; totalCents: number }[];
   vat: VatRow[];
   top: { name: string; qty: number; totalCents: number }[];
+  discounts: number;
+  discountCents: number;
+  changed: number;
+  changedCents: number;
+  changes: { issuedAt: string; number: string; userName: string; name: string; qty: number; listCents: number; unitCents: number }[];
 }

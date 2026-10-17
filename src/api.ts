@@ -17,6 +17,14 @@ export function toError(e: unknown): ApiError {
   return new ApiError('E_INTERNAL', raw);
 }
 
+// called when the core says nobody is signed in any more (locked after
+// being left unused, or signed out elsewhere)
+let lost: ((code: string) => void) | null = null;
+
+export function onSessionLost(f: ((code: string) => void) | null) {
+  lost = f;
+}
+
 // In the app this goes over Tauri IPC; in a plain browser it hits the
 // devserver, which runs the same Rust handlers.
 export async function call<T = unknown>(cmd: string, args: object = {}): Promise<T> {
@@ -31,6 +39,8 @@ export async function call<T = unknown>(cmd: string, args: object = {}): Promise
     if (!res.ok) throw body.error;
     return body as T;
   } catch (e) {
-    throw e instanceof ApiError ? e : toError(e);
+    const err = e instanceof ApiError ? e : toError(e);
+    if (lost && (err.code === 'E_SESSION' || err.code === 'E_SESSION_IDLE')) lost(err.code);
+    throw err;
   }
 }

@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { ChartColumn, FileSpreadsheet, Printer } from 'lucide-react';
 import { call } from './api';
-import { addDays, eur, fmt, isoDate, rate, shortDate } from './format';
-import { errorText, getLang, tr } from './i18n';
+import { addDays, dateTime, eur, fmt, isoDate, rate, shortDate } from './format';
+import { errorText, getLang, tr, warningText } from './i18n';
 import { MethodIcon, methodName } from './Tickets';
 import { useToast } from './toast';
 import type { Summary } from './types';
@@ -64,6 +64,16 @@ function weekday(iso: string): string {
   return d.toLocaleDateString(getLang() === 'es' ? 'es-ES' : 'en-GB', { weekday: 'short' });
 }
 
+// long ranges come back per month, "2026-10"
+const isMonth = (key: string) => key.length === 7;
+
+function monthName(key: string, long = false): string {
+  const d = new Date(`${key}-15T12:00:00`);
+  return d.toLocaleDateString(getLang() === 'es' ? 'es-ES' : 'en-GB', long ? { month: 'long', year: 'numeric' } : { month: 'short' });
+}
+
+const period = (key: string) => (isMonth(key) ? monthName(key, true) : `${weekday(key)} ${shortDate(key)}`);
+
 function DayChart({ days }: { days: Summary['byDay'] }) {
   const [hover, setHover] = useState<number | null>(null);
   const top = niceMax(Math.max(...days.map((d) => d.totalCents)));
@@ -84,16 +94,14 @@ function DayChart({ days }: { days: Summary['byDay'] }) {
         <div className="chart-cols" onMouseLeave={() => setHover(null)}>
           {days.map((d, i) => (
             <div key={d.date} className={`chart-col${hover === i ? ' hover' : ''}`} onMouseEnter={() => setHover(i)}>
-              <div className="chart-bar" style={{ height: `${(d.totalCents / top) * 100}%` }}>
+              <div className="chart-bar" style={{ height: `${(Math.max(0, d.totalCents) / top) * 100}%` }}>
                 {i === best && d.totalCents > 0 && hover === null && (
                   <span className="chart-cap">{d.totalCents < 100000 ? eur(d.totalCents) : `${compact(d.totalCents)} €`}</span>
                 )}
               </div>
               {hover === i && (
                 <div className={`chart-tip${i > days.length / 2 ? ' left' : ''}`} role="tooltip">
-                  <b>
-                    {weekday(d.date)} {shortDate(d.date)}
-                  </b>
+                  <b>{period(d.date)}</b>
                   <span>{eur(d.totalCents)}</span>
                   <span className="muted">
                     {d.count} {d.count === 1 ? 'ticket' : 'tickets'}
@@ -106,7 +114,7 @@ function DayChart({ days }: { days: Summary['byDay'] }) {
       </div>
       <div className="chart-x" aria-hidden="true">
         {days.map((d, i) => (
-          <span key={d.date}>{i % showEvery === 0 ? d.date.slice(8, 10) : ''}</span>
+          <span key={d.date}>{i % showEvery === 0 ? (isMonth(d.date) ? monthName(d.date) : d.date.slice(8, 10)) : ''}</span>
         ))}
       </div>
     </div>
@@ -120,28 +128,42 @@ export function Reports() {
   const [sum, setSum] = useState<Summary | null>(null);
   const [table, setTable] = useState(false);
   const [busy, setBusy] = useState(false);
+  const seq = useRef(0);
+  const backwards = range.from > range.to;
 
   useEffect(() => {
     const r = presetRange(preset);
     if (r) setRange(r);
   }, [preset]);
 
+  // only the answer for the range now on screen is shown
   useEffect(() => {
-    if (range.from > range.to) return;
+    const n = ++seq.current;
+    if (backwards) {
+      setSum(null);
+      return;
+    }
     call<Summary>('reports.summary', range)
-      .then(setSum)
-      .catch((e) => toast.error(errorText(e)));
-  }, [range, toast]);
+      .then((s) => n === seq.current && setSum(s))
+      .catch((e) => n === seq.current && toast.error(errorText(e)));
+  }, [range, backwards, toast]);
 
   const methodMax = useMemo(() => Math.max(1, ...(sum?.byMethod ?? []).map((m) => m.totalCents)), [sum]);
 
-  const run = async (cmd: 'reports.print' | 'reports.export') => {
+  const run = async (cmd: 'reports.print' | 'reports.export', kind?: 'vat') => {
     if (busy) return;
     setBusy(true);
     try {
-      const r = await call<{ path?: string } | null>(cmd, range);
-      if (cmd === 'reports.print') toast.ok(tr('Resumen enviado a la impresora', 'Summary sent to the printer'));
-      else toast.ok(`${tr('Exportado a', 'Exported to')} ${r?.path ?? ''}`, { sticky: true });
+      const r = await call<{ path?: string; warning?: string | null }>(cmd, { ...range, kind });
+      if (cmd === 'reports.export') {
+        const name = r.path?.split(/[\\/]/).pop();
+        toast.ok(`${tr('Exportado a', 'Exported to')} ${r.path ?? ''}`, {
+          sticky: true,
+          action: { label: tr('Abrir carpeta', 'Open folder'), run: () => call('app.reveal', { what: 'exports', name }).catch((e) => toast.error(errorText(e))) },
+        });
+      }
+      else if (r.warning) toast.info(warningText(r.warning));
+      else toast.ok(tr('Resumen enviado a la impresora', 'Summary sent to the printer'));
     } catch (e) {
       toast.error(errorText(e));
     } finally {
@@ -149,7 +171,7 @@ export function Reports() {
     }
   };
 
-  const avg = sum && sum.tickets ? Math.round(sum.totalCents / sum.tickets) : 0;
+  const avg = sum && sum.tickets ? Math.round(sum.salesCents / sum.tickets) : 0;
 
   return (
     <div className="page">
@@ -166,9 +188,13 @@ export function Reports() {
             <Printer size={16} />
             {tr('Imprimir resumen', 'Print summary')}
           </button>
-          <button className="btn" onClick={() => run('reports.export')} disabled={busy || !sum}>
+          <button className="btn" onClick={() => run('reports.export')} disabled={busy || !sum} title={tr('Una fila por artículo vendido', 'One row per item sold')}>
             <FileSpreadsheet size={16} />
             {tr('Exportar CSV', 'Export CSV')}
+          </button>
+          <button className="btn" onClick={() => run('reports.export', 'vat')} disabled={busy || !sum} title={tr('Una fila por ticket con base y cuota de cada IVA, para la gestoría', 'One row per ticket with net and VAT per rate, for the accountant')}>
+            <FileSpreadsheet size={16} />
+            {tr('Libro de IVA', 'VAT book')}
           </button>
         </div>
       </div>
@@ -190,12 +216,24 @@ export function Reports() {
         )}
       </div>
 
+      {backwards && (
+        <div className="card">
+          <Empty icon={<ChartColumn size={28} />} title={tr('La fecha inicial es posterior a la final', 'The start date is after the end date')} />
+        </div>
+      )}
+
       {sum && (
         <>
           <div className="stats">
             <div className="stat hero">
-              <span>{tr('Ventas', 'Sales')}</span>
+              <span>{sum.refunds > 0 ? tr('Ventas netas', 'Net sales') : tr('Ventas', 'Sales')}</span>
               <b>{eur(sum.totalCents)}</b>
+              {sum.refunds > 0 && (
+                <small>
+                  {eur(sum.salesCents)} {tr('vendido', 'sold')} · {eur(sum.refundCents)} {tr('en', 'in')} {sum.refunds}{' '}
+                  {sum.refunds === 1 ? tr('devolución', 'return') : tr('devoluciones', 'returns')}
+                </small>
+              )}
               {sum.voided > 0 && (
                 <small>
                   {sum.voided} {sum.voided === 1 ? tr('ticket anulado no incluido', 'voided ticket excluded') : tr('tickets anulados no incluidos', 'voided tickets excluded')}
@@ -216,7 +254,7 @@ export function Reports() {
             </div>
           </div>
 
-          {sum.tickets === 0 ? (
+          {sum.tickets === 0 && sum.refunds === 0 ? (
             <div className="card">
               <Empty icon={<ChartColumn size={28} />} title={tr('Sin ventas en este periodo', 'No sales in this period')} />
             </div>
@@ -225,7 +263,7 @@ export function Reports() {
               {sum.byDay.length > 1 && (
                 <div className="card span2">
                   <div className="card-head">
-                    <h2>{tr('Ventas por día', 'Sales per day')}</h2>
+                    <h2>{isMonth(sum.byDay[0]?.date ?? '') ? tr('Ventas por mes', 'Sales per month') : tr('Ventas por día', 'Sales per day')}</h2>
                     <button className="link" onClick={() => setTable(!table)}>
                       {table ? tr('Ver gráfico', 'Show chart') : tr('Ver tabla', 'Show table')}
                     </button>
@@ -235,7 +273,7 @@ export function Reports() {
                       <table className="table compact">
                         <thead>
                           <tr>
-                            <th>{tr('Día', 'Day')}</th>
+                            <th>{isMonth(sum.byDay[0]?.date ?? '') ? tr('Mes', 'Month') : tr('Día', 'Day')}</th>
                             <th className="num">Tickets</th>
                             <th className="num">{tr('Ventas', 'Sales')}</th>
                           </tr>
@@ -243,9 +281,7 @@ export function Reports() {
                         <tbody>
                           {sum.byDay.map((d) => (
                             <tr key={d.date}>
-                              <td>
-                                {weekday(d.date)} {shortDate(d.date)}
-                              </td>
+                              <td>{period(d.date)}</td>
                               <td className="num">{d.count}</td>
                               <td className="num">{eur(d.totalCents)}</td>
                             </tr>
@@ -274,7 +310,7 @@ export function Reports() {
                         </small>
                       </div>
                       <div className="hbar-track">
-                        <div className="hbar-fill" style={{ width: `${(m.totalCents / methodMax) * 100}%` }} />
+                        {m.totalCents > 0 && <div className="hbar-fill" style={{ width: `${(m.totalCents / methodMax) * 100}%` }} />}
                       </div>
                       <b className="hbar-value">{eur(m.totalCents)}</b>
                     </div>
@@ -307,6 +343,55 @@ export function Reports() {
                   </tbody>
                 </table>
               </div>
+
+              {(sum.discounts > 0 || sum.changed > 0) && (
+                <div className="card span2">
+                  <div className="card-head">
+                    <h2>{tr('Descuentos y cambios de precio', 'Discounts and price changes')}</h2>
+                  </div>
+                  <div className="given">
+                    {sum.discounts > 0 && (
+                      <span>
+                        {tr('Descuentos', 'Discounts')}: <b>{sum.discounts}</b> · {eur(sum.discountCents)}
+                      </span>
+                    )}
+                    {sum.changed > 0 && (
+                      <span>
+                        {tr('Precios cambiados en caja', 'Prices changed at the till')}: <b>{sum.changed}</b> · {eur(sum.changedCents)}
+                      </span>
+                    )}
+                  </div>
+                  {sum.changes.length > 0 && (
+                    <table className="table compact">
+                      <thead>
+                        <tr>
+                          <th>{tr('Fecha', 'Date')}</th>
+                          <th>Ticket</th>
+                          <th>{tr('Producto', 'Product')}</th>
+                          <th>{tr('Atendió', 'Cashier')}</th>
+                          <th className="num">{tr('Catálogo', 'Catalogue')}</th>
+                          <th className="num">{tr('Cobrado', 'Charged')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {sum.changes.map((c, i) => (
+                          <tr key={`${c.number}-${i}`}>
+                            <td>{dateTime(c.issuedAt)}</td>
+                            <td className="mono">{c.number}</td>
+                            <td>
+                              {c.qty > 1 ? `${c.qty} × ` : ''}
+                              {c.name}
+                            </td>
+                            <td>{c.userName}</td>
+                            <td className="num muted">{fmt(c.listCents)}</td>
+                            <td className="num strong">{fmt(c.unitCents)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              )}
 
               <div className={`card${sum.byDay.length > 1 ? ' span2' : ''}`}>
                 <div className="card-head">

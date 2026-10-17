@@ -1,5 +1,6 @@
 import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import { CircleCheck, Info, TriangleAlert, X } from 'lucide-react';
+import { tr } from './i18n';
 
 type Kind = 'ok' | 'error' | 'info';
 
@@ -31,7 +32,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const push = useCallback(
     (kind: Kind, text: string, o: Opts = {}) => {
       const id = next.current++;
-      setItems((xs) => [...xs.slice(-3), { id, kind, text, ...o }]);
+      // a sticky message (a ticket that did not print) stays until it is
+      // dealt with; only passing messages make room for new ones
+      setItems((xs) => {
+        const sticky = xs.filter((x) => x.sticky).slice(-3);
+        const passing = xs.filter((x) => !x.sticky).slice(-2);
+        return [...sticky, ...passing, { id, kind, text, ...o }];
+      });
       if (!o.sticky) setTimeout(() => close(id), kind === 'error' ? 8000 : o.action ? 6000 : 3500);
     },
     [close],
@@ -49,9 +56,9 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={api}>
       {children}
-      <div className="toasts" role="status" aria-live="polite">
+      <div className="toasts">
         {items.map((t) => (
-          <div key={t.id} className={`toast ${t.kind}`}>
+          <div key={t.id} className={`toast ${t.kind}`} role={t.kind === 'error' ? 'alert' : 'status'}>
             {t.kind === 'ok' ? <CircleCheck size={18} /> : t.kind === 'error' ? <TriangleAlert size={18} /> : <Info size={18} />}
             <span className="toast-text">{t.text}</span>
             {t.action && (
@@ -65,7 +72,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
                 {t.action.label}
               </button>
             )}
-            <button className="toast-x" aria-label="Cerrar" onClick={() => close(t.id)}>
+            <button className="toast-x" aria-label={tr('Cerrar', 'Close')} onClick={() => close(t.id)}>
               <X size={15} />
             </button>
           </div>

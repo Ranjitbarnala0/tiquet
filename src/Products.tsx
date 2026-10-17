@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { Archive, FileSpreadsheet, Package, Plus, Search, Star } from 'lucide-react';
+import { Archive, FileSpreadsheet, Package, Plus, Search, Star, Trash2 } from 'lucide-react';
 import { call } from './api';
 import { parseCsv, toProducts, type ProductIn } from './csv';
-import { eur, fmt, norm, parseMoney, rate } from './format';
+import { eur, fmt, norm, parseMoney, rate, VAT_RATES } from './format';
 import { errorText, tr } from './i18n';
 import { useToast } from './toast';
 import type { Product, Settings } from './types';
 import { Drawer, Empty, Field, Modal, Toggle } from './ui';
 
-const RATES = [2100, 1000, 400, 0];
+// a long catalogue is searched, not scrolled; drawing thousands of rows only
+// slows the screen down
+const SHOW = 300;
 
 interface Draft {
   id: number;
@@ -26,8 +28,9 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
   const [q, setQ] = useState('');
   const [archived, setArchived] = useState(false);
   const [edit, setEdit] = useState<Draft | null>(null);
+  const [opened, setOpened] = useState('');
   const [busy, setBusy] = useState(false);
-  const [importing, setImporting] = useState<{ file: string; rows: ProductIn[]; skipped: number } | null>(null);
+  const [importing, setImporting] = useState<{ file: string; rows: ProductIn[]; skipped: number; columns: string[] } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(() => {
@@ -45,12 +48,14 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
 
   const archivedCount = (all ?? []).filter((p) => !p.active).length;
 
-  const open = (p?: Product) =>
-    setEdit(
-      p
-        ? { id: p.id, name: p.name, price: fmt(p.priceCents), vatBp: p.vatBp, barcode: p.barcode, favorite: p.favorite, active: p.active }
-        : { id: 0, name: '', price: '', vatBp: settings.defaultVatBp, barcode: '', favorite: false, active: true },
-    );
+  const open = (p?: Product) => {
+    const d = p
+      ? { id: p.id, name: p.name, price: fmt(p.priceCents), vatBp: p.vatBp, barcode: p.barcode, favorite: p.favorite, active: p.active }
+      : { id: 0, name: '', price: '', vatBp: settings.defaultVatBp, barcode: '', favorite: false, active: true };
+    setEdit(d);
+    setOpened(JSON.stringify(d));
+  };
+  const dirty = !!edit && JSON.stringify(edit) !== opened;
 
   const price = edit ? parseMoney(edit.price || '0') : null;
   const valid = !!edit && edit.name.trim().length > 0 && price !== null && price >= 0;
@@ -87,6 +92,24 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
     }
   };
 
+  // never sold: gone for good; on tickets already: archived, so those tickets
+  // keep its name
+  const del = async (d: Draft) => {
+    if (busy || !d.id) return;
+    setBusy(true);
+    try {
+      const r = await call<{ deleted: boolean }>('products.delete', { id: d.id });
+      toast.ok(r.deleted ? tr('Producto eliminado', 'Product deleted') : tr('Ya tenía ventas: se ha archivado para conservar el historial', 'It had sales: archived to keep the history'));
+      setEdit(null);
+      load();
+      onChanged();
+    } catch (e) {
+      toast.error(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const toggleFav = async (p: Product) => {
     try {
       await call('products.save', { ...p, favorite: !p.favorite });
@@ -100,7 +123,7 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
   const pickFile = async (f: File | undefined) => {
     if (!f) return;
     const text = await f.text();
-    const r = toProducts(parseCsv(text), settings.defaultVatBp);
+    const r = toProducts(parseCsv(text));
     if (!r.rows.length) {
       toast.error(tr('No se encontraron productos en el archivo', 'No products found in the file'));
       return;
@@ -186,7 +209,7 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
               </tr>
             </thead>
             <tbody>
-              {shown.map((p) => (
+              {shown.slice(0, SHOW).map((p) => (
                 <tr key={p.id} onClick={() => open(p)} className="clickable">
                   <td className="w-star">
                     <button
@@ -211,19 +234,31 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
             </tbody>
           </table>
         )}
+        {shown.length > SHOW && (
+          <p className="cap-note">
+            {tr(`Se muestran ${SHOW} de ${shown.length}. Busca por nombre o código para encontrar el resto.`, `Showing ${SHOW} of ${shown.length}. Search by name or code to find the rest.`)}
+          </p>
+        )}
       </div>
 
       {edit && (
         <Drawer
           title={edit.id ? tr('Editar producto', 'Edit product') : tr('Nuevo producto', 'New product')}
+          dirty={dirty}
           onClose={() => setEdit(null)}
           footer={
             <>
               {edit.id ? (
-                <button className="btn btn-ghost" onClick={() => save(edit, { active: !edit.active })} disabled={busy}>
-                  <Archive size={16} />
-                  {edit.active ? tr('Archivar', 'Archive') : tr('Restaurar', 'Restore')}
-                </button>
+                <div className="row-gap">
+                  <button className="btn btn-danger-ghost" onClick={() => del(edit)} disabled={busy} title={tr('Si ya se vendió, se archiva', 'If it was sold, it is archived')}>
+                    <Trash2 size={16} />
+                    {tr('Eliminar', 'Delete')}
+                  </button>
+                  <button className="btn btn-ghost" onClick={() => save(edit, { active: !edit.active })} disabled={busy}>
+                    <Archive size={16} />
+                    {edit.active ? tr('Archivar', 'Archive') : tr('Restaurar', 'Restore')}
+                  </button>
+                </div>
               ) : (
                 <span />
               )}
@@ -250,7 +285,7 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
               </Field>
               <Field label="IVA">
                 <select value={edit.vatBp} onChange={(e) => setEdit({ ...edit, vatBp: Number(e.target.value) })}>
-                  {[...new Set([...RATES, edit.vatBp])].map((r) => (
+                  {[...new Set([...VAT_RATES, edit.vatBp])].map((r) => (
                     <option key={r} value={r}>
                       {rate(r)}
                     </option>
@@ -298,8 +333,16 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
             {importing.skipped > 0 &&
               ` · ${tr(`se ignoran ${importing.skipped} fila(s) sin nombre o precio`, `${importing.skipped} row(s) without a name or price will be skipped`)}`}
             .{' '}
-            {tr('Si un producto ya existe (mismo código o nombre) se actualiza su precio.', 'Existing products (same code or name) get their price updated.')}
+            {tr(
+              'Si un producto ya existe (mismo código o nombre) se actualiza; lo que el archivo no trae, como el código o el IVA, se queda como estaba.',
+              'Existing products (same code or name) are updated; anything the file does not have, such as the code or the VAT, stays as it was.',
+            )}
           </p>
+          {importing.columns.length > 0 && (
+            <p className="muted small">
+              {tr('Columnas usadas', 'Columns used')}: <b>{importing.columns.join(' · ')}</b>
+            </p>
+          )}
           <div className="table-card inset">
             <table className="table compact">
               <thead>
@@ -314,8 +357,8 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
                 {importing.rows.slice(0, 8).map((r, i) => (
                   <tr key={i}>
                     <td>{r.name}</td>
-                    <td className="mono muted">{r.barcode || '-'}</td>
-                    <td className="num">{rate(r.vatBp)}</td>
+                    <td className="mono muted">{r.barcode ?? tr('sin cambio', 'unchanged')}</td>
+                    <td className="num">{r.vatBp === undefined ? <span className="muted">{tr('sin cambio', 'unchanged')}</span> : rate(r.vatBp)}</td>
                     <td className="num">{eur(r.priceCents)}</td>
                   </tr>
                 ))}

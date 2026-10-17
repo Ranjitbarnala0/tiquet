@@ -9,8 +9,12 @@ export function fmt(cents: number): string {
 
 export const eur = (cents: number) => `${fmt(cents)} €`;
 
-// Accepts "12,5", "12.50", "1.234,56", "1234" and "-2". Returns cents.
-export function parseMoney(input: string): number | null {
+// the core's limit for one unit price (99.999,99 EUR)
+export const MAX_PRICE = 9_999_999;
+
+// Accepts "12,5", "12.50", "1.234,56", "1234" and "-2". Returns cents, or
+// null for anything unreadable or above `max`.
+export function parseMoney(input: string, max = MAX_PRICE): number | null {
   let s = input.replace(/[€\s]/g, '');
   if (!s) return null;
   const neg = s.startsWith('-');
@@ -29,9 +33,12 @@ export function parseMoney(input: string): number | null {
   int = int.replace(/[.,]/g, '');
   if (!int && !frac) return null;
   const cents = Number(int || '0') * 100 + Number(frac.padEnd(2, '0'));
-  if (!Number.isFinite(cents) || cents > 999_999_999) return null;
+  if (!Number.isFinite(cents) || cents > max) return null;
   return neg ? -cents : cents;
 }
+
+// Spanish VAT rates, general first; the core accepts anything 0-100 %
+export const VAT_RATES = [2100, 1000, 500, 400, 0];
 
 export function rate(bp: number): string {
   return `${(bp / 100).toLocaleString('es-ES')}%`;

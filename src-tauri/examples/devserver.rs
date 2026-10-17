@@ -4,7 +4,6 @@
 //
 //   cargo run --example devserver --features devserver -- 1430 ../devdata
 
-use std::io::Read;
 use std::path::PathBuf;
 
 use serde_json::{json, Value};
@@ -17,6 +16,9 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let port: u16 = args.next().and_then(|p| p.parse().ok()).unwrap_or(1430);
     let dir = PathBuf::from(args.next().unwrap_or_else(|| "devdata".into()));
+    if std::env::var_os("TIQUET_DOCUMENTS").is_none() {
+        std::env::set_var("TIQUET_DOCUMENTS", dir.join("documentos"));
+    }
     let sink = match std::env::var("TIQUET_PRINTER").as_deref() {
         Ok("spooler") => PrintSink::Spooler,
         _ => PrintSink::Dir(dir.join("prints")),
@@ -30,6 +32,16 @@ fn main() {
             let _ = req.respond(Response::from_string("not found").with_status_code(404));
             continue;
         };
+        // a page on another site must not be able to drive this from the
+        // developer's browser: JSON only (which forces a CORS preflight it
+        // never gets), and only from localhost
+        let header = |name: &'static str| req.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.as_str().to_string());
+        let local = header("Origin").map_or(true, |o| o.starts_with("http://localhost:") || o.starts_with("http://127.0.0.1:"));
+        let json_body = header("Content-Type").is_some_and(|c| c.starts_with("application/json"));
+        if !local || !json_body {
+            let _ = req.respond(Response::from_string("forbidden").with_status_code(403));
+            continue;
+        }
         let mut body = String::new();
         let parsed = match req.as_reader().read_to_string(&mut body) {
             Ok(_) if body.trim().is_empty() => Ok(json!({})),

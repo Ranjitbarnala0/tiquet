@@ -15,17 +15,19 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+// anything the code did not anticipate still arrives as a code the UI can
+// name, with the system's own words kept as the detail
 macro_rules! wrap {
-    ($($t:ty),*) => {$(
+    ($($t:ty => $code:literal),*) => {$(
         impl From<$t> for Error {
             fn from(e: $t) -> Self {
-                Error(e.to_string())
+                Error(format!("{}:{e}", $code))
             }
         }
     )*};
 }
 
-wrap!(rusqlite::Error, serde_json::Error, std::io::Error);
+wrap!(rusqlite::Error => "E_DB", serde_json::Error => "E_INTERNAL", std::io::Error => "E_IO");
 
 pub fn fail<T>(code: impl Into<String>) -> Result<T> {
     Err(Error(code.into()))

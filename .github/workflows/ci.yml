@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: cargo-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      - run: npm ci
+
+      # type check and the bundle the Rust side embeds
+      - run: npm run build
+
+      - name: Core tests
+        working-directory: src-tauri
+        run: cargo test --lib --locked
+
+      - name: Lint
+        working-directory: src-tauri
+        run: |
+          rustup component add clippy
+          cargo clippy --lib --tests --locked -- -D warnings

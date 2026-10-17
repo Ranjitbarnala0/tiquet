@@ -1,5 +1,7 @@
 # Tiquet
 
+[![CI](https://github.com/Ranjitbarnala0/tiquet/actions/workflows/ci.yml/badge.svg)](https://github.com/Ranjitbarnala0/tiquet/actions/workflows/ci.yml)
+
 Point-of-sale ticket printing for small shops. A Windows desktop app that prints receipts on ESC/POS thermal printers (80 mm and 58 mm), works fully offline and keeps every sale in a local database.
 
 Built for a phone accessories shop in Spain that was printing tickets from a 1990s-style program with an advert in the footer. Tiquet prints the same kind of ticket, with the shop's own logo and none of the noise.
@@ -14,22 +16,31 @@ Built for a phone accessories shop in Spain that was printing tickets from a 199
 
 ## Install
 
-1. Download `Tiquet_1.0.0_x64-setup.exe` from [Releases](../../releases/latest).
+Runs on Windows 10 and 11 (64-bit). No administrator rights are needed: it installs for the current Windows user.
+
+1. Download `Tiquet_1.1.0_x64-setup.exe` from [Releases](../../releases/latest). The installer is built on a clean GitHub machine by the [release workflow](.github/workflows/release.yml), which also starts the built app once before publishing; the release lists its SHA-256.
 2. Run it. The installer is not code-signed yet, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then **Run anyway**.
-3. On first start, enter the shop details and create the administrator account.
-4. **Ajustes > Impresora**: pick the ticket printer and press **Imprimir página de prueba**.
+3. On first start, enter the shop details (the NIF is checked) and create the administrator account. Write down or print the **recovery code** it shows: it is the only way back in if the administrator password is forgotten.
+4. The receipt printer is picked automatically when it is clearly the only one (a POS, thermal or receipt printer, or a known brand). To choose it by hand, or to change it, use **Ajustes > Impresora** (**Detectar** looks again), then press **Imprimir página de prueba**. The interface starts in the language Windows uses.
+
+Upgrading from 1.0: run the new installer over it. On first start the database is copied to `%LOCALAPPDATA%\TiquetData`, checked, and only then is the old file renamed to `tiquet.db.moved`; a copy of the 1.0 database is also kept in `TiquetData\migraciones`.
 
 The printer must be installed in Windows (with the manufacturer's driver or "Generic / Text Only"). If accents print as strange symbols, press **Prueba de caracteres** and choose the line that reads correctly.
 
 ## What it does
 
 - **Selling at keyboard speed.** One search box for everything: type a name, scan a barcode, `3*cable` for three units, `funda 12,50` for an item at any price, or just `12,50`. Enter adds, F12 charges, Ctrl+Z undoes.
+- **Anything, by hand.** The big **+ Artículo** button (F4), or the card in the middle of an empty ticket, adds any item with its own name, price, quantity and VAT, and can save it as a product on the way. Tapping a line changes its name, price, quantity or VAT, and can update the product's price too.
+- **Products at hand.** Below the ticket: **Recientes** (what was sold lately, catalogue or not), **Favoritos** and **Todos**, one tap to add. **Repetir** puts the items of any earlier ticket into a new sale.
 - **Exact preview.** The ticket on the right is rendered from the same lines that are sent to the printer, so what you see is what prints, including change and VAT.
-- **Payments.** Cash with quick amounts and change, card, Bizum. Opens the cash drawer on cash sales.
-- **Tickets that cannot be edited.** Numbered per year without gaps (`T2026-000001`). Issued tickets can be reprinted as a copy or voided with a reason, never edited or deleted; the database enforces it.
-- **Admin.** Products (with CSV import from any spreadsheet), users with roles, sales reports by day, payment method and VAT rate, a printable daily summary, CSV export for the accountant.
-- **Shop identity.** Logo or photo on the ticket (converted to black and white for thermal paper), header, footer, numbering prefix.
-- **Never loses a sale.** The sale is stored before printing; if the printer is off, the ticket can be printed again. The cart survives a crash or power cut. A database backup is taken every day.
+- **Payments.** Cash with quick amounts and change, card, Bizum. Opens the cash drawer on cash sales. A barcode scanned while the payment window is open adds the item; it never confirms a payment.
+- **Tickets that cannot be edited.** Numbered per year without gaps (`T2026-000001`). Issued tickets can be reprinted or voided the same day with a reason, never edited or deleted; the database enforces it.
+- **Returns and invoices.** A return is its own rectifying ticket (`TR2026-...`) that points at the sale, line by line. A sale can carry the customer's name, NIF and address as a full invoice (`TF2026-...`); over 3.000 € it must.
+- **Printing that tells the truth.** A ticket counts as printed once Windows has let go of it. If the printer is off or out of paper the job is cancelled, so nothing prints and no drawer opens later on its own. The first print is the original; every other one says COPIA.
+- **Cash drawer.** Opening float, cash in and out with a reason, and a closing count against what the sales say, with a printed Z report.
+- **Admin.** Products (CSV import that picks the sale price and keeps barcodes), users with roles, sales reports by day or month, discounts and price changes made at the till, a printable summary, CSV export and a VAT book (libro de IVA) for the accountant. Training mode for learning: its sales never count and can be wiped.
+- **Shop identity.** Logo or photo on the ticket (converted to black and white for thermal paper), trade name and owner's name, header, footer, numbering prefix.
+- **Never loses a sale.** The sale is stored, with a full disk sync, before printing. The cart survives a crash or power cut and is never charged twice. A restored backup never reuses a ticket number already handed out. A database backup is taken every day and can be restored from Ajustes.
 - **Spanish and English** interface. Tickets always print in Spanish.
 
 ## Keyboard
@@ -38,6 +49,7 @@ The printer must be installed in Windows (with the manufacturer's driver or "Gen
 | --- | --- |
 | Enter | Add the highlighted result; on an empty search, charge |
 | F12 | Charge |
+| F4 | Add an item by hand |
 | F1 / F2 / F3 | Cash / card / Bizum while charging |
 | Enter / Shift+Enter | Print the ticket / save without printing |
 | Ctrl+Z | Undo the last change to the ticket |
@@ -47,11 +59,11 @@ The printer must be installed in Windows (with the manufacturer's driver or "Gen
 
 ## Where the data lives
 
-- Database: `%LOCALAPPDATA%\es.tiquet.caja\tiquet.db` (SQLite).
-- Backups: `Documents\Tiquet\Copias de seguridad`, one per day, last 60 kept. The folder can be changed in Ajustes.
+- Database and activity log: `%LOCALAPPDATA%\TiquetData` (`tiquet.db`, SQLite, and `tiquet.log`). Uninstalling Tiquet never deletes it.
+- Backups: `Documents\Tiquet\Copias de seguridad`, one per day, last 60 kept. The folder can be changed in Ajustes, for example to a USB drive.
 - Exports: `Documents\Tiquet\Exportaciones`.
 
-To restore a backup, close Tiquet, delete `tiquet.db-wal` and `tiquet.db-shm` if they exist, and copy the backup file over `tiquet.db`.
+To restore a backup, use **Ajustes > Datos y copias > Restaurar una copia**. The current data is copied aside first. If the database ever fails to open, Tiquet shows the backups it can restore on its start screen.
 
 ## Build from source
 
@@ -78,7 +90,8 @@ Tests: `cargo test` in `src-tauri` (add `-- --ignored` to also push a job throug
 - **Tauri 2** shell, **Rust** core, **React** UI, **SQLite** storage. It runs on the WebView2 runtime that ships with Windows 11; on an older Windows 10 the installer fetches it.
 - The UI never computes money. Totals, VAT and the ticket layout come from the core, which renders the ticket once into fixed-width lines; the same lines feed the on-screen preview and the ESC/POS encoder.
 - Printing goes straight to the Windows spooler as a raw job (`RAW` for classic drivers, `XPS_PASS` for v4 drivers), with code page selection, Chinese-mode cancel for generic printers, logo raster, cut and drawer pulse.
-- Passwords are hashed with Argon2id. Five wrong attempts lock that user for 30 seconds. Roles are checked in the core, not only in the UI.
+- Passwords are hashed with Argon2id. Five wrong attempts lock that user, for 30 seconds and then twice as long each time up to 15 minutes, and the lock survives a restart. Administrator passwords need 6 characters. The till locks itself after a configurable idle time. Roles are checked in the core, not only in the UI.
+- Every push runs the core tests, the type check and clippy on Windows ([CI](.github/workflows/ci.yml)).
 
 ## Not in this version
 

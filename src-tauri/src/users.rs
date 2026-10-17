@@ -72,6 +72,26 @@ pub fn credentials(conn: &Connection, id: i64) -> Result<Option<(SessionUser, St
         .optional()?)
 }
 
+// a PIN is fine for a cashier; whoever can void, refund and manage users
+// needs at least six characters
+fn strong_enough(role: &str, password: &str) -> Result<()> {
+    let n = password.chars().count();
+    if role == "admin" && n < 6 {
+        return fail("E_INVALID:adminPassword");
+    }
+    if n < 4 {
+        return fail("E_INVALID:password");
+    }
+    Ok(())
+}
+
+pub fn set_password(conn: &Connection, id: i64, password: &str) -> Result<()> {
+    let role: String = conn.query_row("SELECT role FROM users WHERE id = ?1", [id], |r| r.get(0))?;
+    strong_enough(&role, password)?;
+    conn.execute("UPDATE users SET pass_hash = ?1 WHERE id = ?2", params![auth::hash(password)?, id])?;
+    Ok(())
+}
+
 pub fn save(conn: &Connection, u: UserIn) -> Result<UserRow> {
     let name = u.name.split_whitespace().collect::<Vec<_>>().join(" ");
     if name.is_empty() || name.chars().count() > 40 {
@@ -81,8 +101,8 @@ pub fn save(conn: &Connection, u: UserIn) -> Result<UserRow> {
         return fail("E_INVALID:role");
     }
     let new_pw = !u.password.is_empty();
-    if (u.id.is_none() || new_pw) && u.password.chars().count() < 4 {
-        return fail("E_INVALID:password");
+    if u.id.is_none() || new_pw {
+        strong_enough(&u.role, &u.password)?;
     }
     let taken: Option<i64> = conn
         .query_row(

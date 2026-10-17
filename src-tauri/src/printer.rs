@@ -1,22 +1,313 @@
 use std::path::Path;
+use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
 use crate::error::{fail, Error, Result};
 use crate::state::PrintSink;
 
-#[derive(Serialize)]
-pub struct Printers {
-    pub printers: Vec<String>,
-    pub default: Option<String>,
+// A job the queue has not started printing in this long is cancelled: the
+// printer is off, unplugged or waiting for someone. Cancelling means nothing
+// comes out hours later on its own, drawer kick included.
+const STALL: Duration = Duration::from_secs(10);
+// a job still printing after this is left to finish and reported as slow
+const SLOW: Duration = Duration::from_secs(20);
+const TICK: Duration = Duration::from_millis(150);
+// the spooler's status lags a little when a job starts
+const GRACE: Duration = Duration::from_millis(1500);
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Entry {
+    pub name: String,
+    pub port: String,
+    pub driver: String,
+    #[serde(rename = "virtual")]
+    pub is_virtual: bool,
+    pub default: bool,
 }
 
-pub fn list() -> Printers {
-    let (printers, default) = win::list();
-    Printers { printers, default }
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    // none | missing | virtual | ready | offline | paper | paused | error | unknown
+    pub state: &'static str,
+    pub jobs: u32,
 }
 
-pub fn send(sink: &PrintSink, printer: &str, doc: &str, data: &[u8]) -> Result<()> {
+impl Status {
+    fn of(state: &'static str) -> Status {
+        Status { state, jobs: 0 }
+    }
+}
+
+// PDF and XPS writers, OneNote and fax queues accept a job and then ask
+// where to save it or render garbage: they can never print an ESC/POS ticket
+pub fn is_virtual(name: &str, port: &str, driver: &str) -> bool {
+    let all = format!("{name} {port} {driver}").to_lowercase();
+    ["portprompt:", "file:", "nul:", "xpsport", "pdf", "xps", "onenote", "fax"]
+        .iter()
+        .any(|k| all.contains(k))
+}
+
+const ATTR_WORK_OFFLINE: u32 = 0x400;
+const ST_PAUSED: u32 = 0x1;
+const ST_ERROR: u32 = 0x2;
+const ST_PAPER_JAM: u32 = 0x8;
+const ST_PAPER_OUT: u32 = 0x10;
+const ST_PAPER_PROBLEM: u32 = 0x40;
+const ST_OFFLINE: u32 = 0x80;
+const ST_NOT_AVAILABLE: u32 = 0x1000;
+const ST_USER_INTERVENTION: u32 = 0x10_0000;
+const ST_DOOR_OPEN: u32 = 0x40_0000;
+const ST_SERVER_OFFLINE: u32 = 0x200_0000;
+
+fn classify(attributes: u32, status: u32) -> &'static str {
+    if attributes & ATTR_WORK_OFFLINE != 0 || status & (ST_OFFLINE | ST_SERVER_OFFLINE | ST_NOT_AVAILABLE) != 0 {
+        "offline"
+    } else if status & (ST_PAPER_OUT | ST_PAPER_JAM | ST_PAPER_PROBLEM) != 0 {
+        "paper"
+    } else if status & ST_PAUSED != 0 {
+        "paused"
+    } else if status & (ST_ERROR | ST_DOOR_OPEN | ST_USER_INTERVENTION) != 0 {
+        "error"
+    } else {
+        "ready"
+    }
+}
+
+const JOB_PAUSED: u32 = 0x1;
+const JOB_ERROR: u32 = 0x2;
+const JOB_DELETING: u32 = 0x4;
+const JOB_PRINTING: u32 = 0x10;
+const JOB_OFFLINE: u32 = 0x20;
+const JOB_PAPEROUT: u32 = 0x40;
+const JOB_PRINTED: u32 = 0x80;
+const JOB_DELETED: u32 = 0x100;
+const JOB_BLOCKED: u32 = 0x200;
+const JOB_INTERVENTION: u32 = 0x400;
+const JOB_COMPLETE: u32 = 0x1000;
+
+fn job_problem(st: u32) -> Option<&'static str> {
+    if st & (JOB_DELETING | JOB_DELETED) != 0 {
+        Some("cancelled")
+    } else if st & JOB_OFFLINE != 0 {
+        Some("offline")
+    } else if st & JOB_PAPEROUT != 0 {
+        Some("paper")
+    } else if st & JOB_PAUSED != 0 {
+        Some("paused")
+    } else if st & (JOB_ERROR | JOB_BLOCKED | JOB_INTERVENTION) != 0 {
+        Some("error")
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Watch {
+    // the job left the queue or says printed
+    Done,
+    // still printing when we stopped waiting
+    Slow,
+    // stopped before any of it printed: cancelled, nothing will come out
+    Failed(&'static str),
+    // stopped after it had started printing: part of it may be on paper
+    Partial(&'static str),
+}
+
+// Follows one job in the Windows queue. `look` gives the job's status bits,
+// or None once it has left the queue; `printer` the queue's own state.
+fn watch(mut look: impl FnMut() -> Option<u32>, mut printer: impl FnMut() -> &'static str, stall: Duration, slow: Duration, tick: Duration) -> Watch {
+    let start = Instant::now();
+    let mut printing = false;
+    loop {
+        let Some(st) = look() else { return Watch::Done };
+        if st & (JOB_PRINTED | JOB_COMPLETE) != 0 {
+            return Watch::Done;
+        }
+        printing |= st & JOB_PRINTING != 0;
+        let queue = if start.elapsed() >= GRACE.min(stall) { printer() } else { "ready" };
+        let problem = job_problem(st).or(match queue {
+            "offline" | "paper" | "paused" | "error" => Some(queue),
+            _ => None,
+        });
+        let waited = start.elapsed();
+        match problem {
+            Some(kind) if printing => return Watch::Partial(kind),
+            Some(kind) => return Watch::Failed(kind),
+            None if !printing && waited >= stall => return Watch::Failed("stalled"),
+            None if printing && waited >= slow => return Watch::Slow,
+            None => std::thread::sleep(tick),
+        }
+    }
+}
+
+// One thread per kind of spooler work, for the life of the app. A spooler
+// that hangs holds that one thread; later requests time out instead of
+// piling up more threads, and a print that could not start in time is
+// dropped rather than printed after the cashier was told it failed.
+type Task = (Instant, Box<dyn FnOnce() + Send>);
+
+struct Lane(Mutex<mpsc::Sender<Task>>);
+
+impl Lane {
+    fn new() -> Lane {
+        let (tx, rx) = mpsc::channel::<Task>();
+        std::thread::spawn(move || {
+            for (deadline, task) in rx {
+                if Instant::now() <= deadline {
+                    task();
+                }
+            }
+        });
+        Lane(Mutex::new(tx))
+    }
+
+    // Some(answer), or None with whether the work had started
+    fn run<T: Send + 'static>(&self, start: Duration, total: Duration, f: impl FnOnce() -> T + Send + 'static) -> std::result::Result<T, bool> {
+        let (tx, rx) = mpsc::channel();
+        let began = Arc::new(AtomicBool::new(false));
+        let flag = began.clone();
+        let task = Box::new(move || {
+            flag.store(true, Ordering::SeqCst);
+            let _ = tx.send(f());
+        });
+        let sent = self.0.lock().unwrap_or_else(|e| e.into_inner()).send((Instant::now() + start, task));
+        if sent.is_err() {
+            return Err(false);
+        }
+        rx.recv_timeout(total).map_err(|_| began.load(Ordering::SeqCst))
+    }
+}
+
+fn print_lane() -> &'static Lane {
+    static L: OnceLock<Lane> = OnceLock::new();
+    L.get_or_init(Lane::new)
+}
+
+fn status_lane() -> &'static Lane {
+    static L: OnceLock<Lane> = OnceLock::new();
+    L.get_or_init(Lane::new)
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Detected {
+    pub best: Option<String>,
+    pub columns: u32,
+    pub candidates: Vec<String>,
+}
+
+// Which installed printer is the receipt printer, for a new PC or the
+// Detectar button. PDF, XPS and fax queues never qualify; a name, driver or
+// port that says POS, receipt, thermal, a receipt brand, 58/80 mm or USB
+// counts for it, an office printer brand against it. Only a clear winner is
+// picked; a tie is left for the person to choose.
+pub fn detect(entries: &[Entry]) -> Detected {
+    const RECEIPT: &[&str] = &[
+        "pos", "receipt", "ticket", "tickets", "thermal", "termica", "tm", "escpos", "xprinter", "premier", "itp", "bixolon",
+        "citizen", "sewoo", "rongta", "hprt", "zjiang", "gprinter", "posbank", "custom", "metapace", "sam4s", "star",
+    ];
+    const OFFICE: &[&str] = &[
+        "laserjet", "deskjet", "officejet", "envy", "pixma", "ecotank", "workforce", "brother", "canon", "samsung", "lexmark",
+        "ricoh", "kyocera", "xerox", "sharp", "konica", "oki", "mfp", "pcl", "postscript",
+    ];
+    let mut scored: Vec<(i32, &Entry, bool)> = Vec::new();
+    for e in entries.iter().filter(|e| !e.is_virtual) {
+        let all = format!("{} {} {}", e.name, e.driver, e.port).to_lowercase();
+        // name and driver often repeat each other: each word counts once
+        let mut words: Vec<&str> = all.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+        words.sort_unstable();
+        words.dedup();
+        let mut score = 0;
+        for w in &words {
+            let digits = |p: &str| w.strip_prefix(p).is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()));
+            if RECEIPT.contains(w) || digits("pos") || digits("itp") || digits("tm") || matches!(*w, "58mm" | "80mm" | "58" | "80") {
+                score += 10;
+            }
+            if OFFICE.contains(w) {
+                score -= 10;
+            }
+        }
+        if all.contains("generic / text only") {
+            score += 5;
+        }
+        if e.port.to_lowercase().starts_with("usb") {
+            score += 3;
+        }
+        let narrow = words.iter().any(|w| w.contains("58"));
+        if score > 0 {
+            scored.push((score, e, narrow));
+        }
+    }
+    scored.sort_by_key(|s| std::cmp::Reverse(s.0));
+    let clear = match scored.as_slice() {
+        [(top, ..), (next, ..), ..] => top > next,
+        [_] => true,
+        [] => false,
+    };
+    Detected {
+        best: clear.then(|| scored[0].1.name.clone()),
+        columns: if clear && scored[0].2 { 32 } else { 48 },
+        candidates: scored.iter().map(|(_, e, _)| e.name.clone()).collect(),
+    }
+}
+
+pub fn list() -> Vec<Entry> {
+    let (rows, default) = win::list();
+    let mut out: Vec<Entry> = rows
+        .into_iter()
+        .map(|(name, port, driver)| Entry {
+            is_virtual: is_virtual(&name, &port, &driver),
+            default: default.as_deref() == Some(name.as_str()),
+            name,
+            port,
+            driver,
+        })
+        .collect();
+    out.sort_by(|a, b| a.is_virtual.cmp(&b.is_virtual).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
+    out
+}
+
+// What the queue says. An idle queue's state can be stale (Windows refreshes
+// it while a job prints), so it informs the cashier but never blocks a print.
+pub fn status(sink: &PrintSink, name: &str) -> Status {
+    let name = name.trim();
+    if name.is_empty() {
+        return Status::of("none");
+    }
+    match sink {
+        PrintSink::Dir(_) => Status::of("ready"),
+        PrintSink::Spooler => {
+            let n = name.to_string();
+            match status_lane().run(Duration::from_secs(2), Duration::from_secs(3), move || win::info(&n)) {
+                Err(_) => Status::of("unknown"),
+                Ok(Err(_)) => Status::of("missing"),
+                Ok(Ok(i)) if is_virtual(name, &i.port, &i.driver) => Status { state: "virtual", jobs: i.jobs },
+                Ok(Ok(i)) => Status { state: classify(i.attributes, i.status), jobs: i.jobs },
+            }
+        }
+    }
+}
+
+// Ok(None): printed. Ok(Some("W_PRINT_SLOW")): still printing when we
+// stopped waiting. E_PRINT:<why>: nothing printed and nothing is left in the
+// queue. E_PRINT:partial-<why> and E_PRINT:timeout: part or all of it may be
+// on paper, so the next print of that ticket must be marked as a copy.
+pub fn send(sink: &PrintSink, printer: &str, doc: &str, data: &[u8]) -> Result<Option<String>> {
+    let printer = printer.trim();
+    if printer.is_empty() {
+        return fail("E_NO_PRINTER");
+    }
+    match status(sink, printer).state {
+        "missing" => return fail(format!("E_PRINTER_MISSING:{printer}")),
+        "virtual" => return fail(format!("E_PRINTER_VIRTUAL:{printer}")),
+        _ => {}
+    }
     match sink {
         PrintSink::Dir(dir) => {
             std::fs::create_dir_all(dir)?;
@@ -26,19 +317,58 @@ pub fn send(sink: &PrintSink, printer: &str, doc: &str, data: &[u8]) -> Result<(
                 .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
                 .collect();
             std::fs::write(dir.join(format!("{stamp}-{name}.bin")), data)?;
-            Ok(())
+            Ok(None)
         }
         PrintSink::Spooler => {
-            if printer.trim().is_empty() {
-                return fail("E_NO_PRINTER");
+            let (p, d, b) = (printer.to_string(), doc.to_string(), data.to_vec());
+            match print_lane().run(Duration::from_secs(4), STALL + SLOW + Duration::from_secs(5), move || spool(&p, &d, &b, None)) {
+                Ok(r) => r.map_err(Error),
+                Err(true) => fail("E_PRINT:timeout"),
+                Err(false) => fail("E_PRINT:busy"),
             }
-            raw(printer, doc, data, None)
         }
     }
 }
 
-pub fn raw(printer: &str, doc: &str, data: &[u8], out_file: Option<&Path>) -> Result<()> {
-    win::raw(printer, doc, data, out_file).map_err(|e| Error(format!("E_PRINT:{e}")))
+// For a drawer kick after a sale saved without printing: the sale does not
+// wait for it, and if the printer is off the job is cancelled, never left to
+// open the drawer later on its own.
+pub fn send_detached(sink: &PrintSink, printer: &str, doc: &str, data: &[u8]) {
+    let printer = printer.trim().to_string();
+    if printer.is_empty() {
+        return;
+    }
+    match sink {
+        PrintSink::Dir(_) => {
+            let _ = send(sink, &printer, doc, data);
+        }
+        PrintSink::Spooler => {
+            let (d, b) = (doc.to_string(), data.to_vec());
+            let task = Box::new(move || {
+                if let Err(e) = spool(&printer, &d, &b, None) {
+                    crate::log::warn(format!("{d} on {printer}: {e}"));
+                }
+            });
+            let _ = print_lane().0.lock().unwrap_or_else(|e| e.into_inner()).send((Instant::now() + Duration::from_secs(4), task));
+        }
+    }
+}
+
+fn spool(printer: &str, doc: &str, data: &[u8], out_file: Option<&Path>) -> std::result::Result<Option<String>, String> {
+    let job = win::submit(printer, doc, data, out_file).map_err(|e| format!("E_PRINT:{e}"))?;
+    let q = win::Queue::open(printer).map_err(|e| format!("E_PRINT:{e}"))?;
+    match watch(|| q.job(job), || q.state(), STALL, SLOW, TICK) {
+        Watch::Done => Ok(None),
+        Watch::Slow => Ok(Some("W_PRINT_SLOW".into())),
+        Watch::Failed(why) => {
+            q.cancel(job);
+            Err(format!("E_PRINT:{why}"))
+        }
+        Watch::Partial(why) => {
+            q.cancel(job);
+            Err(format!("E_PRINT:partial-{why}"))
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -49,10 +379,19 @@ mod win {
 
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Graphics::Printing::{
-        ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW, GetPrinterDriverW,
-        OpenPrinterW, StartDocPrinterW, StartPagePrinter, WritePrinter, DOC_INFO_1W, DRIVER_INFO_2W,
-        PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL, PRINTER_INFO_4W,
+        AbortPrinter, ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW, GetJobW,
+        GetPrinterDriverW, GetPrinterW, OpenPrinterW, SetJobW, StartDocPrinterW, StartPagePrinter, WritePrinter,
+        DOC_INFO_1W, DRIVER_INFO_2W, JOB_CONTROL_DELETE, JOB_INFO_1W, PRINTER_ENUM_CONNECTIONS, PRINTER_ENUM_LOCAL,
+        PRINTER_INFO_2W,
     };
+
+    pub struct Info {
+        pub port: String,
+        pub driver: String,
+        pub attributes: u32,
+        pub status: u32,
+        pub jobs: u32,
+    }
 
     fn wide(s: &str) -> Vec<u16> {
         s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -73,25 +412,24 @@ mod win {
         std::io::Error::last_os_error().to_string()
     }
 
-    pub fn list() -> (Vec<String>, Option<String>) {
-        let mut names = Vec::new();
+    pub fn list() -> (Vec<(String, String, String)>, Option<String>) {
+        let mut rows = Vec::new();
         let flags = PRINTER_ENUM_LOCAL | PRINTER_ENUM_CONNECTIONS;
         unsafe {
             let (mut needed, mut count) = (0u32, 0u32);
-            EnumPrintersW(flags, null(), 4, null_mut(), 0, &mut needed, &mut count);
+            EnumPrintersW(flags, null(), 2, null_mut(), 0, &mut needed, &mut count);
             if needed > 0 {
-                // u64 backing keeps the PRINTER_INFO_4W array pointer-aligned
+                // u64 backing keeps the PRINTER_INFO_2W array pointer-aligned
                 let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
-                if EnumPrintersW(flags, null(), 4, buf.as_mut_ptr() as *mut u8, needed, &mut needed, &mut count) != 0 {
-                    let infos = std::slice::from_raw_parts(buf.as_ptr() as *const PRINTER_INFO_4W, count as usize);
+                if EnumPrintersW(flags, null(), 2, buf.as_mut_ptr() as *mut u8, needed, &mut needed, &mut count) != 0 {
+                    let infos = std::slice::from_raw_parts(buf.as_ptr() as *const PRINTER_INFO_2W, count as usize);
                     for i in infos {
-                        names.push(from_wide(i.pPrinterName));
+                        rows.push((from_wide(i.pPrinterName), from_wide(i.pPortName), from_wide(i.pDriverName)));
                     }
                 }
             }
         }
-        names.sort_by_key(|n| n.to_lowercase());
-        (names, default_printer())
+        (rows, default_printer())
     }
 
     fn default_printer() -> Option<String> {
@@ -109,6 +447,82 @@ mod win {
         }
     }
 
+    // an open queue handle, closed on drop
+    pub struct Queue(HANDLE);
+
+    impl Queue {
+        pub fn open(name: &str) -> Result<Queue, String> {
+            let w = wide(name);
+            let mut h: HANDLE = null_mut();
+            unsafe {
+                if OpenPrinterW(w.as_ptr(), &mut h, null()) == 0 {
+                    return Err(last_error());
+                }
+            }
+            Ok(Queue(h))
+        }
+
+        pub fn info(&self) -> Result<Info, String> {
+            unsafe {
+                let mut needed = 0u32;
+                GetPrinterW(self.0, 2, null_mut(), 0, &mut needed);
+                if needed == 0 {
+                    return Err(last_error());
+                }
+                let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+                if GetPrinterW(self.0, 2, buf.as_mut_ptr() as *mut u8, needed, &mut needed) == 0 {
+                    return Err(last_error());
+                }
+                let p = &*(buf.as_ptr() as *const PRINTER_INFO_2W);
+                Ok(Info {
+                    port: from_wide(p.pPortName),
+                    driver: from_wide(p.pDriverName),
+                    attributes: p.Attributes,
+                    status: p.Status,
+                    jobs: p.cJobs,
+                })
+            }
+        }
+
+        pub fn state(&self) -> &'static str {
+            self.info().map(|i| super::classify(i.attributes, i.status)).unwrap_or("error")
+        }
+
+        // the job's status bits, or None once the queue no longer has it
+        pub fn job(&self, id: u32) -> Option<u32> {
+            unsafe {
+                let mut needed = 0u32;
+                GetJobW(self.0, id, 1, null_mut(), 0, &mut needed);
+                if needed == 0 {
+                    return None;
+                }
+                let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
+                if GetJobW(self.0, id, 1, buf.as_mut_ptr() as *mut u8, needed, &mut needed) == 0 {
+                    return None;
+                }
+                Some((*(buf.as_ptr() as *const JOB_INFO_1W)).Status)
+            }
+        }
+
+        pub fn cancel(&self, id: u32) {
+            unsafe {
+                SetJobW(self.0, id, 0, null(), JOB_CONTROL_DELETE);
+            }
+        }
+    }
+
+    impl Drop for Queue {
+        fn drop(&mut self) {
+            unsafe {
+                ClosePrinter(self.0);
+            }
+        }
+    }
+
+    pub fn info(name: &str) -> Result<Info, String> {
+        Queue::open(name)?.info()
+    }
+
     unsafe fn driver_version(h: HANDLE) -> u32 {
         let mut needed = 0u32;
         GetPrinterDriverW(h, null(), 2, null_mut(), 0, &mut needed);
@@ -124,19 +538,14 @@ mod win {
 
     // RAW hands the bytes straight to the port on classic (v3) drivers. A v4
     // (XPS) driver accepts a RAW job and then silently drops it, so those get
-    // XPS_PASS, their pass-through datatype.
-    pub fn raw(printer: &str, doc: &str, data: &[u8], out_file: Option<&Path>) -> Result<(), String> {
-        let name = wide(printer);
+    // XPS_PASS, their pass-through datatype. Returns the job id.
+    pub fn submit(printer: &str, doc: &str, data: &[u8], out_file: Option<&Path>) -> Result<u32, String> {
+        let q = Queue::open(printer)?;
         let doc_w = wide(doc);
         let out_w = out_file.map(|p| wide(&p.to_string_lossy()));
         unsafe {
-            let mut h: HANDLE = null_mut();
-            if OpenPrinterW(name.as_ptr(), &mut h, null()) == 0 {
-                return Err(last_error());
-            }
             let mut first_err = None;
-            let mut result = Err(String::new());
-            let order = if driver_version(h) >= 4 { ["XPS_PASS", "RAW"] } else { ["RAW", "XPS_PASS"] };
+            let order = if driver_version(q.0) >= 4 { ["XPS_PASS", "RAW"] } else { ["RAW", "XPS_PASS"] };
             for dtype in order {
                 let dtype_w = wide(dtype);
                 let info = DOC_INFO_1W {
@@ -144,19 +553,25 @@ mod win {
                     pOutputFile: out_w.as_ref().map_or(null_mut(), |o| o.as_ptr() as *mut u16),
                     pDatatype: dtype_w.as_ptr() as *mut u16,
                 };
-                if StartDocPrinterW(h, 1, &info) == 0 {
+                let job = StartDocPrinterW(q.0, 1, &info);
+                if job == 0 {
                     first_err.get_or_insert_with(last_error);
                     continue;
                 }
-                result = write_job(h, data);
-                EndDocPrinter(h);
-                break;
+                // a half-written job must never reach the paper: abort it
+                // instead of ending it
+                return match write_job(q.0, data) {
+                    Ok(()) => {
+                        EndDocPrinter(q.0);
+                        Ok(job)
+                    }
+                    Err(e) => {
+                        AbortPrinter(q.0);
+                        Err(e)
+                    }
+                };
             }
-            ClosePrinter(h);
-            match (result, first_err) {
-                (Err(e), Some(first)) if e.is_empty() => Err(first),
-                (r, _) => r,
-            }
+            Err(first_err.unwrap_or_default())
         }
     }
 
@@ -180,36 +595,164 @@ mod win {
 mod win {
     use std::path::Path;
 
-    pub fn list() -> (Vec<String>, Option<String>) {
+    pub struct Info {
+        pub port: String,
+        pub driver: String,
+        pub attributes: u32,
+        pub status: u32,
+        pub jobs: u32,
+    }
+
+    pub struct Queue;
+
+    impl Queue {
+        pub fn open(_: &str) -> Result<Queue, String> {
+            Err("printing needs Windows".into())
+        }
+        pub fn state(&self) -> &'static str {
+            "error"
+        }
+        pub fn job(&self, _: u32) -> Option<u32> {
+            None
+        }
+        pub fn cancel(&self, _: u32) {}
+    }
+
+    pub fn list() -> (Vec<(String, String, String)>, Option<String>) {
         (Vec::new(), None)
     }
 
-    pub fn raw(_: &str, _: &str, _: &[u8], _: Option<&Path>) -> Result<(), String> {
+    pub fn info(_: &str) -> Result<Info, String> {
+        Err("printing needs Windows".into())
+    }
+
+    pub fn submit(_: &str, _: &str, _: &[u8], _: Option<&Path>) -> Result<u32, String> {
         Err("printing needs Windows".into())
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use super::*;
+
+    #[test]
+    fn virtual_queues_are_recognised() {
+        assert!(is_virtual("Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF"));
+        assert!(is_virtual("Microsoft XPS Document Writer", "PORTPROMPT:", "Microsoft XPS Document Writer v4"));
+        assert!(is_virtual("OneNote (Desktop)", "nul:", "Send to Microsoft OneNote 16 Driver"));
+        assert!(is_virtual("Fax", "SHRFAX:", "Microsoft Shared Fax Driver"));
+        assert!(!is_virtual("POS-80", "USB001", "POS-80C"));
+        assert!(!is_virtual("Premier ITP-73", "USB002", "Generic / Text Only"));
+    }
+
+    #[test]
+    fn the_receipt_printer_is_found_among_the_others() {
+        let e = |name: &str, port: &str, driver: &str| Entry {
+            name: name.into(),
+            port: port.into(),
+            driver: driver.into(),
+            is_virtual: is_virtual(name, port, driver),
+            default: false,
+        };
+        let office = e("HP LaserJet Pro M404", "WSD-1234", "HP Universal Printing PCL 6");
+        let pdf = e("Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF");
+        let pos = e("POS-80C", "USB001", "POS-80C");
+        let found = detect(&[office.clone(), pdf.clone(), pos]);
+        assert_eq!((found.best.as_deref(), found.columns), (Some("POS-80C"), 48));
+        let small = e("Impresora tickets 58mm", "USB002", "Generic / Text Only");
+        assert_eq!(detect(&[office.clone(), small]).columns, 32);
+        // nothing that looks like a receipt printer: nothing is picked
+        assert_eq!(detect(&[office.clone(), pdf]).best, None);
+        // two equally likely: the person chooses
+        let two = detect(&[e("POS-80", "USB001", "POS-80"), e("XP-80", "USB002", "Xprinter XP-80")]);
+        assert_eq!((two.best, two.candidates.len()), (None, 2));
+        assert_eq!(detect(&[e("Premier ITP-73", "USB001", "ITP-73")]).best.as_deref(), Some("Premier ITP-73"));
+    }
+
+    #[test]
+    fn spooler_state_maps_to_what_the_cashier_needs_to_know() {
+        assert_eq!(classify(0, 0), "ready");
+        assert_eq!(classify(ATTR_WORK_OFFLINE, 0), "offline");
+        assert_eq!(classify(0, ST_OFFLINE | ST_PAPER_OUT), "offline");
+        assert_eq!(classify(0, ST_PAPER_OUT), "paper");
+        assert_eq!(classify(0, ST_PAUSED), "paused");
+        assert_eq!(classify(0, ST_DOOR_OPEN), "error");
+    }
+
+    // a job is followed through a scripted series of queue states
+    fn run(states: &[Option<u32>], queue: &'static str) -> Watch {
+        let mut it = states.iter().copied();
+        let last = *states.last().unwrap();
+        let ms = Duration::from_millis;
+        watch(move || it.next().unwrap_or(last), move || queue, ms(60), ms(90), ms(5))
+    }
+
+    #[test]
+    fn a_job_is_only_printed_when_the_queue_lets_go_of_it() {
+        assert_eq!(run(&[Some(0x8), Some(JOB_PRINTING), None], "ready"), Watch::Done);
+        assert_eq!(run(&[Some(JOB_PRINTED)], "ready"), Watch::Done);
+        // unplugged or switched off: nothing printed, the job is cancelled
+        assert_eq!(run(&[Some(0), Some(JOB_OFFLINE)], "ready"), Watch::Failed("offline"));
+        assert_eq!(run(&[Some(JOB_PAPEROUT)], "ready"), Watch::Failed("paper"));
+        assert_eq!(run(&[Some(0)], "ready"), Watch::Failed("stalled"));
+        // the paper ran out halfway: some of it is out there
+        assert_eq!(run(&[Some(JOB_PRINTING), Some(JOB_PRINTING | JOB_ERROR)], "ready"), Watch::Partial("error"));
+        assert_eq!(run(&[Some(JOB_PRINTING)], "ready"), Watch::Slow);
+        assert_eq!(run(&[Some(JOB_DELETING)], "ready"), Watch::Failed("cancelled"));
+    }
+
+    #[test]
+    fn a_hung_lane_answers_without_running_late_work() {
+        let lane = Lane::new();
+        let ms = Duration::from_millis;
+        let ran = Arc::new(AtomicBool::new(false));
+        let busy = Arc::new(AtomicBool::new(false));
+        // the lane is stuck on the first job; the second times out before
+        // it can start and must never run afterwards
+        let b = busy.clone();
+        let _ = lane.run(ms(5000), ms(1), move || {
+            b.store(true, Ordering::SeqCst);
+            std::thread::sleep(ms(300));
+        });
+        let t = Instant::now();
+        while !busy.load(Ordering::SeqCst) && t.elapsed() < ms(2000) {
+            std::thread::sleep(ms(1));
+        }
+        let flag = ran.clone();
+        assert_eq!(lane.run(ms(50), ms(80), move || flag.store(true, Ordering::SeqCst)), Err(false));
+        std::thread::sleep(ms(400));
+        assert!(!ran.load(Ordering::SeqCst));
+        assert_eq!(lane.run(ms(50), ms(500), || 7), Ok(7));
+    }
+
+    #[test]
+    fn a_missing_queue_is_refused_before_anything_is_spooled() {
+        let err = send(&PrintSink::Spooler, "Tiquet no existe", "x", b"x").unwrap_err().0;
+        assert_eq!(err, "E_PRINTER_MISSING:Tiquet no existe");
+        assert_eq!(send(&PrintSink::Spooler, "  ", "x", b"x").unwrap_err().0, "E_NO_PRINTER");
+    }
+
+    #[test]
+    fn virtual_queue_is_refused() {
+        let pdf = list().into_iter().find(|p| p.is_virtual);
+        if let Some(p) = pdf {
+            let err = send(&PrintSink::Spooler, &p.name, "x", b"x").unwrap_err().0;
+            assert_eq!(err, format!("E_PRINTER_VIRTUAL:{}", p.name));
+        }
+    }
 
     // Every Windows install ships "Microsoft Print to PDF". With an output
     // file set the spooler writes the job there instead of prompting, so the
-    // whole OpenPrinter/StartDoc/WritePrinter path runs without paper.
+    // whole path runs without paper: submit, follow the job until the queue
+    // lets go of it, and the bytes arrive untouched.
     #[test]
     #[ignore = "talks to the Windows spooler"]
     fn spooler_passes_bytes_through_untouched() {
         let out = std::env::temp_dir().join(format!("tiquet-spool-{}.bin", std::process::id()));
         let _ = std::fs::remove_file(&out);
         let data: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
-        super::raw("Microsoft Print to PDF", "tiquet-test", &data, Some(&out)).unwrap();
-        for _ in 0..100 {
-            if std::fs::metadata(&out).is_ok_and(|m| m.len() as usize >= data.len()) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
+        assert_eq!(spool("Microsoft Print to PDF", "tiquet-test", &data, Some(&out)), Ok(None));
         assert_eq!(std::fs::read(&out).unwrap(), data);
-        assert!(super::list().printers.iter().any(|p| p == "Microsoft Print to PDF"));
+        let _ = std::fs::remove_file(&out);
     }
 }

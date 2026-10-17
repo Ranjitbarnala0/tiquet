@@ -26,6 +26,51 @@ fn yes() -> bool {
     true
 }
 
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct Recent {
+    pub product_id: Option<i64>,
+    pub name: String,
+    pub unit_cents: i64,
+    pub vat_bp: i64,
+    pub at: String,
+    pub times: i64,
+}
+
+// What was sold lately, from the catalogue or typed by hand, newest first:
+// one tap sells it again at the same price.
+pub fn recent(conn: &Connection, limit: i64) -> Result<Vec<Recent>> {
+    let mut stmt = conn.prepare(
+        "SELECT CASE WHEN p.active = 1 THEN l.product_id END, l.name, l.unit_cents, l.vat_bp, MAX(t.issued_at), COUNT(*)
+         FROM ticket_lines l JOIN tickets t ON t.id = l.ticket_id LEFT JOIN products p ON p.id = l.product_id
+         WHERE t.kind = 'sale' AND t.training = 0 AND t.voided_at IS NULL AND l.unit_cents > 0
+         GROUP BY l.name, l.unit_cents, l.vat_bp
+         ORDER BY MAX(t.id) DESC LIMIT ?1",
+    )?;
+    let rows = stmt
+        .query_map([limit.clamp(1, 60)], |r| {
+            Ok(Recent { product_id: r.get(0)?, name: r.get(1)?, unit_cents: r.get(2)?, vat_bp: r.get(3)?, at: r.get(4)?, times: r.get(5)? })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+// A product never sold goes for good. One that is on tickets is archived
+// instead, so those tickets and the reports keep its name. Returns whether it
+// was really deleted.
+pub fn delete(conn: &Connection, id: i64) -> Result<bool> {
+    let sold: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM ticket_lines WHERE product_id = ?1)", [id], |r| r.get(0))?;
+    let n = if sold {
+        conn.execute("UPDATE products SET active = 0, favorite = 0 WHERE id = ?1", [id])?
+    } else {
+        conn.execute("DELETE FROM products WHERE id = ?1", [id])?
+    };
+    if n == 0 {
+        return fail("E_NOT_FOUND");
+    }
+    Ok(!sold)
+}
+
 #[derive(Serialize, Debug, Default)]
 pub struct Imported {
     pub inserted: usize,
@@ -106,12 +151,36 @@ pub fn save(conn: &Connection, mut p: Product) -> Result<Product> {
     Ok(p)
 }
 
+// one row of an imported sheet; a column the sheet does not have is None
+// and leaves that field of an existing product as it was
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportRow {
+    pub name: String,
+    pub price_cents: i64,
+    #[serde(default)]
+    pub vat_bp: Option<i64>,
+    #[serde(default)]
+    pub barcode: Option<String>,
+}
+
 // re-importing the same sheet updates prices instead of duplicating rows:
 // a row matches by barcode when it has one, otherwise by name
-pub fn import(conn: &mut Connection, rows: Vec<Product>) -> Result<Imported> {
+pub fn import(conn: &mut Connection, rows: Vec<ImportRow>, default_vat: i64) -> Result<Imported> {
     let tx = conn.transaction()?;
     let mut out = Imported::default();
-    for mut p in rows {
+    for row in rows {
+        let (vat, code) = (row.vat_bp, row.barcode.clone());
+        let mut p = Product {
+            id: 0,
+            name: row.name,
+            price_cents: row.price_cents,
+            vat_bp: row.vat_bp.unwrap_or(default_vat),
+            barcode: row.barcode.unwrap_or_default(),
+            favorite: false,
+            active: true,
+            sold_qty: 0,
+        };
         check(&mut p)?;
         let existing: Option<i64> = if p.barcode.is_empty() {
             tx.query_row(
@@ -130,10 +199,11 @@ pub fn import(conn: &mut Connection, rows: Vec<Product>) -> Result<Imported> {
         };
         match existing {
             Some(id) => {
+                let code = code.map(|_| p.barcode.clone());
                 tx.execute(
-                    "UPDATE products SET name = ?1, price_cents = ?2, vat_bp = ?3, barcode = ?4,
+                    "UPDATE products SET name = ?1, price_cents = ?2, vat_bp = COALESCE(?3, vat_bp), barcode = COALESCE(?4, barcode),
                      updated_at = strftime('%Y-%m-%dT%H:%M:%S', 'now', 'localtime') WHERE id = ?5",
-                    params![p.name, p.price_cents, p.vat_bp, p.barcode, id],
+                    params![p.name, p.price_cents, vat, code, id],
                 )?;
                 out.updated += 1;
             }
@@ -172,4 +242,24 @@ pub fn seed(conn: &Connection) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_name_and_price_sheet_keeps_barcodes_and_vat() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let mut conn = crate::db::open(&std::env::temp_dir().join(format!("tiquet-prod-{n}")).join("t.db")).unwrap();
+        let p = Product { id: 0, name: "Pilas AA".into(), price_cents: 450, vat_bp: 1000, barcode: "8410000000017".into(), favorite: true, active: true, sold_qty: 0 };
+        save(&conn, p).unwrap();
+        let row = |name: &str, price, vat, code: Option<&str>| ImportRow { name: name.into(), price_cents: price, vat_bp: vat, barcode: code.map(Into::into) };
+        let r = import(&mut conn, vec![row("pilas aa", 495, None, None), row("Funda", 995, None, None)], 2100).unwrap();
+        assert_eq!((r.inserted, r.updated), (1, 1));
+        let all = list(&conn, true).unwrap();
+        let pilas = all.iter().find(|p| p.price_cents == 495).unwrap();
+        assert_eq!((pilas.vat_bp, pilas.barcode.as_str(), pilas.favorite), (1000, "8410000000017", true));
+        assert_eq!(all.iter().find(|p| p.name == "Funda").unwrap().vat_bp, 2100);
+    }
 }
