@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { ChartColumn, FlaskConical, Lock, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet } from 'lucide-react';
+import { BadgeCheck, ChartColumn, FlaskConical, Lock, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet } from 'lucide-react';
 import { call } from './api';
 import { Cash } from './Cash';
 import { initials } from './format';
@@ -12,12 +12,13 @@ import { SettingsScreen } from './SettingsScreen';
 import { Tickets } from './Tickets';
 import { useToast } from './toast';
 import type { ItemDraft } from './ItemDialog';
-import type { Logo, Product, Settings, TicketRecord, User } from './types';
+import type { Logo, Product, Settings, TicketRecord, User, VerifactuStatus } from './types';
 import { Mark, Modal } from './ui';
 import { Users } from './Users';
+import { sendError, stuck } from './Verifactu';
 
 type Screen = 'sale' | 'tickets' | 'cash' | 'products' | 'reports' | 'users' | 'settings';
-export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'data';
+export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'data' | 'verifactu';
 
 interface Props {
   installId: string;
@@ -39,6 +40,7 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [leave, setLeave] = useState<null | (() => void)>(null);
   const [incoming, setIncoming] = useState<{ lines: ItemDraft[]; from: string; n: number } | null>(null);
+  const [vf, setVf] = useState<VerifactuStatus | null>(null);
   const admin = user.role === 'admin';
 
   const loadProducts = useCallback(() => {
@@ -103,6 +105,23 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
   useEffect(() => {
     if (!admin && screen !== 'sale' && screen !== 'tickets' && screen !== 'cash') setScreen('sale');
   }, [admin, screen]);
+
+  // records that cannot reach the AEAT are shown to whoever is at the till
+  // (OM HAC/1177/2024 art. 16); selling goes on regardless
+  const vfOn = !!settings && settings.verifactu !== 'off';
+  useEffect(() => {
+    if (!vfOn) {
+      setVf(null);
+      return;
+    }
+    const load = () =>
+      call<VerifactuStatus>('verifactu.status')
+        .then(setVf)
+        .catch(() => {});
+    load();
+    const t = setInterval(load, 60_000);
+    return () => clearInterval(t);
+  }, [vfOn]);
 
   // a backup that failed is told to the admin at sign-in, not left in Ajustes
   useEffect(() => {
@@ -239,24 +258,42 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
           </button>
         </div>
       </header>
-      {settings.training && (
-        <div className="training-bar" role="status">
-          <FlaskConical size={16} />
-          <span>{tr('Modo prueba: las ventas no son reales, salen marcadas y no cuentan en ningún informe.', 'Training mode: sales are not real, print marked and never count in any report.')}</span>
-          {admin && (
-            <button
-              className="btn btn-ghost sm"
-              onClick={() =>
-                call<Settings>('settings.save', { training: false })
-                  .then(setSettings)
-                  .catch((e) => toast.error(errorText(e)))
-              }
-            >
-              {tr('Salir del modo prueba', 'Leave training mode')}
-            </button>
-          )}
-        </div>
-      )}
+      <div className="bars">
+        {vf && stuck(vf) && (
+          <div className={`vf-bar${vf.problems.length > 0 ? ' bad' : ''}`} role="status">
+            <BadgeCheck size={16} />
+            <span>
+              {vf.problems.length > 0
+                ? tr(`VERI*FACTU: la AEAT pide corregir ${vf.problems.length} registro(s).`, `VERI*FACTU: the AEAT asks for ${vf.problems.length} record(s) to be corrected.`)
+                : tr(`VERI*FACTU: ${vf.pending} registro(s) sin enviar a la AEAT.`, `VERI*FACTU: ${vf.pending} record(s) not sent to the AEAT yet.`)}{' '}
+              {sendError(vf.lastError)?.text}
+            </span>
+            {admin && (
+              <button className="btn btn-ghost sm" onClick={() => go('settings', 'verifactu')}>
+                {tr('Ver', 'View')}
+              </button>
+            )}
+          </div>
+        )}
+        {settings.training && (
+          <div className="training-bar" role="status">
+            <FlaskConical size={16} />
+            <span>{tr('Modo prueba: las ventas no son reales, salen marcadas y no cuentan en ningún informe.', 'Training mode: sales are not real, print marked and never count in any report.')}</span>
+            {admin && (
+              <button
+                className="btn btn-ghost sm"
+                onClick={() =>
+                  call<Settings>('settings.save', { training: false })
+                    .then(setSettings)
+                    .catch((e) => toast.error(errorText(e)))
+                }
+              >
+                {tr('Salir del modo prueba', 'Leave training mode')}
+              </button>
+            )}
+          </div>
+        )}
+      </div>
       <main className="main">
         <Sale
           cartKey={`tiquet.cart.${installId}.${user.id}`}

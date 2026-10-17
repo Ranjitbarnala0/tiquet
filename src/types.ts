@@ -49,6 +49,8 @@ export interface Settings {
   lang: Lang;
   autoLockMin: number;
   training: boolean;
+  verifactu: 'off' | 'test' | 'prod';
+  cert: string;
 }
 
 export interface Customer {
@@ -119,7 +121,51 @@ export interface CartLine extends SaleLine {
   key: string;
 }
 
-export type PLine = { t: 'text'; text: string; bold: boolean; size: 'normal' | 'tall' | 'big' } | { t: 'logo' };
+export type PLine =
+  | { t: 'text'; text: string; bold: boolean; size: 'normal' | 'tall' | 'big' }
+  | { t: 'logo' }
+  | { t: 'qr'; rows: string[]; module: number };
+
+// where a ticket's billing record stands with the AEAT
+export interface TicketAeat {
+  env: 'test' | 'prod';
+  state: 'pending' | 'Correcto' | 'AceptadoConErrores' | 'Incorrecto';
+  code: string | null;
+  message: string | null;
+  csv: string | null;
+}
+
+export interface VerifactuProblem {
+  recordId: number;
+  ticketId: number;
+  kind: 'alta' | 'anulacion';
+  number: string;
+  env: 'test' | 'prod';
+  state: 'AceptadoConErrores' | 'Incorrecto';
+  code: string | null;
+  message: string | null;
+  at: string;
+}
+
+export interface VerifactuStatus {
+  env: 'test' | 'prod' | null;
+  producer: boolean;
+  pending: number;
+  oldest: string | null;
+  sent: number;
+  problems: VerifactuProblem[];
+  lastSend: string | null;
+  lastError: string | null;
+  clockDrift: number | null;
+}
+
+export interface CertEntry {
+  thumbprint: string;
+  name: string;
+  issuer: string;
+  expires: string;
+  valid: boolean;
+}
 
 export interface VatRow {
   vatBp: number;
@@ -182,6 +228,8 @@ export interface TicketRecord {
   prints: PrintRow[];
   customer: Customer | null;
   training: boolean;
+  qr: string | null;
+  aeat: TicketAeat | null;
 }
 
 export interface RefundPreview {

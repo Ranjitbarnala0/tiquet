@@ -9,6 +9,7 @@ use crate::money::{div_round, fmt, fmt_rate};
 use crate::reports::Summary;
 use crate::settings::Settings;
 use crate::tickets::{compute, now, Customer, Payment, SaleLine, ShopInfo, TicketRecord, Totals};
+use crate::verifactu;
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -23,6 +24,8 @@ pub enum Size {
 pub enum Line {
     Text { text: String, bold: bool, size: Size },
     Logo,
+    // the AEAT's QR: rows of modules ('1' dark) and the printer dots per module
+    Qr { rows: Vec<String>, module: usize },
 }
 
 pub fn len(s: &str) -> usize {
@@ -160,6 +163,13 @@ impl Doc {
         self.lines.push(Line::Logo);
     }
 
+    // between 30 and 40 mm, with four modules of white around it
+    pub fn qr(&mut self, rows: Vec<String>) {
+        let paper = (self.cols * 12).min(576);
+        let module = verifactu::module_dots(rows.len()).min(paper / (rows.len() + 8)).max(1);
+        self.lines.push(Line::Qr { rows, module });
+    }
+
     pub fn left(&mut self, s: &str, bold: bool, size: Size) {
         let w = self.width(size);
         for l in wrap(&self.clean(s), w) {
@@ -215,6 +225,8 @@ pub struct TicketView<'a> {
     // a full invoice is made out to someone
     pub customer: Option<&'a Customer>,
     pub training: bool,
+    // the address in the AEAT's QR, when VERI*FACTU recorded the ticket
+    pub qr: Option<&'a str>,
 }
 
 fn header(d: &mut Doc, shop: &ShopInfo) {
@@ -321,6 +333,14 @@ pub fn ticket(v: &TicketView, s: &Settings, logo: bool) -> Vec<Line> {
     if v.training {
         d.center("*** PRUEBA · SIN VALIDEZ ***", true, Size::Normal);
     }
+    // RD 1007/2023: the QR comes before the invoice itself, labelled above
+    // and, since every record goes to the AEAT, with the legend below
+    if let Some(rows) = v.qr.and_then(verifactu::qr_rows) {
+        d.center("QR tributario:", true, Size::Normal);
+        d.qr(rows);
+        d.center("VERI*FACTU", true, Size::Normal);
+        d.blank();
+    }
     header(&mut d, v.shop);
     d.blank();
     let refund = v.kind == "refund";
@@ -424,6 +444,7 @@ pub fn record(r: &TicketRecord, s: &Settings, logo: bool, copy: bool) -> Vec<Lin
         voided: r.voided_at.is_some(),
         customer: r.customer.as_ref(),
         training: r.training,
+        qr: r.qr.as_deref(),
     };
     ticket(&v, s, logo)
 }
@@ -601,7 +622,7 @@ mod tests {
             .iter()
             .filter_map(|l| match l {
                 Line::Text { text, size, .. } => Some((text.clone(), *size)),
-                Line::Logo => None,
+                Line::Logo | Line::Qr { .. } => None,
             })
             .collect()
     }
@@ -638,6 +659,7 @@ mod tests {
             voided: false,
             customer: None,
             training: false,
+            qr: None,
         };
         ticket(&v, &s, true)
     }
@@ -663,6 +685,7 @@ mod tests {
             voided: false,
             customer: None,
             training: false,
+            qr: None,
         };
         ticket(&v, &s, false)
     }
@@ -691,6 +714,7 @@ mod tests {
             voided: false,
             customer: Some(&acme),
             training: false,
+            qr: None,
         };
         let body: Vec<String> = texts(&ticket(&v, &s, false)).into_iter().map(|(t, _)| t).collect();
         let has = |x: &str| assert!(body.iter().any(|l| l.contains(x)), "missing {x:?} in\n{}", body.join("\n"));
@@ -731,6 +755,7 @@ mod tests {
             voided: false,
             customer: None,
             training: true,
+            qr: None,
         };
         let body: Vec<String> = texts(&ticket(&v, &Settings { show_vat: false, ..Settings::default() }, false)).into_iter().map(|(t, _)| t).collect();
         assert!(body.iter().any(|l| l.ends_with("IVA 21% y 10% incluido")), "{}", body.join("\n"));

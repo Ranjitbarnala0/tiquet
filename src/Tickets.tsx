@@ -8,6 +8,7 @@ import { RefundModal } from './Refund';
 import { useToast } from './toast';
 import type { Logo, Method, PLine, Settings, TicketRecord, TicketSummary, User } from './types';
 import { Empty, Field, Modal } from './ui';
+import { aeatText } from './Verifactu';
 
 type RangeKey = 'today' | 'yesterday' | 'week' | 'month' | 'all';
 
@@ -284,6 +285,7 @@ export function Tickets({
                 ) : (
                   <p className="print-note">{tr('No se ha impreso todavía', 'Not printed yet')}</p>
                 )}
+                {t.aeat && <p className={`print-note${t.aeat.state === 'Incorrecto' ? ' bad' : ''}`}>{aeatText(t.aeat)}</p>}
                 {t.voidedAt && (
                   <p className="void-note">
                     {tr('Anulado el', 'Voided on')} {dateTime(t.voidedAt)} {tr('por', 'by')} {t.voidedBy}

@@ -8,6 +8,7 @@ use crate::error::{fail, Result};
 use crate::money::split_vat;
 use crate::settings::{self, Settings};
 use crate::state::SessionUser;
+use crate::verifactu::{self, TicketAeat};
 use crate::log;
 
 pub const MAX_PRICE: i64 = 9_999_999;
@@ -291,6 +292,9 @@ pub struct TicketRecord {
     pub shop: ShopInfo,
     pub customer: Option<Customer>,
     pub training: bool,
+    // the AEAT's QR printed on it, and how its billing record went
+    pub qr: Option<String>,
+    pub aeat: Option<TicketAeat>,
 }
 
 #[derive(Serialize, Debug)]
@@ -372,7 +376,11 @@ impl RefundPlan {
 }
 
 pub fn now() -> String {
-    Local::now().format("%Y-%m-%dT%H:%M:%S").to_string()
+    stamp(&Local::now())
+}
+
+fn stamp(at: &chrono::DateTime<Local>) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
 // one series per prefix, kind and year: sales T2026-000001..., refunds
@@ -524,7 +532,9 @@ struct NewTicket<'a> {
 fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> Result<i64> {
     let shop = ShopInfo { logo: settings::logo_id(tx)?, ..ShopInfo::from_settings(s) };
     let shop = serde_json::to_string(&shop)?;
-    let issued_at = now();
+    // one instant for the ticket and its billing record
+    let at = Local::now();
+    let issued_at = stamp(&at);
     if !t.training {
         check_clock(tx, &issued_at, t.clock_ok)?;
     }
@@ -581,6 +591,9 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
         }
     }
     tx.execute("UPDATE tickets SET sealed = 1 WHERE id = ?1", [id])?;
+    if !t.training {
+        verifactu::alta(tx, id, s, &at)?;
+    }
     Ok(id)
 }
 
@@ -612,6 +625,11 @@ pub fn sell(
         return fail("E_INVALID:saleId");
     }
     let mut lines = validate(lines)?;
+    // the AEAT refuses any other rate, and a refused record means an invoice
+    // that has to be issued again
+    if verifactu::Env::of(s).is_some() && !s.training && lines.iter().any(|l| !verifactu::rate_allowed(l.vat_bp)) {
+        return fail("E_VAT_AEAT");
+    }
     let totals = compute(&lines);
     if opts.expected_cents.is_some_and(|e| e != totals.total_cents) {
         return fail("E_TOTAL_CHANGED");
@@ -780,6 +798,8 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                             address: r.get::<_, Option<String>>(18).ok().flatten().unwrap_or_default(),
                         }),
                         training: r.get(19)?,
+                        qr: None,
+                        aeat: None,
                     },
                     r.get::<_, Option<i64>>(14)?,
                 ))
@@ -831,6 +851,8 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
     rec.prints = stmt
         .query_map([id], |r| Ok(PrintRow { at: r.get(0)?, copy: r.get(1)?, status: r.get(2)?, detail: r.get(3)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    rec.qr = verifactu::qr_of(conn, id)?;
+    rec.aeat = verifactu::ticket_state(conn, id)?;
     Ok(rec)
 }
 
@@ -875,12 +897,15 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<TicketSummary>> {
     Ok(rows)
 }
 
+// For a ticket issued by mistake, for a sale that never happened: a real
+// sale is corrected with a return. With VERI*FACTU it leaves an anulación.
 pub fn void(conn: &mut Connection, id: i64, by: &str, reason: &str) -> Result<()> {
     let reason: String = reason.trim().chars().take(200).collect();
     if reason.is_empty() {
         return fail("E_REASON");
     }
-    let tx = conn.transaction()?;
+    // IMMEDIATE: the anulación reads the end of the chain it joins
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let issued: Option<String> = tx
         .query_row("SELECT issued_at FROM tickets WHERE id = ?1 AND voided_at IS NULL", [id], |r| r.get(0))
         .optional()?;
@@ -907,6 +932,7 @@ pub fn void(conn: &mut Connection, id: i64, by: &str, reason: &str) -> Result<()
     if n == 0 {
         return fail("E_NOT_FOUND");
     }
+    verifactu::anulacion(&tx, id, &settings::load(&tx)?, &Local::now())?;
     tx.execute(
         "UPDATE products SET sold_qty = MAX(0, sold_qty - (
              SELECT COALESCE(SUM(qty), 0) FROM ticket_lines WHERE ticket_id = ?1 AND product_id = products.id))

@@ -62,6 +62,7 @@ pub fn document(lines: &[Line], logo: Option<&Logo>, o: &Opts) -> Vec<u8> {
                     raster(&mut b, l, o.cols);
                 }
             }
+            Line::Qr { rows, module } => qr(&mut b, rows, *module, o.cols),
             Line::Text { text, bold, size } => {
                 let mode = match size {
                     Size::Normal => 0,
@@ -125,23 +126,54 @@ fn raster(b: &mut Vec<u8>, logo: &Logo, cols: usize) {
     let row = w.div_ceil(8);
     let out_row = paper.div_ceil(8);
     let pad = (paper - w) / 2;
+    let mut out = vec![0u8; out_row * h];
+    for r in 0..h {
+        for x in 0..w {
+            if (bits[r * row + x / 8] >> (7 - x % 8)) & 1 == 1 {
+                let ox = x + pad;
+                out[r * out_row + ox / 8] |= 0x80 >> (ox % 8);
+            }
+        }
+    }
+    bands(b, &out, out_row, h);
+}
 
+// GS v 0, at most 128 dot rows at a time
+fn bands(b: &mut Vec<u8>, bits: &[u8], row: usize, h: usize) {
     let mut y = 0;
     while y < h {
         let band = (h - y).min(128);
-        b.extend_from_slice(&[GS, b'v', b'0', 0, out_row as u8, (out_row >> 8) as u8, band as u8, (band >> 8) as u8]);
-        for r in y..y + band {
-            let mut out = vec![0u8; out_row];
-            for x in 0..w {
-                if (bits[r * row + x / 8] >> (7 - x % 8)) & 1 == 1 {
-                    let ox = x + pad;
-                    out[ox / 8] |= 0x80 >> (ox % 8);
-                }
-            }
-            b.extend_from_slice(&out);
-        }
+        b.extend_from_slice(&[GS, b'v', b'0', 0, row as u8, (row >> 8) as u8, band as u8, (band >> 8) as u8]);
+        b.extend_from_slice(&bits[y * row..(y + band) * row]);
         y += band;
     }
+}
+
+// The AEAT's QR as an image rather than the printer's own QR command, which
+// clones implement unevenly: each module a square of `module` dots, four
+// modules of white all round, centred like the preview shows it.
+fn qr(b: &mut Vec<u8>, rows: &[String], module: usize, cols: usize) {
+    let n = rows.len();
+    let paper = (cols * 12).min(576);
+    if n == 0 || (n + 8) * module > paper {
+        return;
+    }
+    let side = (n + 8) * module;
+    let out_row = paper.div_ceil(8);
+    let left = (paper - side) / 2 + 4 * module;
+    let mut bits = vec![0u8; out_row * side];
+    for (y, row) in rows.iter().enumerate() {
+        for (x, _) in row.bytes().enumerate().filter(|(_, c)| *c == b'1') {
+            for dy in 0..module {
+                let r = (4 + y) * module + dy;
+                for dx in 0..module {
+                    let ox = left + x * module + dx;
+                    bits[r * out_row + ox / 8] |= 0x80 >> (ox % 8);
+                }
+            }
+        }
+    }
+    bands(b, &bits, out_row, side);
 }
 
 pub fn kick(s: &Settings) -> Vec<u8> {
@@ -259,6 +291,7 @@ mod tests {
                 voided: false,
                 customer: None,
                 training: false,
+                qr: None,
             };
             let preview = layout::ticket(&v, &s, true);
             let lg = logo();
@@ -268,7 +301,7 @@ mod tests {
                 .iter()
                 .filter_map(|l| match l {
                     Line::Text { text, .. } => Some(text.trim_end().to_string()),
-                    Line::Logo => None,
+                    Line::Logo | Line::Qr { .. } => None,
                 })
                 .collect();
             assert_eq!(printed, expected, "{cp}");
@@ -294,6 +327,27 @@ mod tests {
         assert_eq!(&b[..8], &[GS, b'v', b'0', 0, 48, 0, 3, 0]);
         let first = &b[8..8 + 48];
         assert!(first[..24].iter().all(|&x| x == 0xFF) && first[24..].iter().all(|&x| x == 0), "{first:?}");
+    }
+
+    #[test]
+    fn the_qr_prints_as_the_preview_draws_it() {
+        let rows = vec!["101".to_string(), "010".to_string(), "111".to_string()];
+        let mut b = Vec::new();
+        qr(&mut b, &rows, 4, 48);
+        // 3 modules and 8 of white margin, 4 dots each: 44 dot rows of 72 bytes
+        assert_eq!(&b[..8], &[GS, b'v', b'0', 0, 72, 0, 44, 0]);
+        let row = |y: usize| &b[8 + y * 72..8 + (y + 1) * 72];
+        let dots = |y: usize| -> Vec<usize> { (0..576).filter(|x| row(y)[x / 8] & (0x80 >> (x % 8)) != 0).collect() };
+        // the white margin above, then the first module row: dots 282..286 and 290..294
+        assert!(dots(15).is_empty());
+        assert_eq!(dots(16), (282..286).chain(290..294).collect::<Vec<_>>());
+        assert_eq!(dots(20), (286..290).collect::<Vec<_>>());
+        assert_eq!(dots(27).len(), 12);
+        assert!(dots(28).is_empty());
+        // too big for the paper: left out rather than cut
+        let mut none = Vec::new();
+        qr(&mut none, &rows, 40, 32);
+        assert!(none.is_empty());
     }
 
     #[test]

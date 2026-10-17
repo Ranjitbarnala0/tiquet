@@ -1,22 +1,19 @@
-Download `Tiquet_1.1.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.2.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
-**Upgrading from 1.0:** just run it. The sales database moves to `%LOCALAPPDATA%\TiquetData` (out of reach of the uninstaller), a copy is kept before the upgrade, and nothing has to be set up again.
+**Upgrading from 1.0 or 1.1:** just run it. The database upgrades itself on first start, after a copy of it is kept, and nothing has to be set up again.
 
-New in 1.1:
+New in 1.2:
 
-- **Add anything by hand:** a big **+ Artículo** button (F4) and a card in the middle of an empty ticket. Name, price, quantity and VAT, and it can be saved as a product (and a quick button) on the way.
-- **Change any line:** tap it to edit the name or description, price, quantity or VAT, and optionally the product's own price.
-- **Products below the ticket:** Recientes, Favoritos and Todos, one tap to add. **Repetir** sells the items of an earlier ticket again. Products can be deleted (those already on tickets are archived instead).
-- **Sets itself up on a new PC:** picks the receipt printer and paper width when it is clear which one it is, and starts in the language Windows uses. Everything can still be changed in Ajustes, where **Detectar** looks again.
-- **Returns** (devoluciones) as rectifying simplified invoices with their own series, line by line, never more than was sold. Voids are for same-day mistakes only.
-- **Full invoices** with the customer's name, NIF and address, in their own series. Sales over 3.000 € ask for them.
-- **Cash drawer:** opening float, cash in and out, closing count against what the sales say, printed Z report.
-- **Printing you can trust:** a ticket only counts as printed once Windows has let go of it. A printer that is off or out of paper gets its job cancelled, so nothing prints, and no drawer opens, hours later. Only the first print is the original; every other one says COPIA. Tickets that never printed are listed.
-- **Training mode** for learning: own numbering, printed as not valid, never counted, can be wiped.
-- **Forgotten admin password:** a recovery code is shown once at setup.
-- **Data safety:** every committed sale survives a power cut. A restored backup never reuses a ticket number already handed out. A cart is never charged twice after a crash. The PC clock is checked. Backups can be restored from Ajustes.
-- **Security:** the till locks itself when left unused, wrong passwords lock the account even across restarts, and admin passwords need 6 characters.
-- **Sale screen:** a barcode scanned while charging adds the item instead of paying. Zero prices and impossible change are refused. The payment window fits 125-150 % laptop screens.
-- **Admin:** CSV import that picks the sale price and keeps barcodes, unsaved-changes guards, price changes and discounts in reports, a VAT book (libro de IVA) export for the accountant.
+- **VERI\*FACTU** (Real Decreto 1007/2023), **off until it is switched on** in Ajustes > VERI\*FACTU. Nothing changes for a shop that leaves it off. With it on:
+  - **Records:** every ticket, return and void leaves a billing record in the AEAT's format, chained to the one before by its SHA-256 huella. The record is written in the same transaction as the ticket and can never be changed or deleted.
+  - **Sending:** Tiquet sends the records to the AEAT by itself, with the shop owner's electronic certificate installed in Windows, and waits between messages as long as the AEAT asks. Without internet the till keeps selling, and the records go later, marked as delayed by an incident.
+  - **QR:** the ticket prints the AEAT's QR (30–40 mm), labelled "QR tributario:" above it and "VERI\*FACTU" below.
+  - **Warnings:** a bar under the header warns when records are waiting or the AEAT asks for a correction. The correction is one button away in Ajustes, and every ticket shows where it stands with the AEAT.
+  - **Test or real:** the AEAT's test environment and the real one are separate choices, each with its own chain.
+  - **Backups:** restoring a backup never loses billing records.
+  - **VAT rates:** only the rates the AEAT accepts (21, 10, 4 and 0 %) can be sold while it is on.
+- **This build cannot switch VERI\*FACTU on yet.** It does not carry the producer's details, which every record must include. For autónomos the obligation starts on 1 July 2027, and Hacienda has announced it plans to move it to October 2028.
+
+How it works and what is still open: [docs/verifactu.md](https://github.com/Ranjitbarnala0/tiquet/blob/main/docs/verifactu.md).

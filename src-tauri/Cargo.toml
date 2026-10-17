@@ -1,6 +1,6 @@
 [package]
 name = "tiquet"
-version = "1.1.0"
+version = "1.2.0"
 description = "Tiquet: caja y tickets para comercio"
 edition = "2021"
 rust-version = "1.77"
@@ -21,6 +21,9 @@ argon2 = "0.5"
 password-hash = { version = "0.5", features = ["getrandom"] }
 chrono = "0.4"
 base64 = "0.22"
+sha2 = "0.10"
+qrcodegen = "1.8"
+roxmltree = "0.20"
 dirs = "6"
 tauri-plugin-single-instance = "2"
 tiny_http = { version = "0.12", optional = true }
@@ -29,6 +32,7 @@ tiny_http = { version = "0.12", optional = true }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Security", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 webview2-com = "0.39"
 windows-core = "0.62"
+schannel = "0.1"
 
 [features]
 devserver = ["dep:tiny_http"]

@@ -1,3 +1,4 @@
+pub mod aeat;
 pub mod api;
 pub mod auth;
 pub mod backup;
@@ -20,6 +21,7 @@ pub mod settings;
 pub mod state;
 pub mod tickets;
 pub mod users;
+pub mod verifactu;
 
 mod app;
 

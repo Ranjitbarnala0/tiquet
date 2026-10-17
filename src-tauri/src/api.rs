@@ -14,14 +14,16 @@ use crate::layout::{self, TicketView};
 use crate::settings::{self, Logo, Settings};
 use crate::state::{AppState, SessionUser};
 use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
-use crate::{auth, backup, cash, log, money, os, printer, products, recovery, reports, users};
+use crate::verifactu::{self, Env};
+use crate::{aeat, auth, backup, cash, log, money, os, printer, products, recovery, reports, users};
 
 // key of the recovery code's own attempt counter (no user has id 0)
 const RECOVERY: i64 = 0;
 
 // asked by the screen on its own every few seconds, not by a person: they do
 // not keep an idle till unlocked
-const PASSIVE: &[&str] = &["printers.status", "bootstrap", "log.client", "sale.status", "recovery.status", "backup.status"];
+const PASSIVE: &[&str] =
+    &["printers.status", "bootstrap", "log.client", "sale.status", "recovery.status", "backup.status", "verifactu.status"];
 
 pub fn dispatch(st: &AppState, cmd: &str, args: Value) -> std::result::Result<Value, String> {
     // a bug in one handler must answer with an error, not take the till down
@@ -208,6 +210,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let me = st.admin()?;
             let reason = a.get("reason").and_then(Value::as_str).unwrap_or_default();
             tickets::void(&mut st.conn(), id(&a)?, &me.name, reason)?;
+            aeat::kick();
             log::info(format!("ticket {} voided by {}: {reason}", id(&a)?, me.name));
             ticket_get(st, id(&a)?)
         }
@@ -225,6 +228,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 (rec, s, logo)
             };
             st.note(&rec);
+            aeat::kick();
             let of = rec.refund_of.as_ref().map(|t| t.number.as_str()).unwrap_or("?");
             log::info(format!(
                 "refund {} of {of} {} {} by {}",
@@ -431,6 +435,41 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 .collect();
             Ok(json!({ "safetyCopy": safety.to_string_lossy(), "missing": missing }))
         }
+        // VERI*FACTU: how the records are doing, the certificates this
+        // Windows user has, a correction for a record the AEAT refused, and
+        // the producer's declaration, which anyone may read
+        "verifactu.status" => {
+            st.user()?;
+            let conn = st.conn();
+            let s = settings::load(&conn)?;
+            let mut out = serde_json::to_value(verifactu::status(&conn, &s)?)?;
+            out["clockDrift"] = json!(settings::get(&conn, "aeatClockDrift")?.and_then(|d| d.parse::<i64>().ok()));
+            Ok(out)
+        }
+        "verifactu.certs" => {
+            st.admin()?;
+            to(aeat::certificates())
+        }
+        "verifactu.correct" => {
+            let me = st.admin()?;
+            let conn = st.conn();
+            let s = settings::load(&conn)?;
+            let new = verifactu::correct(&conn, id(&a)?, &s)?;
+            drop(conn);
+            aeat::kick();
+            log::info(format!("billing record {} corrected by {}", id(&a)?, me.name));
+            Ok(json!({ "id": new }))
+        }
+        "verifactu.reach" => {
+            st.admin()?;
+            let env = a.get("env").and_then(Value::as_str).and_then(Env::parse).unwrap_or(Env::Prod);
+            Ok(json!({ "status": aeat::reach(env)? }))
+        }
+        "verifactu.declaration" => {
+            st.user()?;
+            Ok(json!({ "text": verifactu::declaration() }))
+        }
+
         "app.reveal" => {
             st.admin()?;
             let what = a.get("what").and_then(Value::as_str).unwrap_or_default();
@@ -638,6 +677,7 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
     let tag = tickets::series_tag("sale", customer.is_some(), s.training);
     let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
     let shop = ShopInfo::from_settings(&s);
+    let qr = verifactu::preview_qr(&s, &number, &issued_at, totals.total_cents);
     let v = TicketView {
         shop: &shop,
         kind: "sale",
@@ -654,6 +694,7 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
         voided: false,
         customer: customer.as_ref(),
         training: s.training,
+        qr: qr.as_deref(),
     };
     Ok(json!({
         "lines": layout::ticket(&v, &s, logo.is_some()),
@@ -702,6 +743,7 @@ fn finalize(st: &AppState, a: FinalizeIn) -> Result<Value> {
     }
     if !rec.training {
         st.note(&rec);
+        aeat::kick();
     }
     log::info(format!(
         "sale {} {} {} by {}",
@@ -749,6 +791,7 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
     let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
     let shop = ShopInfo::from_settings(&s);
     let lines = plan.sale_lines();
+    let qr = verifactu::preview_qr(&s, &number, &issued_at, plan.totals.total_cents).filter(|_| !plan.original.training);
     let v = TicketView {
         shop: &shop,
         kind: "refund",
@@ -765,6 +808,7 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
         voided: false,
         customer: plan.original.customer.as_ref(),
         training: plan.original.training,
+        qr: qr.as_deref(),
     };
     let logo = settings::logo(&conn)?.is_some();
     Ok(json!({ "lines": layout::ticket(&v, &s, logo), "totals": plan.totals, "number": number }))

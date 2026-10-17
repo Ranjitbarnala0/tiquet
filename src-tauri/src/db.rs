@@ -278,6 +278,51 @@ CREATE TRIGGER cash_moves_no_delete BEFORE DELETE ON cash_moves
 BEGIN SELECT RAISE(ABORT, 'cash moves cannot change'); END;
 "#;
 
+// v7: VERI*FACTU (RD 1007/2023). Every real ticket, refund and void issued
+// with it switched on leaves a billing record, written in the same
+// transaction and chained to the one before by its huella. A record never
+// changes and never goes; a correction is a record of its own. What the AEAT
+// answered is kept apart, one row per record.
+const SCHEMA_V7: &str = r#"
+CREATE TABLE fiscal_records (
+  id           INTEGER PRIMARY KEY,
+  ticket_id    INTEGER NOT NULL,
+  kind         TEXT NOT NULL CHECK (kind IN ('alta', 'anulacion')),
+  env          TEXT NOT NULL CHECK (env IN ('test', 'prod')),
+  issuer_nif   TEXT NOT NULL,
+  number       TEXT NOT NULL,
+  date         TEXT NOT NULL,
+  invoice_type TEXT,
+  vat_total    TEXT,
+  total        TEXT,
+  prev_hash    TEXT NOT NULL,
+  generated_at TEXT NOT NULL,
+  hash         TEXT NOT NULL UNIQUE,
+  corrects     INTEGER REFERENCES fiscal_records (id),
+  qr           TEXT,
+  xml          TEXT NOT NULL
+);
+CREATE INDEX fiscal_records_ticket ON fiscal_records (ticket_id);
+
+CREATE TRIGGER fiscal_records_frozen BEFORE UPDATE ON fiscal_records
+BEGIN SELECT RAISE(ABORT, 'billing records cannot change'); END;
+CREATE TRIGGER fiscal_records_no_delete BEFORE DELETE ON fiscal_records
+BEGIN SELECT RAISE(ABORT, 'billing records cannot be deleted'); END;
+
+CREATE TABLE fiscal_sends (
+  record_id INTEGER PRIMARY KEY REFERENCES fiscal_records (id),
+  at        TEXT NOT NULL,
+  state     TEXT NOT NULL CHECK (state IN ('Correcto', 'AceptadoConErrores', 'Incorrecto')),
+  code      TEXT,
+  message   TEXT,
+  csv       TEXT
+);
+CREATE TRIGGER fiscal_sends_frozen BEFORE UPDATE ON fiscal_sends
+BEGIN SELECT RAISE(ABORT, 'billing records cannot change'); END;
+CREATE TRIGGER fiscal_sends_no_delete BEFORE DELETE ON fiscal_sends
+BEGIN SELECT RAISE(ABORT, 'billing records cannot be deleted'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -291,6 +336,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V4)],
     &[Step::Sql(SCHEMA_V5)],
     &[Step::Sql(SCHEMA_V6)],
+    &[Step::Sql(SCHEMA_V7)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

@@ -18,7 +18,7 @@ Built for a phone accessories shop in Spain that was printing tickets from a 199
 
 Runs on Windows 10 and 11 (64-bit). No administrator rights are needed: it installs for the current Windows user.
 
-1. Download `Tiquet_1.1.0_x64-setup.exe` from [Releases](../../releases/latest). The installer is built on a clean GitHub machine by the [release workflow](.github/workflows/release.yml), which also starts the built app once before publishing; the release lists its SHA-256.
+1. Download `Tiquet_1.2.0_x64-setup.exe` from [Releases](../../releases/latest). The installer is built on a clean GitHub machine by the [release workflow](.github/workflows/release.yml), which also starts the built app once before publishing; the release lists its SHA-256.
 2. Run it. The installer is not code-signed yet, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then **Run anyway**.
 3. On first start, enter the shop details (the NIF is checked) and create the administrator account. Write down or print the **recovery code** it shows: it is the only way back in if the administrator password is forgotten.
 4. The receipt printer is picked automatically when it is clearly the only one (a POS, thermal or receipt printer, or a known brand). To choose it by hand, or to change it, use **Ajustes > Impresora** (**Detectar** looks again), then press **Imprimir página de prueba**. The interface starts in the language Windows uses.
@@ -41,6 +41,7 @@ The printer must be installed in Windows (with the manufacturer's driver or "Gen
 - **Admin.** Products (CSV import that picks the sale price and keeps barcodes), users with roles, sales reports by day or month, discounts and price changes made at the till, a printable summary, CSV export and a VAT book (libro de IVA) for the accountant. Training mode for learning: its sales never count and can be wiped.
 - **Shop identity.** Logo or photo on the ticket (converted to black and white for thermal paper), trade name and owner's name, header, footer, numbering prefix.
 - **Never loses a sale.** The sale is stored, with a full disk sync, before printing. The cart survives a crash or power cut and is never charged twice. A restored backup never reuses a ticket number already handed out. A database backup is taken every day and can be restored from Ajustes.
+- **VERI\*FACTU** (Real Decreto 1007/2023), off until switched on: every ticket, return and void leaves a billing record chained by its SHA-256 huella and sent to the AEAT with the owner's electronic certificate, and the ticket carries the AEAT's QR.
 - **Spanish and English** interface. Tickets always print in Spanish.
 
 ## Keyboard
@@ -93,6 +94,15 @@ Tests: `cargo test` in `src-tauri` (add `-- --ignored` to also push a job throug
 - Passwords are hashed with Argon2id. Five wrong attempts lock that user, for 30 seconds and then twice as long each time up to 15 minutes, and the lock survives a restart. Administrator passwords need 6 characters. The till locks itself after a configurable idle time. Roles are checked in the core, not only in the UI.
 - Every push runs the core tests, the type check and clippy on Windows ([CI](.github/workflows/ci.yml)).
 
-## Not in this version
+## VERI\*FACTU
 
-Spanish anti-fraud billing rules (VERI\*FACTU, Real Decreto 1007/2023) require hash-chained invoice records and, in VERI\*FACTU mode, sending them to the AEAT. That is planned as a separate module once the shop's tax regime is confirmed; some regimes, such as recargo de equivalencia, are outside its scope.
+Tiquet works as a VERI\*FACTU system only (Real Decreto 1007/2023, Orden HAC/1177/2024): the records go to the AEAT as they are made, so there is no signature or event log to keep on the PC. It is off by default. To switch it on, use **Ajustes > VERI\*FACTU**:
+
+1. Choose **Pruebas AEAT** (the AEAT's test environment).
+2. Pick the shop owner's electronic certificate, installed in Windows for the user that runs Tiquet.
+3. Sell a ticket and check that the ticket screen says it is registered.
+4. Switch to **Real**.
+
+The owner's name and NIF must be in **Ajustes > Comercio** as Hacienda has them.
+
+Design, decisions, the AEAT documents it follows and what is still open: [docs/verifactu.md](docs/verifactu.md).

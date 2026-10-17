@@ -34,6 +34,11 @@ pub struct Settings {
     // practice mode: sales get their own series, print as not valid and
     // never count anywhere
     pub training: bool,
+    // VERI*FACTU: off, test (the AEAT's preproducción) or prod
+    pub verifactu: String,
+    // SHA-1 thumbprint of the certificate in the Windows store the records
+    // are sent with
+    pub cert: String,
 }
 
 impl Default for Settings {
@@ -61,6 +66,8 @@ impl Default for Settings {
             lang: "es".into(),
             auto_lock_min: 10,
             training: false,
+            verifactu: "off".into(),
+            cert: String::new(),
         }
     }
 }
@@ -92,6 +99,10 @@ impl Settings {
         if ![0, 2, 5, 10, 15, 30, 60].contains(&self.auto_lock_min) {
             self.auto_lock_min = 10;
         }
+        if !["off", "test", "prod"].contains(&self.verifactu.as_str()) {
+            self.verifactu = "off".into();
+        }
+        self.cert = self.cert.chars().filter(char::is_ascii_hexdigit).take(40).collect::<String>().to_uppercase();
         self
     }
 }
@@ -157,6 +168,7 @@ pub fn save(conn: &Connection, s: Settings) -> Result<Settings> {
         }
         s.shop_nif = crate::nif::normalize(&s.shop_nif);
     }
+    crate::verifactu::check_settings(conn, &s)?;
     put(conn, "settings", &serde_json::to_string(&s)?)?;
     Ok(s)
 }

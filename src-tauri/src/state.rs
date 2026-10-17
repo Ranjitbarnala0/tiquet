@@ -71,6 +71,8 @@ impl AppState {
             "lines": one("SELECT COUNT(*) FROM ticket_lines"),
             "users": one("SELECT COUNT(*) FROM users"),
             "products": one("SELECT COUNT(*) FROM products"),
+            "fiscalRecords": one("SELECT COUNT(*) FROM fiscal_records"),
+            "fiscalPending": one("SELECT COUNT(*) FROM fiscal_records r WHERE NOT EXISTS (SELECT 1 FROM fiscal_sends s WHERE s.record_id = r.id)"),
             "lastTicket": last,
             "integrity": conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).unwrap_or_default(),
         })

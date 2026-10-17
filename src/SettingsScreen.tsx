@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { FolderOpen, HardDrive, History, ImagePlus, Printer, ReceiptText, RefreshCw, ScanSearch, Store, Trash2 } from 'lucide-react';
+import { BadgeCheck, FolderOpen, HardDrive, History, ImagePlus, Printer, ReceiptText, RefreshCw, ScanSearch, Store, Trash2 } from 'lucide-react';
 import { call } from './api';
 import { dateTime, rate, VAT_RATES } from './format';
 import { errorText, printerStateText, tr, warningText, type Lang } from './i18n';
@@ -11,6 +11,7 @@ import type { Logo, PLine, PrinterEntry, Preview, Settings } from './types';
 import { spanishNif } from './nif';
 import { usePrinterStatus } from './usePrinter';
 import { Field, Modal, Segmented, Toggle } from './ui';
+import { VerifactuTab } from './Verifactu';
 
 interface BackupStatus {
   dir: string;
@@ -244,6 +245,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
     { id: 'ticket', label: tr('Ticket', 'Ticket'), icon: ReceiptText },
     { id: 'printer', label: tr('Impresora', 'Printer'), icon: Printer },
     { id: 'data', label: tr('Datos y copias', 'Data & backups'), icon: HardDrive },
+    { id: 'verifactu', label: 'VERI*FACTU', icon: BadgeCheck },
   ];
 
   const selected = printers?.find((p) => p.name === d.printerName);
@@ -514,6 +516,8 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               {dirty && <p className="field-hint">{tr('Las pruebas usan estos ajustes aunque aún no estén guardados.', 'Tests use these settings even before you save them.')}</p>}
             </div>
           )}
+
+          {tab === 'verifactu' && <VerifactuTab d={d} set={set} onShop={() => setTab('shop')} />}
 
           {tab === 'data' && (
             <div className="stack">

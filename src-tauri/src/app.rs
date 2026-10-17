@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::{AppState, PrintSink};
-use crate::{api, backup, log, os, paths};
+use crate::{aeat, api, backup, log, os, paths};
 
 // set once the window is on screen; a failure before that gets a message box
 // instead of a till that silently never opens
@@ -32,6 +32,9 @@ impl Shell {
     fn reopen(&self) -> Result<(), String> {
         let dir = self.data_dir.as_deref().ok_or("E_DATA_DIR")?;
         let core = open(dir);
+        if core.is_ok() && self.report.is_none() {
+            aeat::start(dir.join("tiquet.db"));
+        }
         let res = core.as_ref().map(|_| ()).map_err(|e| e.clone());
         *self.core.write().unwrap_or_else(|e| e.into_inner()) = core;
         res
@@ -229,7 +232,12 @@ pub fn run() {
                             }
                         }
                     }
-                    open(dir)
+                    let core = open(dir);
+                    // the test modes never talk to the AEAT
+                    if core.is_ok() && !testing {
+                        aeat::start(dir.join("tiquet.db"));
+                    }
+                    core
                 }
                 Err(e) => Err(e.clone()),
             };

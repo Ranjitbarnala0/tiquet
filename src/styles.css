@@ -377,12 +377,8 @@ code {
 /* shell */
 .shell {
   display: grid;
-  grid-template-rows: 58px minmax(0, 1fr);
-  height: 100%;
-}
-
-.shell.practice {
   grid-template-rows: 58px auto minmax(0, 1fr);
+  height: 100%;
 }
 
 .top {
@@ -1131,6 +1127,17 @@ code {
 .pl-logo img {
   display: inline-block;
   max-width: 100%;
+}
+
+.pl-qr {
+  text-align: center;
+  line-height: 0;
+}
+
+.pl-qr svg {
+  display: inline-block;
+  max-width: 100%;
+  height: auto;
 }
 
 .paper-stamp {
@@ -3263,7 +3270,8 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
   color: var(--ink-2);
 }
 
-.training-bar {
+.training-bar,
+.vf-bar {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3770,4 +3778,49 @@ button.cart-name:hover > span:first-child {
     width: 48px;
     height: 48px;
   }
+}
+
+.vf-bar.bad {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* VERI*FACTU */
+.vf-status {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.vf-status > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+
+.vf-status b {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+}
+
+.vf-problem {
+  align-items: flex-start;
+}
+
+.vf-problem p {
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  color: var(--ink-2);
+}
+
+.declaration {
+  white-space: pre-wrap;
+  font-size: 13px;
+  line-height: 1.5;
+  max-height: 60vh;
+  overflow: auto;
 }

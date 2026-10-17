@@ -24,6 +24,7 @@ fn main() {
         _ => PrintSink::Dir(dir.join("prints")),
     };
     let st = AppState::open(&dir, sink).expect("open data dir");
+    tiquet_lib::aeat::start(dir.join("tiquet.db"));
     let server = Server::http(("127.0.0.1", port)).expect("bind");
     eprintln!("devserver http://127.0.0.1:{port} data={}", dir.display());
 

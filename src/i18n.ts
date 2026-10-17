@@ -85,6 +85,31 @@ const errors: Record<string, [string, string]> = {
   E_DATA_DIR: ['Windows no indica dónde guardar los datos (carpeta AppData).', 'Windows does not say where to keep data (AppData folder).'],
   E_BACKUP_INVALID: ['Ese archivo no es una copia de Tiquet que se pueda restaurar', 'That file is not a Tiquet backup that can be restored'],
   E_CLOCK: ['La fecha del ordenador es anterior al último ticket ({s})', 'The computer date is earlier than the last ticket ({s})'],
+  E_PRODUCER: [
+    'Esta versión de Tiquet aún no lleva los datos del productor (nombre y NIF) que la AEAT pide en cada registro, así que VERI*FACTU no se puede encender.',
+    'This build of Tiquet does not carry the producer details (name and NIF) the AEAT needs in every record yet, so VERI*FACTU cannot be switched on.',
+  ],
+  E_NIF_LOCKED: [
+    'Esta caja ya ha enviado facturas reales a la AEAT con otro NIF, y solo puede facturar con ese.',
+    'This till has already sent real invoices to the AEAT under another NIF, and can only invoice under that one.',
+  ],
+  E_VAT_AEAT: [
+    'Con VERI*FACTU solo valen el 21 %, 10 %, 4 % y 0 % de IVA. Revisa el IVA de los artículos.',
+    'With VERI*FACTU only 21 %, 10 %, 4 % and 0 % VAT are accepted. Check the items’ VAT.',
+  ],
+  E_VERIFACTU: ['Faltan el NIF o el nombre del titular en Ajustes > Comercio', 'The NIF or the owner’s name is missing in Settings > Shop'],
+  E_AEAT_CERT: ['Problema con el certificado: {s}', 'Certificate problem: {s}'],
+  E_AEAT_NET: ['Sin conexión con la AEAT ({s})', 'No connection to the AEAT ({s})'],
+  E_AEAT_TLS: ['La conexión segura con la AEAT falló ({s})', 'The secure connection to the AEAT failed ({s})'],
+  E_AEAT_HTTP: ['La AEAT respondió con un error HTTP {s}', 'The AEAT answered with HTTP error {s}'],
+  E_AEAT_FAULT: ['La AEAT no aceptó el envío: {s}', 'The AEAT did not accept the submission: {s}'],
+  E_AEAT_REPLY: ['La respuesta de la AEAT no se pudo leer', 'The AEAT’s answer could not be read'],
+};
+
+const certWhy: Record<string, [string, string]> = {
+  none: ['no hay ningún certificado elegido en Ajustes > VERI*FACTU', 'no certificate is chosen in Settings > VERI*FACTU'],
+  missing: ['el certificado elegido ya no está instalado en Windows', 'the chosen certificate is no longer installed in Windows'],
+  windows: ['solo funciona en Windows', 'it only works on Windows'],
 };
 
 const fields: Record<string, [string, string]> = {
@@ -106,6 +131,7 @@ const fields: Record<string, [string, string]> = {
   customerName: ['nombre del cliente', 'customer name'],
   customerNif: ['NIF del cliente (revisa la letra)', 'customer NIF (check the letter)'],
   amount: ['importe', 'amount'],
+  legalName: ['titular o razón social, en Ajustes > Comercio', 'owner or company name, in Settings > Shop'],
 };
 
 export function errorText(e: unknown): string {
@@ -117,7 +143,8 @@ export function errorText(e: unknown): string {
   const known = errors[err.code];
   if (!known) return err.detail || err.code;
   if (err.code === 'E_PRINT') return printText(err.detail);
-  const detail = err.code === 'E_CLOCK' ? dateTime(err.detail) : err.detail;
+  const why = err.code === 'E_AEAT_CERT' ? certWhy[err.detail] : undefined;
+  const detail = err.code === 'E_CLOCK' ? dateTime(err.detail) : why ? tr(why[0], why[1]) : err.detail;
   let text = tr(known[0], known[1]).replace('{s}', detail);
   if (['E_DB', 'E_IO', 'E_INTERNAL'].includes(err.code) && err.detail) text += ` (${err.detail})`;
   return text;

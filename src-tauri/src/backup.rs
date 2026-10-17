@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::error::{fail, Result};
 use crate::settings::{self, Settings};
-use crate::{db, log, paths};
+use crate::{db, log, paths, verifactu};
 
 const KEEP: usize = 60;
 
@@ -135,6 +135,8 @@ pub fn restore(conn: &mut Connection, file: &Path, data_dir: &Path) -> Result<Pa
     let _: String = conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get(0))?;
     db::check(conn)?;
     db::migrate(conn, None)?;
+    // billing records made after the backup was taken must not be lost
+    verifactu::carry_over(conn, &safety)?;
     log::warn(format!("database restored from {}; previous data kept in {}", file.display(), safety.display()));
     Ok(safety)
 }
@@ -156,6 +158,12 @@ pub fn restore_offline(file: &Path, data_dir: &Path) -> Result<PathBuf> {
         }
     }
     fs::copy(file, &live)?;
+    // whatever billing records can still be read from the damaged file
+    if kept.exists() {
+        if let Err(e) = db::open(&live).and_then(|c| verifactu::carry_over(&c, &kept)) {
+            log::warn(format!("VERI*FACTU records could not be read from {}: {}", kept.display(), e.0));
+        }
+    }
     log::warn(format!("database replaced by {}; damaged file kept as {}", file.display(), kept.display()));
     Ok(kept)
 }
