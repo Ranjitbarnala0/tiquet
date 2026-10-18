@@ -166,10 +166,15 @@ fn collect(conn: &Connection, from: &str, to: &str, fill: Option<(NaiveDate, Nai
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    // every repair line has a name of its own; together they are one row,
+    // counted in repairs
     let mut stmt = conn.prepare(
-        "SELECT l.name, SUM(l.qty), SUM(l.total_cents) FROM ticket_lines l JOIN tickets t ON t.id = l.ticket_id
+        "SELECT COALESCE(CASE WHEN l.repair_id IS NULL THEN l.name END, 'Reparaciones'),
+                CASE WHEN l.repair_id IS NULL THEN SUM(l.qty) ELSE COUNT(DISTINCT l.repair_id) END, SUM(l.total_cents)
+         FROM ticket_lines l JOIN tickets t ON t.id = l.ticket_id
          WHERE t.voided_at IS NULL AND t.training = 0 AND t.issued_at >= ?1 AND t.issued_at <= ?2
-         GROUP BY l.name HAVING SUM(l.qty) > 0 ORDER BY 3 DESC, 2 DESC LIMIT 10",
+         GROUP BY l.repair_id IS NULL, CASE WHEN l.repair_id IS NULL THEN l.name END
+         HAVING SUM(l.qty) > 0 ORDER BY 3 DESC, 2 DESC LIMIT 10",
     )?;
     s.top = stmt
         .query_map(params![from, to], |r| Ok(TopRow { name: r.get(0)?, qty: r.get(1)?, total_cents: r.get(2)? }))?

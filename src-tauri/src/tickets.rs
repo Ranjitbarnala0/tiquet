@@ -9,13 +9,15 @@ use crate::money::split_vat;
 use crate::settings::{self, Settings};
 use crate::state::SessionUser;
 use crate::verifactu::{self, TicketAeat};
-use crate::log;
+use crate::{log, repairs};
 
 pub const MAX_PRICE: i64 = 9_999_999;
 pub const MAX_CHANGE: i64 = 50_000;
 // a simplified invoice may not go over 3.000 EUR (retail, RD 1619/2012 art. 4);
 // above that the customer's details make it a full invoice
 pub const SIMPLIFIED_LIMIT: i64 = 300_000;
+// a repair is a service, not a retail sale: its limit is the general 400 EUR
+pub const SERVICE_LIMIT: i64 = 40_000;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -35,6 +37,9 @@ pub struct SaleLine {
     // the catalogue price when it was sold; set by the core, never the till
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub list_cents: Option<i64>,
+    // the repair this line delivers, or the one it is the deposit for
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repair_id: Option<i64>,
 }
 
 fn is_zero(n: &i64) -> bool {
@@ -251,7 +256,11 @@ pub fn last_print(conn: &Connection) -> Result<Option<PrintRow>> {
 
 // the logo a ticket was printed with
 pub fn logo_for(conn: &Connection, t: &TicketRecord) -> Result<Option<settings::Logo>> {
-    match t.shop.logo {
+    shop_logo(conn, &t.shop)
+}
+
+pub fn shop_logo(conn: &Connection, shop: &ShopInfo) -> Result<Option<settings::Logo>> {
+    match shop.logo {
         -1 => settings::logo(conn),
         0 => Ok(None),
         id => settings::logo_by_id(conn, id),
@@ -398,10 +407,11 @@ pub fn next_number(conn: &Connection, prefix: &str, tag: &str, issued_at: &str) 
     Ok((series, seq, number))
 }
 
-// highest number used per series, in the database or as a floor
+// highest number used per series, tickets and repairs, in the database or as a floor
 pub fn series_marks(conn: &Connection) -> Result<BTreeMap<String, i64>> {
     let mut stmt = conn.prepare(
-        "SELECT series, MAX(seq) FROM (SELECT series, seq FROM tickets UNION ALL SELECT series, seq FROM series_floor)
+        "SELECT series, MAX(seq) FROM (SELECT series, seq FROM tickets UNION ALL SELECT series, seq FROM repairs
+                                       UNION ALL SELECT series, seq FROM series_floor)
          GROUP BY series",
     )?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
@@ -409,11 +419,17 @@ pub fn series_marks(conn: &Connection) -> Result<BTreeMap<String, i64>> {
 }
 
 // Takes numbers recorded outside the database into account. Returns the
-// ranges this database has no ticket for, e.g. after restoring an old copy.
+// ranges this database has no ticket or repair for, e.g. after restoring an
+// old copy.
 pub fn raise_floors(conn: &Connection, marks: &BTreeMap<String, i64>) -> Result<Vec<(String, i64, i64)>> {
     let mut missing = Vec::new();
     for (series, seq) in marks {
-        let have: i64 = conn.query_row("SELECT COALESCE(MAX(seq), 0) FROM tickets WHERE series = ?1", [series], |r| r.get(0))?;
+        let have: i64 = conn.query_row(
+            "SELECT MAX(COALESCE((SELECT MAX(seq) FROM tickets WHERE series = ?1), 0),
+                        COALESCE((SELECT MAX(seq) FROM repairs WHERE series = ?1), 0))",
+            [series],
+            |r| r.get(0),
+        )?;
         conn.execute(
             "INSERT INTO series_floor (series, seq) VALUES (?1, ?2)
              ON CONFLICT(series) DO UPDATE SET seq = MAX(seq, excluded.seq)",
@@ -579,9 +595,9 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
     }
     for (pos, (l, of_line)) in t.lines.iter().enumerate() {
         tx.execute(
-            "INSERT INTO ticket_lines (ticket_id, pos, product_id, name, qty, unit_cents, vat_bp, total_cents, refund_of_line, list_cents)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-            params![id, pos as i64, l.product_id, l.name, l.qty, l.unit_cents, l.vat_bp, l.total(), of_line, l.list_cents],
+            "INSERT INTO ticket_lines (ticket_id, pos, product_id, name, qty, unit_cents, vat_bp, total_cents, refund_of_line, list_cents, repair_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![id, pos as i64, l.product_id, l.name, l.qty, l.unit_cents, l.vat_bp, l.total(), of_line, l.list_cents, l.repair_id],
         )?;
         if let (Some(pid), false) = (l.product_id, t.training) {
             tx.execute(
@@ -611,20 +627,16 @@ pub fn by_sale_id(conn: &Connection, sale_id: &str) -> Result<Option<i64>> {
     Ok(conn.query_row("SELECT id FROM tickets WHERE client_id = ?1", [sale_id], |r| r.get(0)).optional()?)
 }
 
-// the bool is true when this cart had already been sold and nothing new was issued
-pub fn sell(
-    conn: &mut Connection,
-    user: &SessionUser,
-    s: &Settings,
+// a sale that passed every check and knows its totals, not yet written
+pub struct Checked {
     lines: Vec<SaleLine>,
-    pay: &PaymentIn,
-    opts: &SaleOpts,
-) -> Result<(TicketRecord, bool)> {
-    let sale_id = opts.sale_id.as_deref().map(str::trim).filter(|x| !x.is_empty());
-    if sale_id.is_some_and(|x| x.len() > 64 || !x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
-        return fail("E_INVALID:saleId");
-    }
-    let mut lines = validate(lines)?;
+    totals: Totals,
+    payment: Payment,
+    customer: Option<Customer>,
+}
+
+pub fn check(s: &Settings, lines: Vec<SaleLine>, pay: &PaymentIn, opts: &SaleOpts) -> Result<Checked> {
+    let lines = validate(lines)?;
     // the AEAT refuses any other rate, and a refused record means an invoice
     // that has to be issued again
     if verifactu::Env::of(s).is_some() && !s.training && lines.iter().any(|l| !verifactu::rate_allowed(l.vat_bp)) {
@@ -638,15 +650,18 @@ pub fn sell(
     if customer.is_none() && totals.total_cents > SIMPLIFIED_LIMIT {
         return fail("E_OVER_LIMIT");
     }
-    let payment = resolve_payment(pay, totals.total_cents)?;
-
-    // IMMEDIATE takes the write lock before reading MAX(seq), so two
-    // instances can never hand out the same number
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    if let Some(done) = sale_id.map(|x| by_sale_id(&tx, x)).transpose()?.flatten() {
-        drop(tx);
-        return Ok((load(conn, done)?, true));
+    if customer.is_none() && totals.total_cents > SERVICE_LIMIT && lines.iter().any(|l| l.repair_id.is_some()) {
+        return fail("E_OVER_LIMIT_SERVICE");
     }
+    let payment = resolve_payment(pay, totals.total_cents)?;
+    Ok(Checked { lines, totals, payment, customer })
+}
+
+// Writes a checked sale. The caller holds an IMMEDIATE transaction, which
+// takes the write lock before MAX(seq) is read, so two instances can never
+// hand out the same number.
+pub fn write_sale(tx: &Connection, user: &SessionUser, s: &Settings, c: Checked, sale_id: Option<&str>, clock_ok: bool) -> Result<i64> {
+    let Checked { mut lines, totals, payment, customer } = c;
     // a cart can outlive its products (restored backup, another database);
     // such lines are sold as free items rather than failing the sale. Known
     // ones note the catalogue price, so a price changed at the till shows.
@@ -669,11 +684,44 @@ pub fn sell(
         refund_of: None,
         reason: None,
         client_id: sale_id,
-        clock_ok: opts.clock_ok,
+        clock_ok,
         customer: customer.as_ref(),
         training: s.training,
     };
-    let id = insert(&tx, user, s, &t)?;
+    insert(tx, user, s, &t)
+}
+
+// the bool is true when this cart had already been sold and nothing new was
+// issued. A line with a repair on it delivers that repair.
+pub fn sell(
+    conn: &mut Connection,
+    user: &SessionUser,
+    s: &Settings,
+    lines: Vec<SaleLine>,
+    pay: &PaymentIn,
+    opts: &SaleOpts,
+) -> Result<(TicketRecord, bool)> {
+    let sale_id = opts.sale_id.as_deref().map(str::trim).filter(|x| !x.is_empty());
+    if sale_id.is_some_and(|x| x.len() > 64 || !x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+        return fail("E_INVALID:saleId");
+    }
+    let mut lines = lines;
+    repairs::canon(conn, &mut lines)?;
+    let c = check(s, lines, pay, opts)?;
+    let delivers = c.lines.iter().any(|l| l.repair_id.is_some());
+    // a practice sale must not hand a real phone back
+    if delivers && s.training {
+        return fail("E_REPAIR_TRAINING");
+    }
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some(done) = sale_id.map(|x| by_sale_id(&tx, x)).transpose()?.flatten() {
+        drop(tx);
+        return Ok((load(conn, done)?, true));
+    }
+    let id = write_sale(&tx, user, s, c, sale_id, opts.clock_ok)?;
+    if delivers {
+        repairs::delivered(&tx, id, &user.name)?;
+    }
     tx.commit()?;
     Ok((load(conn, id)?, false))
 }
@@ -711,6 +759,7 @@ pub fn plan_refund(conn: &Connection, a: &RefundIn) -> Result<RefundPlan> {
             qty: -qty,
             unit_cents: src.unit_cents,
             vat_bp: src.vat_bp,
+            repair_id: src.repair_id,
             ..SaleLine::default()
         };
         lines.push((back, line_id));
@@ -753,7 +802,7 @@ pub fn refund(conn: &mut Connection, user: &SessionUser, s: &Settings, a: &Refun
     load(conn, id)
 }
 
-fn reference(conn: &Connection, id: i64) -> Result<Option<TicketRef>> {
+pub fn reference(conn: &Connection, id: i64) -> Result<Option<TicketRef>> {
     Ok(conn
         .query_row(
             "SELECT id, number, issued_at, total_cents, voided_at IS NOT NULL FROM tickets WHERE id = ?1",
@@ -824,7 +873,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
         "SELECT l.id, l.product_id, l.name, l.qty, l.unit_cents, l.vat_bp,
                 (SELECT COALESCE(-SUM(b.qty), 0) FROM ticket_lines b JOIN tickets t ON t.id = b.ticket_id
                   WHERE b.refund_of_line = l.id AND t.voided_at IS NULL),
-                l.list_cents
+                l.list_cents, l.repair_id
          FROM ticket_lines l WHERE l.ticket_id = ?1 ORDER BY l.pos",
     )?;
     rec.lines = stmt
@@ -838,6 +887,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                 vat_bp: r.get(5)?,
                 refunded: r.get(6)?,
                 list_cents: r.get(7)?,
+                repair_id: r.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -933,6 +983,8 @@ pub fn void(conn: &mut Connection, id: i64, by: &str, reason: &str) -> Result<()
         return fail("E_NOT_FOUND");
     }
     verifactu::anulacion(&tx, id, &settings::load(&tx)?, &Local::now())?;
+    // a phone this ticket handed back is waiting in the shop again
+    repairs::undelivered(&tx, id, by)?;
     tx.execute(
         "UPDATE products SET sold_qty = MAX(0, sold_qty - (
              SELECT COALESCE(SUM(qty), 0) FROM ticket_lines WHERE ticket_id = ?1 AND product_id = products.id))

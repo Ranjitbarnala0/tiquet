@@ -48,6 +48,8 @@ pub struct Settings {
     // button in the header
     pub autostart: bool,
     pub fullscreen: bool,
+    // printed on the resguardo a customer gets for a phone left for repair
+    pub repair_terms: String,
 }
 
 impl Default for Settings {
@@ -82,6 +84,7 @@ impl Default for Settings {
             cert: String::new(),
             autostart: false,
             fullscreen: false,
+            repair_terms: "La reparación tiene 3 meses de garantía. Haga una copia de sus datos antes de dejar el equipo.".into(),
         }
     }
 }
@@ -131,6 +134,7 @@ impl Settings {
             self.verifactu = "off".into();
         }
         self.cert = self.cert.chars().filter(char::is_ascii_hexdigit).take(40).collect::<String>().to_uppercase();
+        self.repair_terms = self.repair_terms.trim().chars().take(600).collect();
         self
     }
 }
@@ -190,6 +194,10 @@ pub fn load(conn: &Connection) -> Result<Settings> {
 
 pub fn save(conn: &Connection, s: Settings) -> Result<Settings> {
     let mut s = s.clean();
+    // REP2026 is the repairs' series; RE would make it the practice tickets' too
+    if ["RE", "REP"].contains(&s.ticket_prefix.as_str()) {
+        return fail("E_INVALID:ticketPrefix");
+    }
     if !s.shop_nif.trim().is_empty() {
         if !crate::nif::spanish(&s.shop_nif) {
             return fail("E_INVALID:nif");

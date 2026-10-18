@@ -323,6 +323,81 @@ CREATE TRIGGER fiscal_sends_no_delete BEFORE DELETE ON fiscal_sends
 BEGIN SELECT RAISE(ABORT, 'billing records cannot be deleted'); END;
 "#;
 
+// v8: repair orders. A phone left at the shop gets a number of its own per
+// year (REP2026-000001), and every change of status is kept with who and
+// when. Repairs are never deleted, and one delivered or cancelled is frozen.
+// The money stays in tickets: the deposit and the sale that delivered it are
+// tickets the repair points at, and their lines say which repair they are for.
+const SCHEMA_V8: &str = r#"
+CREATE TABLE repairs (
+  id             INTEGER PRIMARY KEY,
+  number         TEXT NOT NULL UNIQUE,
+  series         TEXT NOT NULL,
+  seq            INTEGER NOT NULL,
+  created_at     TEXT NOT NULL,
+  created_by     TEXT NOT NULL,
+  client_id      TEXT,
+  customer_name  TEXT NOT NULL,
+  customer_phone TEXT NOT NULL,
+  brand          TEXT NOT NULL,
+  model          TEXT NOT NULL,
+  colour         TEXT NOT NULL,
+  imei           TEXT NOT NULL,
+  fault          TEXT NOT NULL,
+  notes          TEXT NOT NULL,
+  estimate_cents INTEGER CHECK (estimate_cents IS NULL OR estimate_cents >= 0),
+  deposit_ticket INTEGER REFERENCES tickets (id),
+  status         TEXT NOT NULL CHECK (status IN ('received', 'in_progress', 'ready', 'not_repaired', 'delivered', 'cancelled')),
+  ticket_id      INTEGER REFERENCES tickets (id),
+  closed_at      TEXT,
+  closed_by      TEXT,
+  cancel_reason  TEXT,
+  shop           TEXT NOT NULL,
+  terms          TEXT NOT NULL,
+  UNIQUE (series, seq)
+);
+CREATE INDEX repairs_status ON repairs (status);
+CREATE INDEX repairs_ticket ON repairs (ticket_id);
+CREATE INDEX repairs_deposit ON repairs (deposit_ticket);
+CREATE UNIQUE INDEX repairs_client ON repairs (client_id) WHERE client_id IS NOT NULL;
+
+CREATE TABLE repair_events (
+  id        INTEGER PRIMARY KEY,
+  repair_id INTEGER NOT NULL REFERENCES repairs (id),
+  at        TEXT NOT NULL,
+  by_name   TEXT NOT NULL,
+  kind      TEXT NOT NULL CHECK (kind IN ('created', 'status', 'edited', 'delivered', 'reopened', 'cancelled')),
+  status    TEXT NOT NULL,
+  detail    TEXT
+);
+CREATE INDEX repair_events_repair ON repair_events (repair_id);
+
+ALTER TABLE ticket_lines ADD COLUMN repair_id INTEGER REFERENCES repairs (id);
+CREATE INDEX ticket_lines_repair ON ticket_lines (repair_id) WHERE repair_id IS NOT NULL;
+
+CREATE TRIGGER repairs_no_delete BEFORE DELETE ON repairs
+BEGIN SELECT RAISE(ABORT, 'repairs cannot be deleted'); END;
+
+CREATE TRIGGER repairs_fixed BEFORE UPDATE OF id, number, series, seq, created_at, created_by, client_id, shop, terms ON repairs
+BEGIN SELECT RAISE(ABORT, 'a repair keeps its number'); END;
+
+CREATE TRIGGER repairs_deposit_once BEFORE UPDATE OF deposit_ticket ON repairs WHEN OLD.deposit_ticket IS NOT NULL
+BEGIN SELECT RAISE(ABORT, 'a repair keeps its deposit'); END;
+
+-- delivered or cancelled is final; the one way back is a void of the ticket
+-- that delivered it
+CREATE TRIGGER repairs_closed BEFORE UPDATE ON repairs
+WHEN OLD.status IN ('delivered', 'cancelled')
+ AND NOT (OLD.status = 'delivered' AND NEW.status IN ('received', 'in_progress', 'ready', 'not_repaired')
+          AND NEW.ticket_id IS NULL AND (SELECT voided_at FROM tickets WHERE id = OLD.ticket_id) IS NOT NULL)
+BEGIN SELECT RAISE(ABORT, 'a delivered or cancelled repair cannot change'); END;
+
+CREATE TRIGGER repair_events_frozen BEFORE UPDATE ON repair_events
+BEGIN SELECT RAISE(ABORT, 'repair history cannot change'); END;
+CREATE TRIGGER repair_events_no_delete BEFORE DELETE ON repair_events
+BEGIN SELECT RAISE(ABORT, 'repair history cannot change'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -337,6 +412,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V5)],
     &[Step::Sql(SCHEMA_V6)],
     &[Step::Sql(SCHEMA_V7)],
+    &[Step::Sql(SCHEMA_V8)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

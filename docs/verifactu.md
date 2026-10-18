@@ -93,7 +93,7 @@ Taken on 2026-10-17.
   4. Switch to **Real**.
 - **Producer details:** the producer details and the date and place of the *declaración responsable* are placeholders (see Decisions).
 - **`ClaveRegimen`:** always `01`. Whether a retailer in *recargo de equivalencia* should use `18` on its own sales is not stated anywhere official. Ask the shop's gestoría; it is a one-line change.
-- **Repair invoice limit:** repairs above 400 € cannot go on a simplified invoice (RD 1619/2012 art. 4: the 3,000 € limit is for retail sales). Tiquet does not tell products from services yet.
+- **Repair invoice limit:** repairs above 400 € cannot go on a simplified invoice (RD 1619/2012 art. 4: the 3,000 € limit is for retail sales). Since 1.4, a ticket with a repair order on it (its deposit, or the sale that delivers it) asks for the customer's details above 400 €. A repair sold as a plain item, without a repair order, is still treated as a retail sale.
 - **`F3`:** a full invoice that replaces earlier tickets (`F3`) is not supported. The customer's details have to be given at the sale.
 - **Negative QR amounts:** the QR specification does not say whether a negative `importe` (returns) is accepted. Tiquet prints the record's own amount. Check one in Pruebas.
 - **Other mode:** the "no VERI\*FACTU" mode, its XAdES signatures and its event log are not implemented. They are not required for a VERI\*FACTU-only system.

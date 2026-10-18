@@ -56,6 +56,7 @@ export interface Settings {
   cert: string;
   autostart: boolean;
   fullscreen: boolean;
+  repairTerms: string;
 }
 
 export interface Customer {
@@ -111,6 +112,8 @@ export interface SaleLine {
   // stored tickets only
   id?: number;
   refunded?: number;
+  // the repair this line hands back, or the one it is the deposit for
+  repairId?: number;
 }
 
 export interface Recent {
@@ -259,6 +262,74 @@ export interface TicketSummary {
 
 export interface Finalized {
   ticket: TicketRecord;
+  duplicate?: boolean;
+  printed: boolean;
+  printError: string | null;
+  printWarning: string | null;
+}
+
+export type RepairStatus = 'received' | 'in_progress' | 'ready' | 'not_repaired' | 'delivered' | 'cancelled';
+
+// what is typed when the phone is left
+export interface RepairData {
+  customerName: string;
+  customerPhone: string;
+  brand: string;
+  model: string;
+  colour: string;
+  imei: string;
+  fault: string;
+  notes: string;
+  estimateCents: number | null;
+}
+
+export interface RepairEvent {
+  at: string;
+  byName: string;
+  kind: 'created' | 'status' | 'edited' | 'delivered' | 'reopened' | 'cancelled';
+  status: RepairStatus;
+  detail: { fields?: string[]; estimateFrom?: number | null; estimateTo?: number | null; ticket?: string; reason?: string } | null;
+}
+
+export interface Repair extends RepairData {
+  id: number;
+  number: string;
+  createdAt: string;
+  createdBy: string;
+  status: RepairStatus;
+  deposit: TicketRef | null;
+  // what the shop still holds of the deposit
+  depositCents: number;
+  dueCents: number | null;
+  ticket: TicketRef | null;
+  closedAt: string | null;
+  closedBy: string | null;
+  cancelReason: string | null;
+  lineName: string;
+  events: RepairEvent[];
+}
+
+export interface RepairSummary {
+  id: number;
+  number: string;
+  createdAt: string;
+  customerName: string;
+  customerPhone: string;
+  device: string;
+  status: RepairStatus;
+  estimateCents: number | null;
+}
+
+export interface RepairDetail {
+  repair: Repair;
+  resguardo: PLine[];
+  slip: PLine[];
+  logo: Logo | null;
+}
+
+export interface RepairCreated {
+  repair: Repair;
+  deposit: Finalized | null;
   duplicate?: boolean;
   printed: boolean;
   printError: string | null;

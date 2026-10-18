@@ -298,7 +298,7 @@ export function Tickets({
                   <Printer size={16} />
                   {onPaper ? tr('Reimprimir copia', 'Reprint copy') : tr('Imprimir', 'Print')}
                 </button>
-                {t.kind === 'sale' && (
+                {t.kind === 'sale' && t.lines.some((l) => !l.repairId) && (
                   <button className="btn" onClick={() => onRepeat(t)} title={tr('Una venta nueva con los mismos artículos', 'A new sale with the same items')}>
                     <Repeat2 size={16} />
                     {tr('Repetir', 'Repeat')}

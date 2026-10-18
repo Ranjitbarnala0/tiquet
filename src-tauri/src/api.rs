@@ -15,7 +15,7 @@ use crate::settings::{self, Logo, Settings};
 use crate::state::{AppState, SessionUser};
 use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
 use crate::verifactu::{self, Env};
-use crate::{aeat, auth, backup, cash, diag, log, money, os, printer, products, recovery, reports, users};
+use crate::{aeat, auth, backup, cash, diag, log, money, os, printer, products, recovery, repairs, reports, users};
 
 // key of the recovery code's own attempt counter (no user has id 0)
 const RECOVERY: i64 = 0;
@@ -246,6 +246,63 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 me.name
             ));
             Ok(issue(st, rec, &s, logo.as_ref(), flag(&a, "print", true)))
+        }
+
+        // cashiers take phones in, change their status, print and hand them
+        // back; only an admin cancels one
+        "repairs.list" => {
+            st.user()?;
+            to(repairs::list(&st.conn(), &parse(a)?)?)
+        }
+        "repairs.get" => repair_get(st, id(&a)?),
+        "repairs.preview" => {
+            let me = st.user()?;
+            repair_preview(st, &me, parse(a)?)
+        }
+        "repairs.create" => {
+            let me = st.user()?;
+            repair_create(st, &me, parse(a)?)
+        }
+        "repairs.update" => {
+            let me = st.user()?;
+            let r: repairs::RepairIn = parse(a.clone())?;
+            repairs::update(&mut st.conn(), id(&a)?, &me.name, &r)?;
+            repair_get(st, id(&a)?)
+        }
+        "repairs.status" => {
+            let me = st.user()?;
+            let status = a.get("status").and_then(Value::as_str).unwrap_or_default();
+            let r = repairs::set_status(&mut st.conn(), id(&a)?, &me.name, status)?;
+            log::info(format!("repair {} now {status}, by {}", r.number, me.name));
+            repair_get(st, id(&a)?)
+        }
+        "repairs.print" => {
+            st.user()?;
+            let what = a.get("what").and_then(Value::as_str).unwrap_or("both");
+            if !["resguardo", "slip", "both"].contains(&what) {
+                return fail("E_ARGS:what");
+            }
+            let (r, s, logo) = {
+                let conn = st.conn();
+                let r = repairs::load(&conn, id(&a)?)?;
+                let logo = tickets::shop_logo(&conn, &r.shop)?;
+                (r, settings::load(&conn)?, logo)
+            };
+            let warning = print_repair(st, &r, &s, logo.as_ref(), what)?;
+            Ok(json!({ "warning": warning }))
+        }
+        "repairs.deliver" => {
+            let me = st.user()?;
+            let r = repairs::deliver(&mut st.conn(), id(&a)?, &me.name)?;
+            log::info(format!("repair {} handed back by {} with nothing left to pay", r.number, me.name));
+            repair_get(st, id(&a)?)
+        }
+        "repairs.cancel" => {
+            let me = st.admin()?;
+            let reason = a.get("reason").and_then(Value::as_str).unwrap_or_default();
+            let r = repairs::cancel(&mut st.conn(), id(&a)?, &me.name, reason)?;
+            log::info(format!("repair {} cancelled by {}: {reason}", r.number, me.name));
+            repair_get(st, id(&a)?)
         }
 
         "reports.summary" => {
@@ -682,7 +739,8 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
         None => settings::load(&conn)?,
     };
     let logo = settings::logo(&conn)?;
-    let lines = if a.sample { tickets::sample_lines(s.default_vat_bp) } else { tickets::clamp(a.lines) };
+    let mut lines = if a.sample { tickets::sample_lines(s.default_vat_bp) } else { tickets::clamp(a.lines) };
+    repairs::canon(&conn, &mut lines)?;
     let totals = tickets::compute(&lines);
     let payment_in = if a.sample { Some(PaymentIn { method: "cash".into(), tendered_cents: Some(5000) }) } else { a.payment };
     let (payment, payment_error) = match payment_in.map(|p| tickets::resolve_payment(&p, totals.total_cents)) {
@@ -874,6 +932,108 @@ fn print_close(st: &AppState, id: i64, user: &str) -> Result<Option<String>> {
     };
     let bytes = escpos::document(&lines, None, &Opts::new(&s, false));
     printer::send(&st.sink, &s, "cierre", &bytes)
+}
+
+// the resguardo goes first, then the slip for the phone
+fn print_repair(st: &AppState, r: &repairs::Repair, s: &Settings, logo: Option<&Logo>, what: &str) -> Result<Option<String>> {
+    let mut data = Vec::new();
+    if what != "slip" {
+        data.extend(escpos::document(&layout::resguardo(r, s, logo.is_some()), logo, &Opts::new(s, false)));
+    }
+    if what != "resguardo" {
+        data.extend(escpos::document(&layout::repair_slip(r, s), None, &Opts::new(s, false)));
+    }
+    printer::send(&st.sink, s, &r.number, &data)
+}
+
+fn repair_get(st: &AppState, id: i64) -> Result<Value> {
+    st.user()?;
+    let conn = st.conn();
+    let r = repairs::load(&conn, id)?;
+    let s = settings::load(&conn)?;
+    let logo = tickets::shop_logo(&conn, &r.shop)?;
+    let (resguardo, slip) = (layout::resguardo(&r, &s, logo.is_some()), layout::repair_slip(&r, &s));
+    Ok(json!({ "repair": r, "resguardo": resguardo, "slip": slip, "logo": logo }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairPreviewIn {
+    #[serde(flatten)]
+    repair: repairs::RepairIn,
+    #[serde(default)]
+    deposit_cents: i64,
+    // a repair being corrected keeps its own number, date and deposit
+    #[serde(default)]
+    id: Option<i64>,
+}
+
+fn repair_preview(st: &AppState, me: &SessionUser, a: RepairPreviewIn) -> Result<Value> {
+    let conn = st.conn();
+    let s = settings::load(&conn)?;
+    let r = match a.id {
+        Some(id) => repairs::revised(&conn, id, &a.repair)?,
+        None => repairs::draft(&conn, me, &s, &a.repair, a.deposit_cents)?,
+    };
+    let logo = tickets::shop_logo(&conn, &r.shop)?.is_some();
+    Ok(json!({ "number": r.number, "resguardo": layout::resguardo(&r, &s, logo), "slip": layout::repair_slip(&r, &s) }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairCreateIn {
+    #[serde(flatten)]
+    repair: repairs::NewRepair,
+    #[serde(default = "yes")]
+    print: bool,
+}
+
+// The repair and its deposit ticket are saved before anything prints. The
+// deposit ticket prints like any sale (the original opens the drawer), then
+// the resguardo and the slip.
+fn repair_create(st: &AppState, me: &SessionUser, a: RepairCreateIn) -> Result<Value> {
+    let (created, s) = {
+        let mut conn = st.conn();
+        let s = settings::load(&conn)?;
+        (repairs::create(&mut conn, me, &s, &a.repair)?, s)
+    };
+    let repairs::Created { repair, deposit, duplicate } = created;
+    if duplicate {
+        log::warn(format!("repair {} was already taken in; not made again", repair.number));
+        return Ok(json!({ "repair": repair, "deposit": null, "printed": false, "printError": null, "printWarning": null, "duplicate": true }));
+    }
+    st.mark(&repair.number);
+    log::info(format!("repair {} taken in by {}", repair.number, me.name));
+    let deposit = match deposit {
+        Some(t) => {
+            st.note(&t);
+            aeat::kick();
+            log::info(format!("deposit {} {} {} for {}", t.number, money::fmt(t.total_cents), t.payment.method, repair.number));
+            let logo = tickets::logo_for(&st.conn(), &t)?;
+            Some(issue(st, t, &s, logo.as_ref(), a.print))
+        }
+        None => None,
+    };
+    let (print_error, print_warning) = if a.print {
+        let logo = tickets::shop_logo(&st.conn(), &repair.shop)?;
+        match print_repair(st, &repair, &s, logo.as_ref(), "both") {
+            Ok(w) => (None, w),
+            Err(e) => (Some(e.0), None),
+        }
+    } else {
+        (None, None)
+    };
+    if let Some(e) = print_error.as_ref().or(print_warning.as_ref()) {
+        log::warn(format!("print {}: {e}", repair.number));
+    }
+    backup::auto(&st.conn());
+    Ok(json!({
+        "repair": repair,
+        "deposit": deposit,
+        "printed": a.print && print_error.is_none(),
+        "printError": print_error,
+        "printWarning": print_warning,
+    }))
 }
 
 fn ticket_get(st: &AppState, id: i64) -> Result<Value> {
@@ -1196,6 +1356,82 @@ mod tests {
             assert!(text.contains(want), "{want} in {text}");
         }
         assert_eq!(dispatch(&st, "cash.state", json!({})).unwrap()["session"], Value::Null);
+    }
+
+    #[test]
+    fn a_cashier_takes_a_phone_in_and_hands_it_back_but_only_an_admin_cancels() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let jordi = dispatch(&st, "users.save", json!({ "name": "Jordi", "role": "cashier", "password": "4321" })).unwrap();
+        dispatch(&st, "logout", json!({})).unwrap();
+        dispatch(&st, "login", json!({ "userId": jordi["id"], "password": "4321" })).unwrap();
+        dispatch(&st, "cash.open", json!({ "floatCents": 5000 })).unwrap();
+        let printed = |st: &AppState| -> Vec<String> {
+            let mut files: Vec<_> = std::fs::read_dir(st.data_dir.join("prints")).unwrap().map(|e| e.unwrap().path()).collect();
+            files.sort();
+            files.iter().filter(|f| !f.to_string_lossy().contains("cajon")).map(|f| String::from_utf8_lossy(&std::fs::read(f).unwrap()).into_owned()).collect()
+        };
+
+        let phone = json!({
+            "customerName": "Joan García", "customerPhone": "600 123 456", "brand": "Apple", "model": "iPhone 12", "colour": "Negro",
+            "imei": "356789012345678", "fault": "No carga", "notes": "Código 9090", "estimateCents": 8000,
+            "depositCents": 2000, "payment": { "method": "cash", "tenderedCents": 5000 }, "requestId": "form-1"
+        });
+        let preview = dispatch(&st, "repairs.preview", phone.clone()).unwrap();
+        let c = dispatch(&st, "repairs.create", phone.clone()).unwrap();
+        let r = c["repair"].clone();
+        assert_eq!(preview["number"], r["number"]);
+        assert_eq!((c["printed"].clone(), c["printError"].clone()), (json!(true), Value::Null));
+        assert_eq!(c["deposit"]["ticket"]["payment"]["changeCents"], 3000);
+        assert_eq!(r["createdBy"], "Jordi");
+        // the deposit ticket with the drawer kick, then the resguardo and the slip
+        let out = printed(&st);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("Anticipo reparaci") && out[0].contains("\x1bp\0"));
+        assert!(out[1].contains("RESGUARDO DE REPARACI") && out[1].matches(r["number"].as_str().unwrap()).count() >= 3);
+        assert!(!out[1].contains("9090"));
+        // the deposit is money in the till
+        assert_eq!(dispatch(&st, "cash.state", json!({})).unwrap()["expectedCents"], 7000);
+        assert_eq!(dispatch(&st, "repairs.create", phone).unwrap()["duplicate"], true);
+
+        let id = r["id"].clone();
+        dispatch(&st, "repairs.status", json!({ "id": id, "status": "ready" })).unwrap();
+        dispatch(&st, "repairs.print", json!({ "id": id, "what": "slip" })).unwrap();
+        assert_eq!(printed(&st).len(), 3);
+        assert_eq!(dispatch(&st, "repairs.print", json!({ "id": id, "what": "todo" })).unwrap_err(), "E_ARGS:what");
+        assert_eq!(dispatch(&st, "repairs.cancel", json!({ "id": id, "reason": "error" })).unwrap_err(), "E_FORBIDDEN");
+        let open = dispatch(&st, "repairs.list", json!({ "q": "garcia" })).unwrap();
+        assert_eq!(open[0]["status"], "ready");
+
+        // Entregar y cobrar: the line Venta sells hands the phone back
+        let got = dispatch(&st, "repairs.get", json!({ "id": id })).unwrap();
+        assert_eq!(got["repair"]["dueCents"], 6000);
+        assert!(got["resguardo"].as_array().unwrap().iter().any(|l| l["text"].as_str().is_some_and(|t| t.contains("A pagar al recoger"))));
+        let line = json!({ "name": got["repair"]["lineName"], "qty": 1, "unitCents": 6000, "vatBp": 2100, "repairId": id });
+        let sale = json!({ "lines": [line], "payment": { "method": "card" } });
+        let p = dispatch(&st, "sale.preview", sale.clone()).unwrap();
+        let t = dispatch(&st, "sale.finalize", sale).unwrap();
+        assert_eq!(t["ticket"]["lines"][0]["repairId"], id);
+        let shown = dispatch(&st, "tickets.get", json!({ "id": t["ticket"]["id"] })).unwrap();
+        assert_eq!(shown["lines"], p["lines"]);
+        let after = dispatch(&st, "repairs.get", json!({ "id": id })).unwrap();
+        assert_eq!((after["repair"]["status"].clone(), after["repair"]["ticket"]["number"].clone()), (json!("delivered"), t["ticket"]["number"].clone()));
+        assert_eq!(dispatch(&st, "repairs.list", json!({})).unwrap().as_array().unwrap().len(), 0);
+
+        // an admin cancels one taken in by mistake
+        let mistake = json!({ "customerName": "Marta", "customerPhone": "699 000 000", "model": "Redmi 9", "fault": "Batería" });
+        let m = dispatch(&st, "repairs.create", mistake).unwrap()["repair"]["id"].clone();
+        dispatch(&st, "logout", json!({})).unwrap();
+        dispatch(&st, "login", json!({ "userId": 1, "password": "123456" })).unwrap();
+        assert_eq!(dispatch(&st, "repairs.cancel", json!({ "id": m, "reason": " " })).unwrap_err(), "E_REASON");
+        let gone = dispatch(&st, "repairs.cancel", json!({ "id": m, "reason": "duplicada" })).unwrap();
+        assert_eq!(gone["repair"]["status"], "cancelled");
+        assert_eq!(dispatch(&st, "repairs.list", json!({ "status": "cancelled" })).unwrap()[0]["id"], m);
+        // REP2026 is the repairs' series, so tickets cannot take it
+        for prefix in ["REP", "RE"] {
+            assert_eq!(dispatch(&st, "settings.save", json!({ "ticketPrefix": prefix })).unwrap_err(), "E_INVALID:ticketPrefix");
+        }
+        assert_eq!(dispatch(&st, "settings.save", json!({ "ticketPrefix": "REPA" })).unwrap()["ticketPrefix"], "REPA");
     }
 
     #[test]

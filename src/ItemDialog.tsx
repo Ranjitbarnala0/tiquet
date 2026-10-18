@@ -13,6 +13,7 @@ export interface ItemDraft {
   qty: number;
   vatBp: number;
   productId?: number;
+  repairId?: number;
 }
 
 interface Props {

@@ -1,6 +1,6 @@
 [package]
 name = "tiquet"
-version = "1.3.0"
+version = "1.4.0"
 description = "Tiquet: caja y tickets para comercio"
 edition = "2021"
 rust-version = "1.77"

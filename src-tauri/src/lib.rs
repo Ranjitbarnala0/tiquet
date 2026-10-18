@@ -17,6 +17,7 @@ pub mod paths;
 pub mod printer;
 pub mod products;
 pub mod recovery;
+pub mod repairs;
 pub mod reports;
 pub mod settings;
 pub mod state;

@@ -38,6 +38,28 @@ const errors: Record<string, [string, string]> = {
     'Más de 3.000 €: hace falta una factura con los datos del cliente.',
     'Over 3,000 EUR: this needs an invoice with the customer details.',
   ],
+  E_OVER_LIMIT_SERVICE: [
+    'Con una reparación, más de 400 € necesitan factura con los datos del cliente.',
+    'With a repair on it, over 400 EUR needs an invoice with the customer details.',
+  ],
+  E_REPAIR_TRAINING: [
+    'En modo prueba no se cobran anticipos ni entregas de reparaciones. Sal del modo prueba para cobrarlos.',
+    'Repair deposits and pick-ups are not charged in training mode. Leave training mode to charge them.',
+  ],
+  E_REPAIR_CLOSED: ['Esta reparación ya está entregada o cancelada.', 'This repair has already been handed back or cancelled.'],
+  E_REPAIR_GONE: ['La reparación de este ticket ya no está en Tiquet: quita esa línea.', 'The repair on this ticket is no longer in Tiquet: remove that line.'],
+  E_REPAIR_TWICE: ['La misma reparación está dos veces en el ticket.', 'The same repair is on the ticket twice.'],
+  E_REPAIR_DEPOSIT: [
+    'Esta reparación tiene un anticipo cobrado. Primero anula o devuelve el ticket del anticipo en Tickets.',
+    'This repair has a deposit paid. Void or return the deposit ticket in Tickets first.',
+  ],
+  E_REPAIR_DEPOSIT_HIGH: [
+    'El anticipo es mayor que el precio. Un administrador tiene que devolver antes el ticket del anticipo en Tickets.',
+    'The deposit is more than the price. An administrator has to return the deposit ticket in Tickets first.',
+  ],
+  E_REPAIR_DUE: ['Queda dinero por cobrar: entrégala con «Entregar y cobrar».', 'There is money left to charge: use "Hand back and charge".'],
+  E_REPAIR_PRICE: ['Pon el precio de la reparación.', 'Enter the repair price.'],
+  E_DEPOSIT_HIGH: ['El anticipo no puede ser mayor que el presupuesto.', 'The deposit cannot be more than the estimate.'],
   E_TRAINING: [
     'En modo prueba solo se devuelven ventas de prueba, y fuera de él solo ventas reales.',
     'In training mode only practice sales can be returned, and outside it only real ones.',
@@ -133,6 +155,14 @@ const fields: Record<string, [string, string]> = {
   customerNif: ['NIF del cliente (revisa la letra)', 'customer NIF (check the letter)'],
   amount: ['importe', 'amount'],
   legalName: ['titular o razón social, en Ajustes > Comercio', 'owner or company name, in Settings > Shop'],
+  customerPhone: ['teléfono del cliente', 'customer phone'],
+  device: ['marca o modelo del equipo', 'device make or model'],
+  fault: ['avería', 'fault'],
+  estimate: ['presupuesto', 'estimate'],
+  deposit: ['anticipo', 'deposit'],
+  status: ['estado', 'status'],
+  requestId: ['identificador del formulario', 'form identifier'],
+  ticketPrefix: ['prefijo de numeración (RE y REP son de las reparaciones)', 'numbering prefix (RE and REP belong to repairs)'],
 };
 
 export function errorText(e: unknown): string {

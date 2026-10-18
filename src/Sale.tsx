@@ -182,12 +182,13 @@ function PriceInput({ cents, onDone }: { cents: number; onDone: (c: number | nul
   );
 }
 
-function QtyInput({ qty, onChange, onExit }: { qty: number; onChange: (n: number) => void; onExit: () => void }) {
+function QtyInput({ qty, onChange, onExit, disabled }: { qty: number; onChange: (n: number) => void; onExit: () => void; disabled?: boolean }) {
   const [v, setV] = useState(String(qty));
   useEffect(() => setV(String(qty)), [qty]);
   return (
     <input
       className="qty-input"
+      disabled={disabled}
       value={v}
       inputMode="numeric"
       aria-label={tr('Cantidad', 'Quantity')}
@@ -352,7 +353,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   useEffect(() => setHi(0), [query]);
 
   const tendered = method === 'cash' ? parseMoney(given, 999_999_999) : null;
-  const payload = lines.map(({ productId, name, qty, unitCents, vatBp }) => ({ productId, name, qty, unitCents, vatBp }));
+  const payload = lines.map(({ productId, name, qty, unitCents, vatBp, repairId }) => ({ productId, name, qty, unitCents, vatBp, repairId }));
   const linesKey = JSON.stringify(payload);
   const customerOk = !invoice || (customer.name.trim().length > 0 && customerNif(customer.nif));
   const floatCents = parseMoney(float || '0', 999_999_999);
@@ -401,8 +402,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const badAmount = method === 'cash' && given.trim() !== '' && tendered === null;
   const tooMuch = method === 'cash' && !short && preview?.paymentError === 'E_TENDERED_HIGH';
   const negative = total < 0;
-  // a simplified invoice stops at 3.000 EUR; past that it needs the customer
-  const overLimit = total > 300_000;
+  // a simplified invoice stops at 3.000 EUR, or 400 EUR with a repair (a
+  // service) on it; past that it needs the customer
+  const service = lines.some((l) => l.repairId);
+  const limit = service ? 40_000 : 300_000;
+  const overLimit = total > limit;
   const blocked = short || badAmount || tooMuch || negative || !fresh || !customerOk || (overLimit && !invoice);
 
   const commit = (next: CartLine[]) => {
@@ -435,19 +439,24 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     if (p.priceCents === 0) setPriceEdit(line.key);
   };
 
-  // adds items, merging with a line that is the same thing at the same price
+  // adds items, merging with a line that is the same thing at the same price;
+  // a repair is one line of its own and goes on the ticket once
   const addMany = (items: ItemDraft[]) => {
     let next = lines;
     let lastKey: string | null = null;
     for (const d of items) {
-      const same = next.find(
-        (l) => l.name === d.name && l.unitCents === d.unitCents && l.vatBp === d.vatBp && (l.productId ?? null) === (d.productId ?? null),
+      const same = next.find((l) =>
+        d.repairId
+          ? l.repairId === d.repairId
+          : !l.repairId && l.name === d.name && l.unitCents === d.unitCents && l.vatBp === d.vatBp && (l.productId ?? null) === (d.productId ?? null),
       );
-      if (same) {
+      if (same && d.repairId) {
+        lastKey = same.key;
+      } else if (same) {
         next = next.map((l) => (l.key === same.key ? { ...l, qty: Math.min(999, l.qty + d.qty) } : l));
         lastKey = same.key;
       } else {
-        const line: CartLine = { key: uid(), name: d.name, qty: d.qty, unitCents: d.unitCents, vatBp: d.vatBp, productId: d.productId };
+        const line: CartLine = { key: uid(), name: d.name, qty: d.qty, unitCents: d.unitCents, vatBp: d.vatBp, productId: d.productId, repairId: d.repairId };
         next = [...next, line];
         lastKey = line.key;
       }
@@ -470,16 +479,27 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   // the same items again, e.g. a customer buying what they bought last time
   const repeat = (t: TicketRecord) => {
-    addMany(t.lines.filter((l) => l.qty > 0).map(toDraft));
+    addMany(t.lines.filter((l) => l.qty > 0 && !l.repairId).map(toDraft));
     toast.ok(`${tr('Añadidos los artículos de', 'Added the items from')} ${t.number}`);
   };
+  // a repair is handed back once; there is nothing in it to sell again
+  const repeatable = (t: TicketRecord) => t.lines.some((l) => l.qty > 0 && !l.repairId);
 
   const handled = useRef(0);
   useEffect(() => {
     if (!incoming || incoming.n === handled.current) return;
     handled.current = incoming.n;
+    const repair = incoming.lines.find((l) => l.repairId);
+    if (repair && lines.some((l) => l.repairId === repair.repairId)) {
+      toast.info(tr('Esa reparación ya está en el ticket', 'That repair is already on the ticket'));
+      return;
+    }
     addMany(incoming.lines);
-    toast.ok(`${tr('Añadidos los artículos de', 'Added the items from')} ${incoming.from}`);
+    toast.ok(
+      repair
+        ? `${tr('Reparación', 'Repair')} ${incoming.from} ${tr('en el ticket: cóbrala con F12', 'is on the ticket: charge it with F12')}`
+        : `${tr('Añadidos los artículos de', 'Added the items from')} ${incoming.from}`,
+    );
   }, [incoming]);
 
   const addCustom = (name: string, cents: number, qty: number) => {
@@ -497,8 +517,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     setQuery('');
   };
 
+  // a repair is always one unit
   const setQty = (key: string, qty: number) =>
-    commit(lines.map((l) => (l.key === key ? { ...l, qty: Math.min(999, Math.max(1, Math.round(qty))) } : l)));
+    commit(lines.map((l) => (l.key === key && !l.repairId ? { ...l, qty: Math.min(999, Math.max(1, Math.round(qty))) } : l)));
 
   const setPrice = (key: string, cents: number) => commit(lines.map((l) => (l.key === key ? { ...l, unitCents: cents } : l)));
 
@@ -573,7 +594,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     setGiven('');
     openedAt.current = performance.now();
     burst.current = { text: '', last: 0, fast: 0, given: '' };
-    setInvoice(total > 300_000);
+    setInvoice(total > limit);
     setCustomer({ name: '', nif: '', address: '' });
     setPaying(true);
   };
@@ -653,7 +674,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           reprint(r.ticket.id, false),
         );
       } else {
-        toast.ok(`${tr('Ticket', 'Ticket')} ${r.ticket.number}${change}`);
+        const handed = payload.some((l) => l.repairId) ? ` · ${tr('reparación entregada', 'repair handed back')}` : '';
+        toast.ok(`${tr('Ticket', 'Ticket')} ${r.ticket.number}${change}${handed}`);
         if (r.printWarning) toast.info(warningText(r.printWarning));
         if (r.printed) refreshPrinter();
       }
@@ -662,7 +684,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     } catch (e) {
       if (e instanceof ApiError && e.code === 'E_CLOCK') setClock({ last: e.detail, print });
       else {
-        if (e instanceof ApiError && e.code === 'E_OVER_LIMIT') setInvoice(true);
+        if (e instanceof ApiError && (e.code === 'E_OVER_LIMIT' || e.code === 'E_OVER_LIMIT_SERVICE')) setInvoice(true);
         toast.error(errorText(e));
       }
     } finally {
@@ -929,25 +951,30 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
               {lines.map((l) => (
                 <div key={l.key} className={`cart-row${sel === l.key ? ' sel' : ''}`} onMouseDown={() => setSel(l.key)}>
                   {flash?.key === l.key && <i className="row-flash" key={flash.n} />}
-                  <button className="cart-name" onMouseDown={keep} onClick={() => setItem(l.key)} title={tr('Cambiar nombre, precio o IVA', 'Change name, price or VAT')}>
+                  <button
+                    className="cart-name"
+                    onMouseDown={keep}
+                    onClick={() => (l.repairId ? setPriceEdit(l.key) : setItem(l.key))}
+                    title={l.repairId ? tr('Cambiar precio', 'Change price') : tr('Cambiar nombre, precio o IVA', 'Change name, price or VAT')}
+                  >
                     <span>
                       {l.name}
                       <Pencil size={13} className="cart-edit" aria-hidden="true" />
                     </span>
                     {(!l.productId || l.vatBp !== settings.defaultVatBp) && (
                       <small>
-                        {!l.productId && tr('Artículo libre', 'Custom item')}
+                        {!l.productId && (l.repairId ? tr('Reparación', 'Repair') : tr('Artículo libre', 'Custom item'))}
                         {!l.productId && l.vatBp !== settings.defaultVatBp && ' · '}
                         {l.vatBp !== settings.defaultVatBp && `IVA ${rate(l.vatBp)}`}
                       </small>
                     )}
                   </button>
                   <div className="stepper">
-                    <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty - 1)} disabled={l.qty <= 1} aria-label={tr('Uno menos', 'One less')}>
+                    <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty - 1)} disabled={l.qty <= 1 || !!l.repairId} aria-label={tr('Uno menos', 'One less')}>
                       <Minus size={15} />
                     </button>
-                    <QtyInput qty={l.qty} onChange={(n) => setQty(l.key, n)} onExit={() => searchRef.current?.focus()} />
-                    <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty + 1)} disabled={l.qty >= 999} aria-label={tr('Uno más', 'One more')}>
+                    <QtyInput qty={l.qty} onChange={(n) => setQty(l.key, n)} onExit={() => searchRef.current?.focus()} disabled={!!l.repairId} />
+                    <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty + 1)} disabled={l.qty >= 999 || !!l.repairId} aria-label={tr('Uno más', 'One more')}>
                       <Plus size={15} />
                     </button>
                   </div>
@@ -1125,7 +1152,13 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                         </button>
                       )}
                     </div>
-                    {overLimit && <p className="pay-hint">{tr('Más de 3.000 €: hace falta una factura con los datos del cliente.', 'Over 3,000 EUR: this needs an invoice with the customer details.')}</p>}
+                    {overLimit && (
+                      <p className="pay-hint">
+                        {service
+                          ? tr('Con una reparación, más de 400 €: hace falta una factura con los datos del cliente.', 'With a repair, over 400 EUR: this needs an invoice with the customer details.')
+                          : tr('Más de 3.000 €: hace falta una factura con los datos del cliente.', 'Over 3,000 EUR: this needs an invoice with the customer details.')}
+                      </p>
+                    )}
                     <div className="grid2">
                       <Field label={tr('Nombre o razón social', 'Name or company')}>
                         <input value={customer.name} onChange={(e) => setCustomer({ ...customer, name: e.target.value })} maxLength={120} />
@@ -1228,10 +1261,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                 {tr('Último', 'Last')} <b className="mono">{last.number}</b> · {eur(last.totalCents)}
               </span>
               <span className="last-actions">
-                <button className="link" onMouseDown={keep} onClick={() => repeat(last)} title={tr('Añadir los mismos artículos a este ticket', 'Add the same items to this ticket')}>
-                  <Repeat2 size={14} />
-                  {tr('Repetir', 'Repeat')}
-                </button>
+                {repeatable(last) && (
+                  <button className="link" onMouseDown={keep} onClick={() => repeat(last)} title={tr('Añadir los mismos artículos a este ticket', 'Add the same items to this ticket')}>
+                    <Repeat2 size={14} />
+                    {tr('Repetir', 'Repeat')}
+                  </button>
+                )}
                 {!noPrinter && (
                   <button className="link" onMouseDown={keep} onClick={() => reprint(last.id, true)}>
                     <Printer size={14} />

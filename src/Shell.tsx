@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { BadgeCheck, ChartColumn, FlaskConical, Lock, Maximize2, Minimize2, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet } from 'lucide-react';
+import { BadgeCheck, ChartColumn, FlaskConical, Lock, Maximize2, Minimize2, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet, Wrench } from 'lucide-react';
 import { call, native } from './api';
 import { Cash } from './Cash';
 import { initials } from './format';
 import { errorText, tr, type Lang } from './i18n';
 import { Products } from './Products';
+import { Repairs } from './Repairs';
 import { Reports } from './Reports';
 import { Sale } from './Sale';
 import { SettingsScreen } from './SettingsScreen';
@@ -18,7 +19,7 @@ import { UpdateBar, useUpdate } from './Update';
 import { Users } from './Users';
 import { sendError, stuck } from './Verifactu';
 
-type Screen = 'sale' | 'tickets' | 'cash' | 'products' | 'reports' | 'users' | 'settings';
+type Screen = 'sale' | 'tickets' | 'repairs' | 'cash' | 'products' | 'reports' | 'users' | 'settings';
 export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'data' | 'verifactu';
 
 interface Props {
@@ -109,7 +110,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   }, []);
 
   useEffect(() => {
-    if (!admin && screen !== 'sale' && screen !== 'tickets' && screen !== 'cash') setScreen('sale');
+    if (!admin && !['sale', 'tickets', 'repairs', 'cash'].includes(screen)) setScreen('sale');
   }, [admin, screen]);
 
   // the core opened the window full screen if Ajustes says so; only the
@@ -241,6 +242,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const nav: { id: Screen; label: string; icon: typeof ShoppingBag }[] = [
     { id: 'sale', label: tr('Venta', 'Sale'), icon: ShoppingBag },
     { id: 'tickets', label: tr('Tickets', 'Tickets'), icon: ReceiptText },
+    { id: 'repairs', label: tr('Reparaciones', 'Repairs'), icon: Wrench },
     { id: 'cash', label: tr('Caja', 'Till'), icon: Wallet },
   ];
   if (admin) {
@@ -352,9 +354,21 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
             onSetupPrinter={setupPrinter}
             onRepeat={(t: TicketRecord) => {
               const lines = t.lines
-                .filter((l) => l.qty > 0)
+                .filter((l) => l.qty > 0 && !l.repairId)
                 .map((l) => ({ name: l.name, qty: l.qty, unitCents: l.unitCents, vatBp: l.vatBp, productId: l.productId ?? undefined }));
               setIncoming((cur) => ({ lines, from: t.number, n: (cur?.n ?? 0) + 1 }));
+              setScreen('sale');
+            }}
+          />
+        )}
+        {screen === 'repairs' && (
+          <Repairs
+            user={user}
+            settings={settings}
+            logo={logo}
+            onSetupPrinter={setupPrinter}
+            onCharge={(line, number) => {
+              setIncoming((cur) => ({ lines: [line], from: number, n: (cur?.n ?? 0) + 1 }));
               setScreen('sale');
             }}
           />

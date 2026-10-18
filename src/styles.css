@@ -2145,6 +2145,166 @@ code {
   text-decoration: line-through;
 }
 
+/* repairs */
+.badge.green {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.struck {
+  text-decoration: line-through;
+  color: var(--faint);
+}
+
+.detail-head .actions.wrap {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.repair-body {
+  flex: 1;
+  overflow: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 420px);
+  gap: 24px;
+  align-items: start;
+  padding: 24px 28px 40px;
+}
+
+.repair-info {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+.info-block {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.history {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.history li {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: var(--panel);
+  font-size: 13px;
+}
+
+.history-at {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.repair-paper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.drawer.wide {
+  width: min(960px, 100vw);
+}
+
+.repair-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 360px);
+  gap: 24px;
+  align-items: start;
+}
+
+.repair-form .repair-paper {
+  position: sticky;
+  top: 0;
+  padding: 16px 12px;
+  border-radius: 14px;
+  background: var(--side);
+}
+
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+
+.repair-pay {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+}
+
+.form-note {
+  align-self: center;
+}
+
+.deliver-sum {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+
+.deliver-sum > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.deliver-sum .due {
+  align-items: baseline;
+  font-weight: 600;
+}
+
+.deliver-sum .due strong {
+  font-size: 22px;
+  font-family: var(--display);
+}
+
+@media (max-width: 1180px) {
+  .repair-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .repair-form {
+    grid-template-columns: 1fr;
+  }
+
+  .repair-form .repair-paper {
+    position: static;
+  }
+}
+
 /* returns */
 .refund {
   display: grid;
@@ -2321,6 +2481,8 @@ code {
 .drawer-back {
   place-items: stretch end;
   padding: 0;
+  /* the drawer is the window's height and its body scrolls, however long the form */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 .drawer {

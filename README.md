@@ -18,7 +18,7 @@ Built for a phone accessories shop in Spain that was printing tickets from a 199
 
 Runs on Windows 10 and 11 (64-bit). No administrator rights are needed: it installs for the current Windows user.
 
-1. Download `Tiquet_1.3.0_x64-setup.exe` from [Releases](../../releases/latest). The installer is built on a clean GitHub machine by the [release workflow](.github/workflows/release.yml), which also starts the built app once before publishing; the release lists its SHA-256.
+1. Download `Tiquet_1.4.0_x64-setup.exe` from [Releases](../../releases/latest). The installer is built on a clean GitHub machine by the [release workflow](.github/workflows/release.yml), which also starts the built app once before publishing; the release lists its SHA-256.
 2. Run it. The installer is not code-signed yet, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then **Run anyway**.
 3. On first start, enter the shop details (the NIF is checked) and create the administrator account. Write down or print the **recovery code** it shows: it is the only way back in if the administrator password is forgotten.
 4. The receipt printer is picked automatically when it is clearly the only one (a POS, thermal or receipt printer, or a known brand). To choose it by hand, or to change it, use **Ajustes > Impresora** (**Detectar** looks again), then press **Imprimir página de prueba**. The interface starts in the language Windows uses.
@@ -36,6 +36,7 @@ A USB printer must be installed in Windows (with the manufacturer's driver or "G
 - **Payments.** Cash with quick amounts and change, card, Bizum. Opens the cash drawer on cash sales. A barcode scanned while the payment window is open adds the item; it never confirms a payment.
 - **Tickets that cannot be edited.** Numbered per year without gaps (`T2026-000001`). Issued tickets can be reprinted or voided the same day with a reason, never edited or deleted; the database enforces it.
 - **Returns and invoices.** A return is its own rectifying ticket (`TR2026-...`) that points at the sale, line by line. A sale can carry the customer's name, NIF and address as a full invoice (`TF2026-...`); over 3.000 € it must.
+- **Repairs.** A phone left at the shop gets its own number (`REP2026-000001`), a resguardo for the customer and a slip for the phone. Its status is kept with who changed it and when. A deposit is a ticket of its own, and **Entregar y cobrar** charges the rest in Venta. See [Repairs](#repairs).
 - **Printing that tells the truth.** A ticket counts as printed once Windows has let go of it, or once a network printer has taken all of it. If the printer is off or out of paper the job is cancelled, so nothing prints and no drawer opens later on its own. The first print is the original; every other one says COPIA.
 - **Cash drawer.** Opening float, cash in and out with a reason, and a closing count against what the sales say, with a printed Z report.
 - **Admin.** Products (CSV import that picks the sale price and keeps barcodes), users with roles, sales reports by day or month, discounts and price changes made at the till, a printable summary, CSV export and a VAT book (libro de IVA) for the accountant. Training mode for learning: its sales never count and can be wiped.
@@ -58,6 +59,24 @@ A USB printer must be installed in Windows (with the manufacturer's driver or "G
 | Numpad + / - | Change the quantity of the selected line |
 | Delete | Remove the selected line |
 | F2 | Focus the search box |
+
+## Repairs
+
+**Reparaciones** in the top bar lists the phones in the shop, with filters by status and a search by number, name, phone or IMEI. Cashiers and administrators use it alike; only an administrator can cancel a repair.
+
+1. **Nueva reparación**: the customer's name and phone, the device (make, model, colour), the IMEI or serial number, the fault as the customer tells it, the estimate if there is one, and the deposit if one is paid. The resguardo on the right is what will print. Internal notes stay in the shop and never print.
+2. **Guardar e imprimir** prints the deposit ticket, which opens the drawer when paid in cash. Then it prints the resguardo for the customer and the slip that goes with the phone.
+3. As the work goes on, set the status: Recibido, En curso, Listo or No reparado. Every change is kept with who made it and when.
+4. When the customer comes back, **Entregar y cobrar** asks for the final price and takes off the deposit. The rest goes to Venta as a line "Reparación REP2026-000001: device". Issuing that ticket marks the repair as delivered, and the ticket line keeps the repair it belongs to. With nothing left to pay, the phone is handed back straight away.
+
+Rules:
+
+- Repairs are numbered per year without gaps, like tickets, and a restored backup never hands out a repair number already printed.
+- Repairs are never deleted. One taken in by mistake is cancelled with a reason. A deposit must be voided or returned from Tickets first.
+- A delivered or cancelled repair cannot change. The one way back is voiding the ticket that delivered it, which returns the repair to its last status.
+- A repair is a service, so a ticket with a repair on it is a simplified invoice only up to 400 € (RD 1619/2012 art. 4). Above that, Venta asks for the customer's details. A deposit can be 400 € at most.
+- In training mode repairs can be taken in, but no deposit or delivery is charged.
+- The conditions printed on the resguardo are in **Ajustes > Ticket**.
 
 ## Where the data lives
 

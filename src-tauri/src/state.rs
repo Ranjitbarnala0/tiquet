@@ -97,7 +97,7 @@ impl AppState {
         let conn = self.conn();
         let missing = tickets::raise_floors(&conn, &paths::read_marks(&self.data_dir))?;
         for (series, from, to) in &missing {
-            log::warn(format!("tickets {series}-{from:06} to {series}-{to:06} were issued but are not in this database"));
+            log::warn(format!("numbers {series}-{from:06} to {series}-{to:06} were issued but are not in this database"));
         }
         paths::write_marks(&self.data_dir, &tickets::series_marks(&conn)?);
         Ok(missing)
@@ -105,7 +105,12 @@ impl AppState {
 
     // right after a ticket is committed, before it is printed
     pub fn note(&self, t: &TicketRecord) {
-        if let Some((series, seq)) = t.number.rsplit_once('-') {
+        self.mark(&t.number);
+    }
+
+    // a ticket or repair number now handed out
+    pub fn mark(&self, number: &str) {
+        if let Some((series, seq)) = number.rsplit_once('-') {
             if let Ok(seq) = seq.parse() {
                 paths::write_marks(&self.data_dir, &[(series.to_string(), seq)].into());
             }

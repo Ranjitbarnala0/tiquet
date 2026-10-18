@@ -327,6 +327,12 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               <Field label={tr('Pie del ticket', 'Ticket footer')} hint={tr('Agradecimiento, horario, política de cambios…', 'Thank-you note, opening hours, returns policy…')}>
                 <textarea rows={3} value={d.footer} onChange={(e) => set('footer', e.target.value)} />
               </Field>
+              <Field
+                label={tr('Condiciones del resguardo de reparación', 'Repair receipt conditions')}
+                hint={tr('Salen en el resguardo que se lleva el cliente al dejar un equipo', 'Printed on the receipt customers get when they leave a device')}
+              >
+                <textarea rows={3} value={d.repairTerms} onChange={(e) => set('repairTerms', e.target.value)} maxLength={600} />
+              </Field>
 
               <div className="field">
                 <span className="field-label">Logo</span>
@@ -409,7 +415,11 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               </div>
 
               <div className="grid2">
-                <Field label={tr('Prefijo de numeración', 'Numbering prefix')} hint={`${tr('Ejemplo', 'Example')}: ${d.ticketPrefix || 'T'}${new Date().getFullYear()}-000001`}>
+                <Field
+                  label={tr('Prefijo de numeración', 'Numbering prefix')}
+                  hint={`${tr('Ejemplo', 'Example')}: ${d.ticketPrefix || 'T'}${new Date().getFullYear()}-000001`}
+                  error={['RE', 'REP'].includes(d.ticketPrefix) ? tr('RE y REP son de las reparaciones: elige otro', 'RE and REP belong to repairs: choose another') : undefined}
+                >
                   <input value={d.ticketPrefix} onChange={(e) => set('ticketPrefix', e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6))} />
                 </Field>
                 <Field label={tr('IVA por defecto', 'Default VAT')} hint={tr('Para artículos libres y productos nuevos', 'For custom items and new products')}>
@@ -795,7 +805,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
             <div className="clock-note">
               <History size={20} />
               <p>
-                {tr('La copia no tiene los tickets', 'The backup does not have tickets')}{' '}
+                {tr('La copia no tiene los tickets o reparaciones', 'The backup does not have the tickets or repairs')}{' '}
                 {restored.missing.map((m, i) => (
                   <span key={m.first}>
                     {i > 0 && ', '}

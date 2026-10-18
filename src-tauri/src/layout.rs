@@ -6,6 +6,7 @@ use serde::Serialize;
 use crate::cash::{Drawer, Session};
 use crate::codepage::{printable, CodePage};
 use crate::money::{div_round, fmt, fmt_rate};
+use crate::repairs::Repair;
 use crate::reports::Summary;
 use crate::settings::Settings;
 use crate::tickets::{compute, now, Customer, Payment, SaleLine, ShopInfo, TicketRecord, Totals};
@@ -449,6 +450,92 @@ pub fn record(r: &TicketRecord, s: &Settings, logo: bool, copy: bool) -> Vec<Lin
     ticket(&v, s, logo)
 }
 
+fn device(r: &Repair) -> String {
+    let colour = r.data.colour.trim();
+    if colour.is_empty() {
+        r.data.device()
+    } else {
+        format!("{} · {colour}", r.data.device())
+    }
+}
+
+// the fault as the customer told it, line by line
+fn fault(d: &mut Doc, r: &Repair) {
+    for (i, l) in r.data.fault.lines().map(str::trim).filter(|l| !l.is_empty()).enumerate() {
+        let l = if i == 0 { format!("Avería: {l}") } else { l.to_string() };
+        d.left(&l, false, Size::Normal);
+    }
+}
+
+// What the customer takes home while the phone stays in the shop.
+pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
+    let mut d = Doc::new(s);
+    if logo {
+        d.logo();
+    }
+    header(&mut d, &r.shop);
+    d.blank();
+    d.center("RESGUARDO DE REPARACIÓN", true, Size::Normal);
+    d.pair(&format!("Nº {}", r.number), &datetime(&r.created_at), false, Size::Normal);
+    if !r.created_by.trim().is_empty() {
+        d.left(&format!("Le atendió: {}", r.created_by.trim()), false, Size::Normal);
+    }
+    match (r.status.as_str(), r.closed_at.as_deref()) {
+        ("delivered", Some(at)) => d.center(&format!("*** ENTREGADO EL {} ***", date(at)), true, Size::Normal),
+        ("cancelled", _) => d.center("*** CANCELADO ***", true, Size::Normal),
+        _ => {}
+    }
+    d.rule('-');
+    let x = &r.data;
+    d.left(&format!("Cliente: {}", x.customer_name), false, Size::Normal);
+    d.left(&format!("Teléfono: {}", x.customer_phone), false, Size::Normal);
+    d.left(&format!("Equipo: {}", device(r)), false, Size::Normal);
+    if !x.imei.is_empty() {
+        d.left(&format!("IMEI/N.º serie: {}", x.imei), false, Size::Normal);
+    }
+    fault(&mut d, r);
+    d.rule('-');
+    let eur = |c: i64| format!("{} €", fmt(c));
+    match x.estimate_cents {
+        Some(e) => d.pair("Presupuesto", &eur(e), false, Size::Normal),
+        None => d.pair("Presupuesto", "pendiente", false, Size::Normal),
+    }
+    if r.deposit_cents > 0 {
+        d.pair("Anticipo", &eur(r.deposit_cents), false, Size::Normal);
+        if let (Some(due), true) = (r.due_cents, r.open()) {
+            d.pair("A pagar al recoger", &eur(due.max(0)), true, Size::Normal);
+        }
+    }
+    let terms = r.terms.trim();
+    if !terms.is_empty() {
+        d.rule('-');
+        for l in terms.lines() {
+            if l.trim().is_empty() {
+                d.blank();
+            } else {
+                d.left(l.trim(), false, Size::Normal);
+            }
+        }
+    }
+    d.rule('-');
+    d.center("Presente este resguardo para recoger", true, Size::Normal);
+    d.center(&r.number, true, Size::Tall);
+    d.lines
+}
+
+// The small one that stays with the phone in the workshop.
+pub fn repair_slip(r: &Repair, s: &Settings) -> Vec<Line> {
+    let mut d = Doc::new(s);
+    d.center(&r.number, true, Size::Big);
+    d.center(&datetime(&r.created_at), false, Size::Normal);
+    d.rule('-');
+    d.left(&r.data.customer_name, true, Size::Normal);
+    d.left(&format!("Tel. {}", r.data.customer_phone), false, Size::Normal);
+    d.left(&device(r), true, Size::Normal);
+    fault(&mut d, r);
+    d.lines
+}
+
 pub fn summary(sum: &Summary, from: &str, to: &str, s: &Settings, user: &str) -> Vec<Line> {
     let mut d = Doc::new(s);
     if !s.shop_name.trim().is_empty() {
@@ -615,6 +702,7 @@ pub fn test_page(s: &Settings, user: &str, logo: bool) -> Vec<Line> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::repairs::{sketch, RepairIn};
     use crate::tickets::sample_lines;
 
     fn texts(lines: &[Line]) -> Vec<(String, Size)> {
@@ -847,6 +935,108 @@ mod tests {
         assert!(all.is_ascii(), "{all}");
         assert!(all.contains(&format!("TOTAL{}21,75 EUR", " ".repeat(10))), "{all}");
         assert!(all.contains("No T2026-000124"));
+    }
+
+    fn phone() -> RepairIn {
+        RepairIn {
+            customer_name: "Joan García".into(),
+            customer_phone: "600 123 456".into(),
+            brand: "Apple".into(),
+            model: "iPhone 12".into(),
+            colour: "Negro".into(),
+            imei: "356789012345678".into(),
+            fault: "No carga\nPantalla rota".into(),
+            notes: "Código de desbloqueo 1234".into(),
+            estimate_cents: Some(8000),
+        }
+    }
+
+    fn repair(s: &Settings, input: &RepairIn, deposit: i64) -> Repair {
+        Repair { shop: shop(), ..sketch("REP2026-000001", "2026-10-18T17:05:00", "Ana", s, input, deposit) }
+    }
+
+    #[test]
+    fn a_resguardo_has_what_the_customer_needs_to_pick_the_phone_up() {
+        let s = Settings::default();
+        let body: Vec<String> = texts(&resguardo(&repair(&s, &phone(), 2000), &s, true)).into_iter().map(|(t, _)| t).collect();
+        let has = |x: &str| assert!(body.iter().any(|l| l.contains(x)), "missing {x:?} in\n{}", body.join("\n"));
+        let sp = |n: usize| " ".repeat(n);
+        assert_eq!(body[0], format!("{}Mi Tienda Móvil", sp(4)));
+        for x in ["Tel. 972 000 000", "NIF: B00000000", "RESGUARDO DE REPARACIÓN", "Le atendió: Ana", "Cliente: Joan García"] {
+            has(x);
+        }
+        for x in ["Teléfono: 600 123 456", "Equipo: Apple iPhone 12 · Negro", "IMEI/N.º serie: 356789012345678", "Avería: No carga"] {
+            has(x);
+        }
+        has(&format!("Nº REP2026-000001{}18/10/2026 17:05", sp(15)));
+        assert!(body.contains(&"Pantalla rota".to_string()));
+        has(&format!("Presupuesto{}80,00 €", sp(30)));
+        has(&format!("Anticipo{}20,00 €", sp(33)));
+        has(&format!("A pagar al recoger{}60,00 €", sp(23)));
+        has("La reparación tiene 3 meses de garantía.");
+        has("Presente este resguardo para recoger");
+        // the shop's own notes never go to the customer
+        assert!(!body.iter().any(|l| l.contains("desbloqueo")), "{}", body.join("\n"));
+
+        // no price yet, no deposit; and a reprint after it was handed back says so
+        let open = RepairIn { estimate_cents: None, ..phone() };
+        let mut r = repair(&s, &open, 0);
+        r.status = "delivered".into();
+        r.closed_at = Some("2026-10-25T11:00:00".into());
+        let body: Vec<String> = texts(&resguardo(&r, &s, false)).into_iter().map(|(t, _)| t).collect();
+        assert!(body.iter().any(|l| l.starts_with("Presupuesto") && l.ends_with("pendiente")), "{}", body.join("\n"));
+        assert!(!body.iter().any(|l| l.contains("Anticipo") || l.contains("A pagar")));
+        assert!(body.iter().any(|l| l.contains("*** ENTREGADO EL 25/10/2026 ***")));
+        // once it is handed back nothing is left to pay
+        let mut r = repair(&s, &phone(), 2000);
+        r.status = "delivered".into();
+        r.closed_at = Some("2026-10-25T11:00:00".into());
+        let body: Vec<String> = texts(&resguardo(&r, &s, false)).into_iter().map(|(t, _)| t).collect();
+        assert!(body.iter().any(|l| l.starts_with("Anticipo")) && !body.iter().any(|l| l.contains("A pagar")), "{}", body.join("\n"));
+    }
+
+    #[test]
+    fn the_slip_names_the_repair_the_customer_and_the_fault() {
+        let s = Settings { columns: 32, ..Settings::default() };
+        let out = texts(&repair_slip(&repair(&s, &phone(), 0), &s));
+        assert_eq!(out[0], (" REP2026-000001".to_string(), Size::Big));
+        let body: Vec<String> = out.into_iter().map(|(t, _)| t).collect();
+        for x in ["Joan García", "Tel. 600 123 456", "Apple iPhone 12 · Negro", "Avería: No carga", "Pantalla rota"] {
+            assert!(body.iter().any(|l| l.contains(x)), "missing {x:?} in\n{}", body.join("\n"));
+        }
+        assert!(!body.iter().any(|l| l.contains("desbloqueo") || l.contains("Mi Tienda")), "{}", body.join("\n"));
+    }
+
+    #[test]
+    fn repair_papers_fit_the_paper() {
+        let long = "Supercalifragilisticoespialidoso".repeat(4);
+        let input = RepairIn {
+            customer_name: format!("María de los Ángeles {long}"),
+            customer_phone: "600 123 456 / 972 000 000 / 699 999 999".into(),
+            brand: long.clone(),
+            model: format!("Galaxy {long}"),
+            colour: "Azul medianoche".into(),
+            imei: "356789012345678 / SN-ABCDEFGH-1234567890-XYZ".into(),
+            fault: format!("No enciende {long}\n\n{long} después de caerse al agua"),
+            notes: String::new(),
+            estimate_cents: Some(9_999_999),
+        };
+        for cols in [32, 42, 48] {
+            for cp in ["cp858", "cp1252", "cp850", "ascii"] {
+                let s = Settings { columns: cols, codepage: cp.into(), repair_terms: format!("{long} {long}\n\nOtra línea más"), ..Settings::default() };
+                let mut r = repair(&s, &input, 9_999_999);
+                let mut pages = vec![resguardo(&r, &s, true), repair_slip(&r, &s)];
+                r.status = "delivered".into();
+                r.closed_at = Some("2026-10-25T11:00:00".into());
+                pages.push(resguardo(&r, &s, false));
+                for page in pages {
+                    for (text, size) in texts(&page) {
+                        let w = if size == Size::Big { cols as usize / 2 } else { cols as usize };
+                        assert!(len(&text) <= w, "{cols} {cp}: {text:?} is {} > {w}", len(&text));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

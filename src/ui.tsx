@@ -100,8 +100,8 @@ export function Modal(props: { title: string; onClose: () => void; children: Rea
 }
 
 // With `dirty`, closing it (X, Esc, a click outside) asks before throwing
-// the edits away.
-export function Drawer(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; dirty?: boolean }) {
+// the edits away. `wide` leaves room for a preview beside the form.
+export function Drawer(props: { title: string; onClose: () => void; children: ReactNode; footer?: ReactNode; dirty?: boolean; wide?: boolean }) {
   const [asking, setAsking] = useState(false);
   const close = () => (props.dirty ? setAsking(true) : props.onClose());
   useEscape(close);
@@ -109,7 +109,14 @@ export function Drawer(props: { title: string; onClose: () => void; children: Re
   useTrap(box);
   return createPortal(
     <div className="modal-back drawer-back" onMouseDown={close}>
-      <aside ref={box} className="drawer" role="dialog" aria-modal="true" aria-label={props.title} onMouseDown={(e) => e.stopPropagation()}>
+      <aside
+        ref={box}
+        className={`drawer${props.wide ? ' wide' : ''}`}
+        role="dialog"
+        aria-modal="true"
+        aria-label={props.title}
+        onMouseDown={(e) => e.stopPropagation()}
+      >
         <div className="modal-head">
           <h3>{props.title}</h3>
           <button className="icon-btn" onClick={close} aria-label={tr('Cerrar', 'Close')}>
