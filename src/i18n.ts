@@ -104,6 +104,7 @@ const errors: Record<string, [string, string]> = {
   E_AEAT_HTTP: ['La AEAT respondió con un error HTTP {s}', 'The AEAT answered with HTTP error {s}'],
   E_AEAT_FAULT: ['La AEAT no aceptó el envío: {s}', 'The AEAT did not accept the submission: {s}'],
   E_AEAT_REPLY: ['La respuesta de la AEAT no se pudo leer', 'The AEAT’s answer could not be read'],
+  E_UPDATE: ['No se pudo actualizar ({s})', 'Could not update ({s})'],
 };
 
 const certWhy: Record<string, [string, string]> = {

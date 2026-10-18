@@ -37,6 +37,9 @@ export interface Settings {
   defaultVatBp: number;
   showVat: boolean;
   printerName: string;
+  printerKind: 'windows' | 'network';
+  printerHost: string;
+  printerPort: number;
   columns: number;
   codepage: string;
   cut: boolean;
@@ -51,6 +54,8 @@ export interface Settings {
   training: boolean;
   verifactu: 'off' | 'test' | 'prod';
   cert: string;
+  autostart: boolean;
+  fullscreen: boolean;
 }
 
 export interface Customer {

@@ -34,8 +34,19 @@ jobs:
         working-directory: src-tauri
         run: cargo test --lib --locked
 
+      # the installer is signed with the key in the repository secrets; the
+      # copies already installed only take an update with that signature
       - name: Build the installer
-        run: npm run tauri build
+        shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          $conf = Join-Path $env:RUNNER_TEMP 'updater.json'
+          '{"bundle":{"createUpdaterArtifacts":true}}' | Set-Content -Encoding ascii $conf
+          npm run tauri build -- --config $conf
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not (Test-Path src-tauri/target/release/bundle/nsis/*-setup.exe.sig)) { throw 'the installer was not signed' }
 
       # the packaged app boots its UI, opens a fresh database through the core
       # and reports back, without showing a window
@@ -48,6 +59,36 @@ jobs:
           Get-Content $report
           if (-not (Get-Content $report -Raw | ConvertFrom-Json).ok) { throw 'self-test failed' }
 
+      # what installed copies read to update themselves: the version that was
+      # built, the installer's signature and where the installer will be
+      - name: Update manifest
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          $v = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $manifest = [ordered]@{
+            version = $v
+            notes = "Tiquet $v"
+            pub_date = (Get-Date).ToUniversalTime().ToString("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            platforms = @{
+              'windows-x86_64' = @{
+                signature = (Get-Content "$($setup.FullName).sig" -Raw).Trim()
+                url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME/$($setup.Name)"
+              }
+            }
+          }
+          $manifest | ConvertTo-Json -Depth 4 | Set-Content -Encoding utf8NoBOM latest.json
+          Get-Content latest.json
+
+      - name: The manifest is for this tag
+        shell: pwsh
+        run: |
+          $m = Get-Content latest.json -Raw | ConvertFrom-Json
+          if ("v$($m.version)" -ne $env:GITHUB_REF_NAME) { throw "latest.json says $($m.version) but the tag is $env:GITHUB_REF_NAME" }
+          $p = $m.platforms.'windows-x86_64'
+          if (-not $p.signature) { throw 'latest.json carries no signature' }
+          if (-not $p.url.Contains("/download/$env:GITHUB_REF_NAME/")) { throw "latest.json points at $($p.url)" }
+
       - name: Publish
         shell: pwsh
         env:
@@ -59,4 +100,19 @@ jobs:
           "$hash  $($setup.Name)" | Set-Content -Encoding ascii $sum
           $notes = (Get-Content .github/release-notes.md -Raw) + "`n`nSHA-256 of ``$($setup.Name)``: ``$hash``"
           Set-Content -Encoding utf8 notes.md $notes
-          gh release create $env:GITHUB_REF_NAME $setup.FullName $sum --title "Tiquet $($env:GITHUB_REF_NAME.TrimStart('v'))" --notes-file notes.md
+          gh release create $env:GITHUB_REF_NAME $setup.FullName $sum latest.json --title "Tiquet $($env:GITHUB_REF_NAME.TrimStart('v'))" --notes-file notes.md
+
+      # installed copies ask this address, so it has to offer this version now
+      - name: Installed copies are offered this version
+        shell: pwsh
+        run: |
+          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/latest.json"
+          foreach ($i in 1..10) {
+            try {
+              Invoke-WebRequest $url -OutFile served.json
+              $m = Get-Content served.json -Raw | ConvertFrom-Json
+              if ("v$($m.version)" -eq $env:GITHUB_REF_NAME) { "$url offers $($m.version)"; exit 0 }
+            } catch { $_.Exception.Message }
+            Start-Sleep -Seconds 15
+          }
+          throw "$url does not offer $env:GITHUB_REF_NAME"

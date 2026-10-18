@@ -19,6 +19,11 @@ pub struct Settings {
     pub default_vat_bp: i64,
     pub show_vat: bool,
     pub printer_name: String,
+    // "windows": the queue above; "network": raw ESC/POS over TCP to
+    // printer_host:printer_port
+    pub printer_kind: String,
+    pub printer_host: String,
+    pub printer_port: u16,
     pub columns: u32,
     pub codepage: String,
     pub cut: bool,
@@ -39,6 +44,10 @@ pub struct Settings {
     // SHA-1 thumbprint of the certificate in the Windows store the records
     // are sent with
     pub cert: String,
+    // opened by Windows at sign-in, and full screen with no way out but the
+    // button in the header
+    pub autostart: bool,
+    pub fullscreen: bool,
 }
 
 impl Default for Settings {
@@ -54,6 +63,9 @@ impl Default for Settings {
             default_vat_bp: 2100,
             show_vat: true,
             printer_name: String::new(),
+            printer_kind: "windows".into(),
+            printer_host: String::new(),
+            printer_port: 9100,
             columns: 48,
             codepage: "cp858".into(),
             cut: true,
@@ -68,6 +80,8 @@ impl Default for Settings {
             training: false,
             verifactu: "off".into(),
             cert: String::new(),
+            autostart: false,
+            fullscreen: false,
         }
     }
 }
@@ -89,6 +103,20 @@ impl Settings {
         self.ticket_prefix = if prefix.is_empty() { "T".into() } else { prefix.to_uppercase() };
         if !["cp858", "cp850", "cp1252", "ascii"].contains(&self.codepage.as_str()) {
             self.codepage = "cp858".into();
+        }
+        if !["windows", "network"].contains(&self.printer_kind.as_str()) {
+            self.printer_kind = "windows".into();
+        }
+        self.printer_host = self.printer_host.trim().chars().take(253).collect();
+        // "192.168.1.50:9100" typed into the address box
+        if let Some((host, port)) = self.printer_host.clone().split_once(':') {
+            if let Ok(port) = port.parse() {
+                self.printer_host = host.into();
+                self.printer_port = port;
+            }
+        }
+        if self.printer_port == 0 {
+            self.printer_port = 9100;
         }
         if !["cash", "always", "never"].contains(&self.drawer.as_str()) {
             self.drawer = "cash".into();
@@ -242,5 +270,13 @@ mod tests {
         put(&conn, "settings", r#"{"shopName":"Mi Tienda","shopNif":"B12345678","columns":"ancho","copies":2}"#).unwrap();
         let s = load(&conn).unwrap();
         assert_eq!((s.shop_name.as_str(), s.shop_nif.as_str(), s.copies, s.columns), ("Mi Tienda", "B12345678", 2, 48));
+    }
+
+    #[test]
+    fn a_network_address_typed_with_its_port_is_split() {
+        let s = Settings { printer_host: " 192.168.1.50:9101 ".into(), ..Settings::default() }.clean();
+        assert_eq!((s.printer_host.as_str(), s.printer_port), ("192.168.1.50", 9101));
+        let s = Settings { printer_host: "fe80::1".into(), printer_port: 0, printer_kind: "usb".into(), ..Settings::default() }.clean();
+        assert_eq!((s.printer_host.as_str(), s.printer_port, s.printer_kind.as_str()), ("fe80::1", 9100, "windows"));
     }
 }

@@ -27,7 +27,7 @@ macro_rules! wrap {
     )*};
 }
 
-wrap!(rusqlite::Error => "E_DB", serde_json::Error => "E_INTERNAL", std::io::Error => "E_IO");
+wrap!(rusqlite::Error => "E_DB", serde_json::Error => "E_INTERNAL", std::io::Error => "E_IO", zip::result::ZipError => "E_IO");
 
 pub fn fail<T>(code: impl Into<String>) -> Result<T> {
     Err(Error(code.into()))

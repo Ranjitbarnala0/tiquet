@@ -5,9 +5,10 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::state::{AppState, PrintSink};
-use crate::{aeat, api, backup, log, os, paths};
+use crate::{aeat, api, backup, log, os, paths, settings, update};
 
 // set once the window is on screen; a failure before that gets a message box
 // instead of a till that silently never opens
@@ -58,7 +59,19 @@ fn open(dir: &Path) -> Result<AppState, String> {
 // Every call runs on a blocking thread: database and printer work must not
 // stall the async runtime that drives the window.
 #[tauri::command]
-async fn call(app: AppHandle, cmd: String, args: Value) -> Result<Value, String> {
+async fn call(app: AppHandle, cmd: String, mut args: Value) -> Result<Value, String> {
+    match cmd.as_str() {
+        // anyone at the till may update, and so may the failure screen
+        "app.update.check" => return update::check(&app).await,
+        "app.update.install" => return update::install(&app).await,
+        "app.ready" if update::testing() => {
+            if let Err(e) = update::install(&app).await {
+                args["ok"] = json!(false);
+                args["update"] = json!(e);
+            }
+        }
+        _ => {}
+    }
     tauri::async_runtime::spawn_blocking(move || handle(&app, &cmd, args))
         .await
         .map_err(|e| format!("E_INTERNAL:{e}"))?
@@ -75,7 +88,8 @@ fn handle(app: &AppHandle, cmd: &str, args: Value) -> Result<Value, String> {
                     "ok": core.is_ok() && args.get("ok").and_then(Value::as_bool).unwrap_or(false),
                     "ui": args,
                     "core": core.as_ref().err(),
-                    "version": env!("CARGO_PKG_VERSION"),
+                    // the version the installer and the updater go by
+                    "version": app.package_info().version.to_string(),
                     "dataDir": shell.data_dir,
                     "db": db,
                 });
@@ -112,6 +126,14 @@ fn handle(app: &AppHandle, cmd: &str, args: Value) -> Result<Value, String> {
             app.exit(0);
             Ok(Value::Null)
         }
+        // Pantalla completa and the header button; Esc never leaves it
+        "app.fullscreen" => {
+            let w = app.get_webview_window("main").ok_or("E_INTERNAL:window")?;
+            if let Some(on) = args.get("on").and_then(Value::as_bool) {
+                w.set_fullscreen(on).map_err(|e| format!("E_INTERNAL:{e}"))?;
+            }
+            Ok(json!({ "on": w.is_fullscreen().unwrap_or(false) }))
+        }
         "app.restore" if shell.core().is_err() => {
             let dir = shell.data_dir.clone().ok_or("E_DATA_DIR")?;
             let path = PathBuf::from(args.get("path").and_then(Value::as_str).unwrap_or_default());
@@ -126,9 +148,40 @@ fn handle(app: &AppHandle, cmd: &str, args: Value) -> Result<Value, String> {
             Ok(Value::Null)
         }
         _ => match &*shell.core() {
-            Ok(core) => api::dispatch(core, cmd, args),
+            Ok(core) => {
+                let out = api::dispatch(core, cmd, args);
+                if let (true, Ok(saved)) = (cmd == "settings.save" && shell.report.is_none(), &out) {
+                    startup(app, saved.get("autostart").and_then(Value::as_bool).unwrap_or(false));
+                }
+                out
+            }
             Err(e) => Err(if e.starts_with("E_") { e.clone() } else { format!("E_DB:{e}") }),
         },
+    }
+}
+
+// Abrir Tiquet al encender el ordenador: an entry in Windows' start-up list
+// for this user, made or removed to match the setting
+fn startup(app: &AppHandle, on: bool) {
+    let auto = app.autolaunch();
+    if auto.is_enabled().ok() == Some(on) {
+        return;
+    }
+    match if on { auto.enable() } else { auto.disable() } {
+        Ok(()) => log::info(format!("start with Windows {}", if on { "on" } else { "off" })),
+        Err(e) => log::warn(format!("start with Windows not changed: {e}")),
+    }
+}
+
+// each start brings the start-up list and the window in line with the
+// settings, which a restored backup may have changed
+fn prefs(app: &AppHandle, core: &AppState) {
+    let Ok(s) = settings::load(&core.conn()) else { return };
+    startup(app, s.autostart);
+    if s.fullscreen {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.set_fullscreen(true);
+        }
     }
 }
 
@@ -215,7 +268,9 @@ pub fn run() {
         previous(info);
     }));
 
-    let mut builder = tauri::Builder::default();
+    let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
+        .plugin(tauri_plugin_updater::Builder::new().build());
     // a second double-click on the shortcut brings the open till to the front
     // instead of starting another copy against the same database
     if report.is_none() {
@@ -233,9 +288,11 @@ pub fn run() {
                         }
                     }
                     let core = open(dir);
-                    // the test modes never talk to the AEAT
-                    if core.is_ok() && !testing {
+                    // the test modes never talk to the AEAT, and leave
+                    // Windows' start-up list and the window alone
+                    if let (Ok(c), false) = (&core, testing) {
                         aeat::start(dir.join("tiquet.db"));
+                        prefs(app.handle(), c);
                     }
                     core
                 }

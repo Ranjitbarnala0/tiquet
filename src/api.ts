@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
-const native = '__TAURI_INTERNALS__' in window;
+// inside the desktop app, as opposed to a browser on the devserver
+export const native = '__TAURI_INTERNALS__' in window;
 
 export class ApiError extends Error {
   constructor(public code: string, public detail: string) {

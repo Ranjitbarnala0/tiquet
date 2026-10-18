@@ -15,15 +15,23 @@ use crate::settings::{self, Logo, Settings};
 use crate::state::{AppState, SessionUser};
 use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
 use crate::verifactu::{self, Env};
-use crate::{aeat, auth, backup, cash, log, money, os, printer, products, recovery, reports, users};
+use crate::{aeat, auth, backup, cash, diag, log, money, os, printer, products, recovery, reports, users};
 
 // key of the recovery code's own attempt counter (no user has id 0)
 const RECOVERY: i64 = 0;
 
 // asked by the screen on its own every few seconds, not by a person: they do
 // not keep an idle till unlocked
-const PASSIVE: &[&str] =
-    &["printers.status", "bootstrap", "log.client", "sale.status", "recovery.status", "backup.status", "verifactu.status"];
+const PASSIVE: &[&str] = &[
+    "printers.status",
+    "bootstrap",
+    "log.client",
+    "sale.status",
+    "recovery.status",
+    "backup.status",
+    "verifactu.status",
+    "cash.state",
+];
 
 pub fn dispatch(st: &AppState, cmd: &str, args: Value) -> std::result::Result<Value, String> {
     // a bug in one handler must answer with an error, not take the till down
@@ -99,7 +107,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let code = a.get("code").and_then(Value::as_str).unwrap_or_default();
             let s = settings::load(&st.conn())?;
             let bytes = escpos::document(&layout::recovery_slip(&s, code, &me.name), None, &Opts::new(&s, false));
-            let warning = printer::send(&st.sink, &s.printer_name, "recuperacion", &bytes)?;
+            let warning = printer::send(&st.sink, &s, "recuperacion", &bytes)?;
             Ok(json!({ "warning": warning }))
         }
         "logout" => {
@@ -254,7 +262,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 (layout::summary(&sum, &r.from, &r.to, &s, &me.name), s)
             };
             let bytes = escpos::document(&lines, None, &Opts::new(&s, false));
-            let warning = printer::send(&st.sink, &s.printer_name, "resumen", &bytes)?;
+            let warning = printer::send(&st.sink, &s, "resumen", &bytes)?;
             Ok(json!({ "warning": warning }))
         }
         "reports.export" => {
@@ -299,7 +307,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 settings::load(&conn)?
             };
             log::info(format!("till opened by {} with {}", me.name, money::fmt(float)));
-            printer::send_detached(&st.sink, &s.printer_name, "cajon", &escpos::kick(&s));
+            printer::send_detached(&st.sink, &s, "cajon", &escpos::kick(&s));
             let conn = st.conn();
             let open = cash::open_session(&conn)?;
             to(cash::drawer(&conn, open)?)
@@ -314,7 +322,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 settings::load(&conn)?
             };
             log::info(format!("cash {} by {}: {reason}", money::fmt(cents), me.name));
-            printer::send_detached(&st.sink, &s.printer_name, "cajon", &escpos::kick(&s));
+            printer::send_detached(&st.sink, &s, "cajon", &escpos::kick(&s));
             let conn = st.conn();
             let open = cash::open_session(&conn)?;
             to(cash::drawer(&conn, open)?)
@@ -363,7 +371,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let me = st.admin()?;
             let conn = st.conn();
             let s = settings::load(&conn)?;
-            if !s.printer_name.trim().is_empty() || settings::get(&conn, "printerAutoDone")?.is_some() {
+            if s.printer_kind == "network" || !s.printer_name.trim().is_empty() || settings::get(&conn, "printerAutoDone")?.is_some() {
                 return Ok(json!({ "applied": false }));
             }
             settings::put(&conn, "printerAutoDone", &tickets::now())?;
@@ -377,12 +385,12 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         }
         "printers.status" => {
             st.user()?;
-            let (name, last) = {
+            let (s, last) = {
                 let conn = st.conn();
-                (settings::load(&conn)?.printer_name, tickets::last_print(&conn)?)
+                (settings::load(&conn)?, tickets::last_print(&conn)?)
             };
-            let status = printer::status(&st.sink, &name);
-            Ok(json!({ "name": name, "state": status.state, "jobs": status.jobs, "last": last }))
+            let status = printer::status(&st.sink, &s);
+            Ok(json!({ "name": printer::label(&s), "state": status.state, "jobs": status.jobs, "last": last }))
         }
         "printers.test" => {
             st.admin()?;
@@ -470,6 +478,16 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             Ok(json!({ "text": verifactu::declaration() }))
         }
 
+        // a zip for whoever gives support; Explorer opens on it
+        "diagnostics.save" => {
+            let me = st.admin()?;
+            let path = diag::save(st)?;
+            log::info(format!("diagnostics saved to {} by {}", path.display(), me.name));
+            if st.desktop {
+                os::reveal(&path);
+            }
+            Ok(json!({ "path": path.to_string_lossy() }))
+        }
         "app.reveal" => {
             st.admin()?;
             let what = a.get("what").and_then(Value::as_str).unwrap_or_default();
@@ -753,7 +771,11 @@ fn finalize(st: &AppState, a: FinalizeIn) -> Result<Value> {
         me.name
     ));
     let out = issue(st, rec, &s, logo.as_ref(), a.print);
-    backup::auto(&st.conn());
+    // the day's copy for a till left open overnight runs beside the till:
+    // the first sale of the day never waits for it
+    if backup::due(&st.conn()) {
+        backup::later(st.data_dir.join("tiquet.db"));
+    }
     Ok(out)
 }
 
@@ -767,7 +789,7 @@ fn issue(st: &AppState, rec: TicketRecord, s: &Settings, logo: Option<&Logo>, pr
         }
     } else {
         if drawer_opens(s, &rec.payment.method) {
-            printer::send_detached(&st.sink, &s.printer_name, "cajon", &escpos::kick(s));
+            printer::send_detached(&st.sink, s, "cajon", &escpos::kick(s));
         }
         (None, None)
     };
@@ -827,7 +849,7 @@ fn print_ticket(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&L
             data.extend(escpos::document(&extra, logo, &Opts::new(s, false)));
         }
     }
-    let out = printer::send(&st.sink, &s.printer_name, &rec.number, &data);
+    let out = printer::send(&st.sink, s, &rec.number, &data);
     let (status, detail) = match &out {
         Ok(None) => ("printed", None),
         Ok(Some(w)) => ("sent", Some(w.as_str())),
@@ -851,7 +873,7 @@ fn print_close(st: &AppState, id: i64, user: &str) -> Result<Option<String>> {
         (layout::cash_close(&s, &session, &drawer, &sum, user), s)
     };
     let bytes = escpos::document(&lines, None, &Opts::new(&s, false));
-    printer::send(&st.sink, &s.printer_name, "cierre", &bytes)
+    printer::send(&st.sink, &s, "cierre", &bytes)
 }
 
 fn ticket_get(st: &AppState, id: i64) -> Result<Value> {
@@ -883,7 +905,7 @@ fn printer_test(st: &AppState, t: TestIn) -> Result<Value> {
             escpos::document(&lines, logo.as_ref(), &Opts::new(&s, false))
         }
     };
-    let warning = printer::send(&st.sink, &s.printer_name, "prueba", &bytes)?;
+    let warning = printer::send(&st.sink, &s, "prueba", &bytes)?;
     Ok(json!({ "warning": warning }))
 }
 
@@ -913,6 +935,8 @@ mod tests {
         let backups = st.data_dir.join("backups");
         let printer = if matches!(st.sink, PrintSink::Dir(_)) { "POS-80" } else { "" };
         dispatch(st, "settings.save", json!({ "backupDir": backups.to_string_lossy(), "printerName": printer })).unwrap();
+        // and today's is done, so no sale starts one on a thread of its own
+        settings::put(&st.conn(), "lastBackupAt", &tickets::now()).unwrap();
     }
 
     fn sale() -> Value {
@@ -938,6 +962,8 @@ mod tests {
         setup(&st);
         let jordi = dispatch(&st, "users.save", json!({ "name": "Jordi", "role": "cashier", "password": "4321" })).unwrap();
         dispatch(&st, "logout", json!({})).unwrap();
+        // the first sign-in of the day takes the backup
+        st.conn().execute("DELETE FROM settings WHERE key = 'lastBackupAt'", []).unwrap();
         dispatch(&st, "login", json!({ "userId": jordi["id"], "password": "4321" })).unwrap();
         assert_eq!(st.data_dir.join("backups").read_dir().unwrap().count(), 1);
 
@@ -1189,6 +1215,83 @@ mod tests {
         assert!(all.as_array().unwrap().iter().any(|p| p["id"] == 1 && p["active"] == false));
         // the archived product no longer offers itself from the recent list
         assert_eq!(dispatch(&st, "products.recent", json!({})).unwrap()[1]["productId"], Value::Null);
+    }
+
+    // what a network printer received, one entry per connection
+    fn listen(connections: usize) -> (u16, std::thread::JoinHandle<Vec<String>>) {
+        use std::io::Read;
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let got = std::thread::spawn(move || {
+            (0..connections)
+                .map(|_| {
+                    let (mut c, _) = l.accept().unwrap();
+                    c.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+                    let mut buf = Vec::new();
+                    c.read_to_end(&mut buf).unwrap();
+                    String::from_utf8_lossy(&buf).into_owned()
+                })
+                .collect()
+        });
+        (port, got)
+    }
+
+    #[test]
+    fn a_network_printer_prints_the_original_once_and_then_copies() {
+        let _one = printer::NET_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let st = state(|_| PrintSink::Spooler);
+        setup(&st);
+        let off = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        dispatch(&st, "settings.save", json!({ "printerKind": "network", "printerHost": "127.0.0.1", "printerPort": off })).unwrap();
+        let t = dispatch(&st, "sale.finalize", sale()).unwrap();
+        assert_eq!((t["printed"].as_bool(), t["printError"].as_str()), (Some(false), Some("E_PRINT:offline")));
+        let id = t["ticket"]["id"].clone();
+
+        // the printer is back: nothing reached it before, so this is the original
+        let (back, got) = listen(2);
+        dispatch(&st, "settings.save", json!({ "printerPort": back })).unwrap();
+        dispatch(&st, "tickets.print", json!({ "id": id })).unwrap();
+        dispatch(&st, "tickets.print", json!({ "id": id })).unwrap();
+        let prints = got.join().unwrap();
+        assert!(prints[0].starts_with("\x1b@") && prints[0].contains("Cable"));
+        assert!(!prints[0].contains("*** COPIA ***"));
+        assert!(prints[1].contains("*** COPIA ***"));
+        let got = dispatch(&st, "tickets.get", json!({ "id": id })).unwrap();
+        let states: Vec<_> = got["ticket"]["prints"].as_array().unwrap().iter().map(|p| p["status"].clone()).collect();
+        assert_eq!(states, ["failed", "printed", "printed"]);
+
+        // Ajustes tests the address typed in, saved or not
+        let (port, got) = listen(3);
+        let draft = json!({ "printerKind": "network", "printerHost": "127.0.0.1", "printerPort": port });
+        for kind in ["page", "charset", "drawer"] {
+            assert_eq!(dispatch(&st, "printers.test", json!({ "settings": draft, "kind": kind })).unwrap()["warning"], Value::Null);
+        }
+        let tests = got.join().unwrap();
+        assert!(tests[0].contains("PRUEBA DE IMPRESI") && tests[0].contains(&format!("127.0.0.1:{port}")));
+        assert!(tests[1].contains("PRUEBA DE CARACTERES"));
+        assert!(tests[2].ends_with("\x1bp\0\x19\u{fffd}"));
+        let status = dispatch(&st, "printers.status", json!({})).unwrap();
+        assert_eq!((status["name"].as_str(), status["state"].as_str()), (Some(format!("127.0.0.1:{back}").as_str()), Some("offline")));
+    }
+
+    #[test]
+    fn the_first_sale_of_a_new_day_takes_the_backup_after_answering() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        // a till left open since another day
+        settings::put(&st.conn(), "lastBackupAt", "2001-01-01T21:00:00").unwrap();
+        assert!(backup::due(&st.conn()));
+        dispatch(&st, "sale.finalize", sale()).unwrap();
+        let t = std::time::Instant::now();
+        while backup::due(&st.conn()) && t.elapsed() < std::time::Duration::from_secs(20) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!backup::due(&st.conn()));
+        let files = backup::list(&[st.data_dir.join("backups")]);
+        assert_eq!(files.len(), 1);
+        // the copy has the sale in it
+        let copy = rusqlite::Connection::open(&files[0].path).unwrap();
+        assert_eq!(copy.query_row("SELECT COUNT(*) FROM tickets", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { FolderOpen, History, RotateCcw, TriangleAlert } from 'lucide-react';
+import { Download, FolderOpen, History, RotateCcw, TriangleAlert } from 'lucide-react';
 import { call, onSessionLost } from './api';
 import { dateTime } from './format';
 import { errorText, setLang, tr, type Lang } from './i18n';
@@ -8,6 +8,7 @@ import { Setup } from './Setup';
 import { Shell } from './Shell';
 import { useToast } from './toast';
 import type { Boot, User } from './types';
+import { useUpdate } from './Update';
 
 const LANG_KEY = 'tiquet.lang';
 
@@ -39,6 +40,8 @@ function Fatal({ message }: { message: string }) {
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
+  // a newer version may be what this data needs, or may fix what broke
+  const updates = useUpdate(false);
 
   useEffect(() => {
     call<AppInfo>('app.info')
@@ -76,6 +79,15 @@ function Fatal({ message }: { message: string }) {
               {tr('Registro', 'Log')}: <span className="mono">{info.logPath}</span>
             </span>
           )}
+        </div>
+      )}
+      {updates.found && (
+        <div className="fatal-update">
+          <span>{tr(`Hay una versión nueva de Tiquet (${updates.found}).`, `A new version of Tiquet is out (${updates.found}).`)}</span>
+          <button className="btn btn-primary" onClick={updates.install} disabled={updates.installing}>
+            <Download size={16} />
+            {updates.installing ? tr('Actualizando…', 'Updating…') : tr('Actualizar ahora', 'Update now')}
+          </button>
         </div>
       )}
       <div className="fatal-actions">
@@ -195,6 +207,6 @@ export function App() {
   }
   if (!user) return <Login boot={boot} lang={lang} onLang={changeLang} onLogin={setUser} />;
   return (
-    <Shell key={user.id} installId={boot.installId} user={user} setUser={setUser} lang={lang} onLang={changeLang} onLogout={logout} />
+    <Shell key={user.id} installId={boot.installId} version={boot.version} user={user} setUser={setUser} lang={lang} onLang={changeLang} onLogout={logout} />
   );
 }

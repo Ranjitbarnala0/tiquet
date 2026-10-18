@@ -1,3 +1,5 @@
+use std::io::{self, Write};
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::mpsc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -7,6 +9,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::error::{fail, Error, Result};
+use crate::settings::Settings;
 use crate::state::PrintSink;
 
 // A job the queue has not started printing in this long is cancelled: the
@@ -18,6 +21,9 @@ const SLOW: Duration = Duration::from_secs(20);
 const TICK: Duration = Duration::from_millis(150);
 // the spooler's status lags a little when a job starts
 const GRACE: Duration = Duration::from_millis(1500);
+// a network printer: getting a connection, then taking the whole job
+const CONNECT: Duration = Duration::from_secs(3);
+const WRITE: Duration = Duration::from_secs(10);
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -41,6 +47,34 @@ pub struct Status {
 impl Status {
     fn of(state: &'static str) -> Status {
         Status { state, jobs: 0 }
+    }
+}
+
+// Where tickets go: a queue installed in Windows, or a printer on the network
+// that takes raw ESC/POS on a TCP port (9100 on nearly all of them).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    Queue(String),
+    Net(String, u16),
+}
+
+// None: no printer set up yet
+pub fn target(s: &Settings) -> Option<Target> {
+    let (name, host) = (s.printer_name.trim(), s.printer_host.trim());
+    match s.printer_kind.as_str() {
+        "network" if host.is_empty() => None,
+        "network" => Some(Target::Net(host.into(), s.printer_port)),
+        _ if name.is_empty() => None,
+        _ => Some(Target::Queue(name.into())),
+    }
+}
+
+// what the screen and the test page call it
+pub fn label(s: &Settings) -> String {
+    match target(s) {
+        Some(Target::Queue(name)) => name,
+        Some(Target::Net(host, port)) => format!("{host}:{port}"),
+        None => String::new(),
     }
 }
 
@@ -273,22 +307,33 @@ pub fn list() -> Vec<Entry> {
     out
 }
 
-// What the queue says. An idle queue's state can be stale (Windows refreshes
-// it while a job prints), so it informs the cashier but never blocks a print.
-pub fn status(sink: &PrintSink, name: &str) -> Status {
-    let name = name.trim();
-    if name.is_empty() {
+// What the printer says. An idle queue's state can be stale (Windows
+// refreshes it while a job prints), so it informs the cashier but never
+// blocks a print. A network printer is ready when it takes a connection.
+pub fn status(sink: &PrintSink, s: &Settings) -> Status {
+    let Some(to) = target(s) else {
         return Status::of("none");
-    }
-    match sink {
-        PrintSink::Dir(_) => Status::of("ready"),
-        PrintSink::Spooler => {
-            let n = name.to_string();
+    };
+    match (sink, to) {
+        (PrintSink::Dir(_), _) => Status::of("ready"),
+        (PrintSink::Spooler, Target::Queue(name)) => {
+            let n = name.clone();
             match status_lane().run(Duration::from_secs(2), Duration::from_secs(3), move || win::info(&n)) {
                 Err(_) => Status::of("unknown"),
                 Ok(Err(_)) => Status::of("missing"),
-                Ok(Ok(i)) if is_virtual(name, &i.port, &i.driver) => Status { state: "virtual", jobs: i.jobs },
+                Ok(Ok(i)) if is_virtual(&name, &i.port, &i.driver) => Status { state: "virtual", jobs: i.jobs },
                 Ok(Ok(i)) => Status { state: classify(i.attributes, i.status), jobs: i.jobs },
+            }
+        }
+        // many network printers take one connection at a time: a probe made
+        // while a ticket prints would find it offline, so none is made then,
+        // and a probe waits its turn behind prints
+        (PrintSink::Spooler, Target::Net(_, _)) if NET_BUSY.load(Ordering::SeqCst) => Status::of("ready"),
+        (PrintSink::Spooler, Target::Net(host, port)) => {
+            match print_lane().run(Duration::from_secs(2), CONNECT + Duration::from_secs(1), move || connect(&host, port, CONNECT).is_ok()) {
+                Ok(true) => Status::of("ready"),
+                Ok(false) => Status::of("offline"),
+                Err(_) => Status::of("unknown"),
             }
         }
     }
@@ -298,18 +343,19 @@ pub fn status(sink: &PrintSink, name: &str) -> Status {
 // stopped waiting. E_PRINT:<why>: nothing printed and nothing is left in the
 // queue. E_PRINT:partial-<why> and E_PRINT:timeout: part or all of it may be
 // on paper, so the next print of that ticket must be marked as a copy.
-pub fn send(sink: &PrintSink, printer: &str, doc: &str, data: &[u8]) -> Result<Option<String>> {
-    let printer = printer.trim();
-    if printer.is_empty() {
+pub fn send(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) -> Result<Option<String>> {
+    let Some(to) = target(s) else {
         return fail("E_NO_PRINTER");
+    };
+    if let Target::Queue(name) = &to {
+        match status(sink, s).state {
+            "missing" => return fail(format!("E_PRINTER_MISSING:{name}")),
+            "virtual" => return fail(format!("E_PRINTER_VIRTUAL:{name}")),
+            _ => {}
+        }
     }
-    match status(sink, printer).state {
-        "missing" => return fail(format!("E_PRINTER_MISSING:{printer}")),
-        "virtual" => return fail(format!("E_PRINTER_VIRTUAL:{printer}")),
-        _ => {}
-    }
-    match sink {
-        PrintSink::Dir(dir) => {
+    match (sink, to) {
+        (PrintSink::Dir(dir), _) => {
             std::fs::create_dir_all(dir)?;
             let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%3f");
             let name: String = doc
@@ -319,39 +365,97 @@ pub fn send(sink: &PrintSink, printer: &str, doc: &str, data: &[u8]) -> Result<O
             std::fs::write(dir.join(format!("{stamp}-{name}.bin")), data)?;
             Ok(None)
         }
-        PrintSink::Spooler => {
-            let (p, d, b) = (printer.to_string(), doc.to_string(), data.to_vec());
-            match print_lane().run(Duration::from_secs(4), STALL + SLOW + Duration::from_secs(5), move || spool(&p, &d, &b, None)) {
-                Ok(r) => r.map_err(Error),
-                Err(true) => fail("E_PRINT:timeout"),
-                Err(false) => fail("E_PRINT:busy"),
-            }
+        (PrintSink::Spooler, Target::Queue(p)) => {
+            let (d, b) = (doc.to_string(), data.to_vec());
+            on_lane(STALL + SLOW + Duration::from_secs(5), move || spool(&p, &d, &b, None))
         }
+        (PrintSink::Spooler, Target::Net(host, port)) => {
+            let b = data.to_vec();
+            on_lane(CONNECT + WRITE + Duration::from_secs(5), move || net(&host, port, &b, CONNECT, WRITE).map(|_| None))
+        }
+    }
+}
+
+// a print that could not start in time never went out; one that started and
+// did not answer in time may be on paper
+fn on_lane(total: Duration, f: impl FnOnce() -> std::result::Result<Option<String>, String> + Send + 'static) -> Result<Option<String>> {
+    match print_lane().run(Duration::from_secs(4), total, f) {
+        Ok(r) => r.map_err(Error),
+        Err(true) => fail("E_PRINT:timeout"),
+        Err(false) => fail("E_PRINT:busy"),
     }
 }
 
 // For a drawer kick after a sale saved without printing: the sale does not
 // wait for it, and if the printer is off the job is cancelled, never left to
 // open the drawer later on its own.
-pub fn send_detached(sink: &PrintSink, printer: &str, doc: &str, data: &[u8]) {
-    let printer = printer.trim().to_string();
-    if printer.is_empty() {
-        return;
-    }
+pub fn send_detached(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) {
+    let Some(to) = target(s) else { return };
     match sink {
         PrintSink::Dir(_) => {
-            let _ = send(sink, &printer, doc, data);
+            let _ = send(sink, s, doc, data);
         }
         PrintSink::Spooler => {
-            let (d, b) = (doc.to_string(), data.to_vec());
+            let (name, d, b) = (label(s), doc.to_string(), data.to_vec());
             let task = Box::new(move || {
-                if let Err(e) = spool(&printer, &d, &b, None) {
-                    crate::log::warn(format!("{d} on {printer}: {e}"));
+                let out = match &to {
+                    Target::Queue(p) => spool(p, &d, &b, None).map(|_| ()),
+                    Target::Net(host, port) => net(host, *port, &b, CONNECT, WRITE),
+                };
+                if let Err(e) = out {
+                    crate::log::warn(format!("{d} on {name}: {e}"));
                 }
             });
             let _ = print_lane().0.lock().unwrap_or_else(|e| e.into_inner()).send((Instant::now() + Duration::from_secs(4), task));
         }
     }
+}
+
+static NET_BUSY: AtomicBool = AtomicBool::new(false);
+
+fn connect(host: &str, port: u16, wait: Duration) -> io::Result<TcpStream> {
+    let mut last = io::Error::from(io::ErrorKind::NotFound);
+    for addr in (host, port).to_socket_addrs()? {
+        match TcpStream::connect_timeout(&addr, wait) {
+            Ok(sock) => return Ok(sock),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+// A network print is one connection: connect, write it all, close. Without a
+// connection nothing went out; once it is open, a failure may have left part
+// of the ticket on paper.
+fn net(host: &str, port: u16, data: &[u8], wait: Duration, limit: Duration) -> std::result::Result<(), String> {
+    NET_BUSY.store(true, Ordering::SeqCst);
+    let out = match connect(host, port, wait) {
+        Err(_) => Err("E_PRINT:offline".to_string()),
+        Ok(mut sock) => put(&mut sock, data, limit).map_err(|_| "E_PRINT:partial-error".to_string()),
+    };
+    NET_BUSY.store(false, Ordering::SeqCst);
+    out
+}
+
+// The whole job within `limit`, however slowly the printer takes it. Written
+// a piece at a time, so a printer that hangs up halfway is noticed: Windows
+// would otherwise take the whole job into its own buffers at once.
+fn put(sock: &mut TcpStream, mut data: &[u8], limit: Duration) -> io::Result<()> {
+    let end = Instant::now() + limit;
+    while !data.is_empty() {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        sock.set_write_timeout(Some(left))?;
+        match sock.write(&data[..data.len().min(4096)]) {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(n) => data = &data[n..],
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 fn spool(printer: &str, doc: &str, data: &[u8], out_file: Option<&Path>) -> std::result::Result<Option<String>, String> {
@@ -591,6 +695,11 @@ mod win {
     }
 }
 
+// the network tests share the print lane, and a refused connection takes
+// Windows two seconds: one at a time keeps them from timing each other out
+#[cfg(test)]
+pub static NET_TESTS: Mutex<()> = Mutex::new(());
+
 #[cfg(not(windows))]
 mod win {
     use std::path::Path;
@@ -634,6 +743,8 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
 
     #[test]
     fn virtual_queues_are_recognised() {
@@ -725,20 +836,91 @@ mod tests {
         assert_eq!(lane.run(ms(50), ms(500), || 7), Ok(7));
     }
 
+    fn queue(name: &str) -> Settings {
+        Settings { printer_name: name.into(), ..Settings::default() }
+    }
+
+    fn network(port: u16) -> Settings {
+        Settings { printer_kind: "network".into(), printer_host: "127.0.0.1".into(), printer_port: port, ..Settings::default() }
+    }
+
+    // a printer on the network: what each connection brought, in order. A
+    // connection left open fails the read instead of hanging the test.
+    fn printer(connections: usize) -> (u16, std::thread::JoinHandle<Vec<Vec<u8>>>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let got = std::thread::spawn(move || {
+            (0..connections)
+                .map(|_| {
+                    let (mut c, _) = l.accept().unwrap();
+                    c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                    let mut buf = Vec::new();
+                    c.read_to_end(&mut buf).unwrap();
+                    buf
+                })
+                .collect()
+        });
+        (port, got)
+    }
+
+    // nobody listens there: bound once for a free number, then let go
+    fn closed_port() -> u16 {
+        TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
     #[test]
     fn a_missing_queue_is_refused_before_anything_is_spooled() {
-        let err = send(&PrintSink::Spooler, "Tiquet no existe", "x", b"x").unwrap_err().0;
+        let err = send(&PrintSink::Spooler, &queue("Tiquet no existe"), "x", b"x").unwrap_err().0;
         assert_eq!(err, "E_PRINTER_MISSING:Tiquet no existe");
-        assert_eq!(send(&PrintSink::Spooler, "  ", "x", b"x").unwrap_err().0, "E_NO_PRINTER");
+        assert_eq!(send(&PrintSink::Spooler, &queue("  "), "x", b"x").unwrap_err().0, "E_NO_PRINTER");
+        let no_address = Settings { printer_host: " ".into(), ..network(9100) };
+        assert_eq!(send(&PrintSink::Spooler, &no_address, "x", b"x").unwrap_err().0, "E_NO_PRINTER");
+        assert_eq!(status(&PrintSink::Spooler, &no_address).state, "none");
     }
 
     #[test]
     fn virtual_queue_is_refused() {
         let pdf = list().into_iter().find(|p| p.is_virtual);
         if let Some(p) = pdf {
-            let err = send(&PrintSink::Spooler, &p.name, "x", b"x").unwrap_err().0;
+            let err = send(&PrintSink::Spooler, &queue(&p.name), "x", b"x").unwrap_err().0;
             assert_eq!(err, format!("E_PRINTER_VIRTUAL:{}", p.name));
         }
+    }
+
+    #[test]
+    fn a_network_printer_gets_the_whole_job_on_a_connection_that_is_then_closed() {
+        let _one = NET_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let (port, got) = printer(2);
+        let s = network(port);
+        assert_eq!(status(&PrintSink::Spooler, &s).state, "ready");
+        let data: Vec<u8> = (0..=255u8).cycle().take(300_000).collect();
+        assert_eq!(send(&PrintSink::Spooler, &s, "T2026-000001", &data).unwrap(), None);
+        let got = got.join().unwrap();
+        // the status probe brings nothing; the print brings every byte
+        assert_eq!(got[0], b"");
+        assert!(got[1] == data);
+        assert_eq!(label(&s), format!("127.0.0.1:{port}"));
+    }
+
+    #[test]
+    fn a_network_printer_that_does_not_answer_is_offline_and_nothing_was_sent() {
+        let _one = NET_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let s = network(closed_port());
+        assert_eq!(status(&PrintSink::Spooler, &s).state, "offline");
+        assert_eq!(send(&PrintSink::Spooler, &s, "x", b"x").unwrap_err().0, "E_PRINT:offline");
+    }
+
+    #[test]
+    fn a_job_the_printer_cuts_off_or_cannot_take_in_time_fails() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let mut sock = connect("127.0.0.1", port, Duration::from_secs(1)).unwrap();
+        // the printer hangs up before the job is through
+        drop(l.accept().unwrap());
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(put(&mut sock, &vec![0u8; 8 << 20], Duration::from_secs(5)).is_err());
+        let mut sock = connect("127.0.0.1", port, Duration::from_secs(1)).unwrap();
+        assert_eq!(put(&mut sock, b"x", Duration::ZERO).unwrap_err().kind(), io::ErrorKind::TimedOut);
     }
 
     // Every Windows install ships "Microsoft Print to PDF". With an output

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BadgeCheck, FolderOpen, HardDrive, History, ImagePlus, Printer, ReceiptText, RefreshCw, ScanSearch, Store, Trash2 } from 'lucide-react';
-import { call } from './api';
+import { BadgeCheck, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Printer, ReceiptText, RefreshCw, ScanSearch, Store, Trash2 } from 'lucide-react';
+import { call, native } from './api';
 import { dateTime, rate, VAT_RATES } from './format';
 import { errorText, printerStateText, tr, warningText, type Lang } from './i18n';
 import { loadImage, rasterize, type LogoMode } from './logo';
@@ -9,7 +9,8 @@ import { useToast } from './toast';
 import type { SettingsTab } from './Shell';
 import type { Logo, PLine, PrinterEntry, Preview, Settings } from './types';
 import { spanishNif } from './nif';
-import { usePrinterStatus } from './usePrinter';
+import type { Updates } from './Update';
+import { printerLabel, usePrinterStatus } from './usePrinter';
 import { Field, Modal, Segmented, Toggle } from './ui';
 import { VerifactuTab } from './Verifactu';
 
@@ -54,15 +55,18 @@ interface Props {
   onLogo: () => void;
   lang: Lang;
   onLang: (l: Lang) => void;
+  version: string;
+  updates: Updates;
+  saleBusy: boolean;
 }
 
-export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved, logo, onLogo, lang, onLang }: Props) {
+export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved, logo, onLogo, lang, onLang, version, updates, saleBusy }: Props) {
   const toast = useToast();
   const [d, setD] = useState<Settings>(settings);
   const [tab, setTab] = useState<SettingsTab>(request.tab);
   const [preview, setPreview] = useState<PLine[] | null>(null);
   const [printers, setPrinters] = useState<PrinterEntry[] | null>(null);
-  const { status: printerStatus, refresh: refreshStatus } = usePrinterStatus(tab === 'printer', settings.printerName);
+  const { status: printerStatus, refresh: refreshStatus } = usePrinterStatus(tab === 'printer', printerLabel(settings));
 
   useEffect(() => setTab(request.tab), [request]);
   const [backup, setBackup] = useState<BackupStatus | null>(null);
@@ -227,6 +231,18 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
     }
   };
 
+  const diagnose = async () => {
+    setBusy('diag');
+    try {
+      const r = await call<{ path: string }>('diagnostics.save');
+      toast.ok(`${tr('Diagnóstico guardado en', 'Diagnostics saved to')} ${r.path}`);
+    } catch (e) {
+      toast.error(errorText(e));
+    } finally {
+      setBusy('');
+    }
+  };
+
   const backupNow = async () => {
     setBusy('backup');
     try {
@@ -249,7 +265,9 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
   ];
 
   const selected = printers?.find((p) => p.name === d.printerName);
-  const selectedVirtual = !!selected?.virtual;
+  const selectedVirtual = d.printerKind === 'windows' && !!selected?.virtual;
+  const network = d.printerKind === 'network';
+  const target = printerLabel(d);
 
   return (
     <div className="settings">
@@ -410,36 +428,67 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
 
           {tab === 'printer' && (
             <div className="stack">
-              <Field label={tr('Impresora de tickets', 'Receipt printer')} hint={tr('La impresora tiene que estar instalada en Windows', 'The printer must be installed in Windows')}>
-                <div className="row-gap">
-                  <select value={d.printerName} onChange={(e) => set('printerName', e.target.value)} className="grow">
-                    <option value="">{tr('Ninguna (guardar tickets sin imprimir)', 'None (save tickets without printing)')}</option>
-                    {d.printerName && printers && !selected && (
-                      <option value={d.printerName}>
-                        {d.printerName} ({tr('no encontrada', 'not found')})
-                      </option>
-                    )}
-                    {printers?.map((p) => (
-                      <option key={p.name} value={p.name} disabled={p.virtual && p.name !== d.printerName}>
-                        {p.name}
-                        {p.virtual ? ` (${tr('virtual, no imprime tickets', 'virtual, cannot print tickets')})` : ''}
-                        {p.default && !p.virtual ? ` (${tr('predeterminada', 'default')})` : ''}
-                      </option>
-                    ))}
-                  </select>
-                  <button className="btn btn-ghost" onClick={loadPrinters} title={tr('Volver a buscar impresoras', 'Look for printers again')} aria-label={tr('Volver a buscar impresoras', 'Look for printers again')}>
-                    <RefreshCw size={16} />
-                  </button>
-                  <button className="btn" onClick={detect} title={tr('Elegir sola la impresora de tickets', 'Pick the receipt printer automatically')}>
-                    <ScanSearch size={16} />
-                    {tr('Detectar', 'Detect')}
-                  </button>
-                </div>
+              <Field label={tr('Tipo de impresora', 'Printer type')}>
+                <Segmented
+                  value={d.printerKind}
+                  onChange={(v) => set('printerKind', v)}
+                  options={[
+                    { value: 'windows', label: tr('Impresora de Windows', 'Windows printer') },
+                    { value: 'network', label: tr('Impresora de red (IP)', 'Network printer (IP)') },
+                  ]}
+                />
               </Field>
-              {d.printerName === settings.printerName && printerStatus && printerStatus.state !== 'none' && (
+              {network ? (
+                <div className="grid-host">
+                  <Field
+                    label={tr('Dirección IP de la impresora', 'Printer IP address')}
+                    hint={tr('La imprime la propia impresora en su hoja de configuración (en muchas, encendiéndola con el botón FEED pulsado).', 'The printer prints it on its own configuration sheet (on many, by switching it on with FEED held down).')}
+                  >
+                    <input value={d.printerHost} onChange={(e) => set('printerHost', e.target.value.trim())} placeholder="192.168.1.100" className="mono" spellCheck={false} />
+                  </Field>
+                  <Field label={tr('Puerto', 'Port')} hint={tr('Casi siempre 9100', 'Almost always 9100')}>
+                    <input
+                      type="number"
+                      min={1}
+                      max={65535}
+                      value={d.printerPort}
+                      onChange={(e) => set('printerPort', Math.max(1, Math.min(65535, Math.round(Number(e.target.value)) || 9100)))}
+                    />
+                  </Field>
+                </div>
+              ) : (
+                <Field label={tr('Impresora de tickets', 'Receipt printer')} hint={tr('La impresora tiene que estar instalada en Windows', 'The printer must be installed in Windows')}>
+                  <div className="row-gap">
+                    <select value={d.printerName} onChange={(e) => set('printerName', e.target.value)} className="grow">
+                      <option value="">{tr('Ninguna (guardar tickets sin imprimir)', 'None (save tickets without printing)')}</option>
+                      {d.printerName && printers && !selected && (
+                        <option value={d.printerName}>
+                          {d.printerName} ({tr('no encontrada', 'not found')})
+                        </option>
+                      )}
+                      {printers?.map((p) => (
+                        <option key={p.name} value={p.name} disabled={p.virtual && p.name !== d.printerName}>
+                          {p.name}
+                          {p.virtual ? ` (${tr('virtual, no imprime tickets', 'virtual, cannot print tickets')})` : ''}
+                          {p.default && !p.virtual ? ` (${tr('predeterminada', 'default')})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                    <button className="btn btn-ghost" onClick={loadPrinters} title={tr('Volver a buscar impresoras', 'Look for printers again')} aria-label={tr('Volver a buscar impresoras', 'Look for printers again')}>
+                      <RefreshCw size={16} />
+                    </button>
+                    <button className="btn" onClick={detect} title={tr('Elegir sola la impresora de tickets', 'Pick the receipt printer automatically')}>
+                      <ScanSearch size={16} />
+                      {tr('Detectar', 'Detect')}
+                    </button>
+                  </div>
+                </Field>
+              )}
+              {target === printerLabel(settings) && printerStatus && printerStatus.state !== 'none' && (
                 <div className={`printer-pill static ${printerStatus.state}`}>
                   <i aria-hidden="true" />
                   <span>{printerStateText(printerStatus.state)}</span>
+                  {network && <small>{target}</small>}
                   {printerStatus.jobs > 0 && (
                     <small>
                       {printerStatus.jobs} {tr('trabajos en la cola de Windows', 'jobs in the Windows queue')}
@@ -475,7 +524,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                       </option>
                     ))}
                   </select>
-                  <button className="btn" onClick={() => test('charset')} disabled={!d.printerName || !!busy}>
+                  <button className="btn" onClick={() => test('charset')} disabled={!target || !!busy}>
                     {tr('Prueba de caracteres', 'Character test')}
                   </button>
                 </div>
@@ -505,11 +554,11 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 hint={tr('Necesario en la mayoría de impresoras genéricas (salen ideogramas en vez de tildes)', 'Needed by most generic printers (accents print as ideograms otherwise)')}
               />
               <div className="row-gap">
-                <button className="btn btn-primary" onClick={() => test('page')} disabled={!d.printerName || !!busy}>
+                <button className="btn btn-primary" onClick={() => test('page')} disabled={!target || !!busy}>
                   <Printer size={16} />
                   {tr('Imprimir página de prueba', 'Print test page')}
                 </button>
-                <button className="btn" onClick={() => test('drawer')} disabled={!d.printerName || !!busy}>
+                <button className="btn" onClick={() => test('drawer')} disabled={!target || !!busy}>
                   {tr('Abrir cajón', 'Open drawer')}
                 </button>
               </div>
@@ -567,6 +616,18 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 </select>
               </Field>
               <Toggle
+                checked={d.autostart}
+                onChange={(v) => set('autostart', v)}
+                label={tr('Abrir Tiquet al encender el ordenador', 'Open Tiquet when the computer starts')}
+                hint={tr('Se abre solo al entrar en Windows con este usuario.', 'It opens by itself when this user signs in to Windows.')}
+              />
+              <Toggle
+                checked={d.fullscreen}
+                onChange={(v) => set('fullscreen', v)}
+                label={tr('Pantalla completa', 'Full screen')}
+                hint={tr('Tiquet ocupa toda la pantalla, también la barra de Windows. Se sale con el botón de arriba a la derecha.', 'Tiquet fills the whole screen, Windows taskbar included. The button at the top right leaves it.')}
+              />
+              <Toggle
                 checked={d.autoBackup}
                 onChange={(v) => set('autoBackup', v)}
                 label={tr('Copia de seguridad diaria', 'Daily backup')}
@@ -590,6 +651,50 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   <button className="btn btn-ghost sm" onClick={() => reveal('backups')}>
                     <FolderOpen size={15} />
                     {tr('Abrir carpeta', 'Open folder')}
+                  </button>
+                </div>
+              </div>
+
+              <div className="info-card">
+                <div>
+                  <span className="muted">{tr('Versión de Tiquet', 'Tiquet version')}</span>
+                  <b>{version}</b>
+                  {updates.found ? (
+                    <span className="ok-text">{tr(`Hay una versión nueva: ${updates.found}`, `A new version is out: ${updates.found}`)}</span>
+                  ) : (
+                    updates.upToDate && <span className="muted">{tr('Es la versión más reciente.', 'This is the latest version.')}</span>
+                  )}
+                  {updates.found && saleBusy && <span className="field-hint">{tr('Termina o vacía el ticket de Venta para actualizar.', 'Finish or clear the ticket in Sale to update.')}</span>}
+                </div>
+                <div className="info-actions">
+                  {updates.found ? (
+                    <button className="btn btn-primary" onClick={updates.install} disabled={updates.installing || saleBusy}>
+                      <Download size={16} />
+                      {updates.installing ? tr('Actualizando…', 'Updating…') : tr('Actualizar ahora', 'Update now')}
+                    </button>
+                  ) : (
+                    <button className="btn" onClick={() => updates.check(true)} disabled={!native || updates.checking}>
+                      <RefreshCw size={16} />
+                      {updates.checking ? tr('Buscando…', 'Checking…') : tr('Buscar actualización', 'Check for updates')}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="info-card">
+                <div>
+                  <b>{tr('Diagnóstico para soporte', 'Diagnostics for support')}</b>
+                  <span className="muted">
+                    {tr(
+                      'Un .zip con el registro de actividad, los ajustes y el estado de Tiquet, para enviarlo a quien te da soporte. No lleva la base de datos ni contraseñas.',
+                      'A .zip with the activity log, the settings and the state of Tiquet, to send to whoever gives you support. It holds no database and no passwords.',
+                    )}
+                  </span>
+                </div>
+                <div className="info-actions">
+                  <button className="btn" onClick={diagnose} disabled={busy === 'diag'}>
+                    <LifeBuoy size={16} />
+                    {tr('Guardar diagnóstico', 'Save diagnostics')}
                   </button>
                 </div>
               </div>

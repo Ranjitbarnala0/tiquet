@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { BadgeCheck, ChartColumn, FlaskConical, Lock, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet } from 'lucide-react';
-import { call } from './api';
+import { BadgeCheck, ChartColumn, FlaskConical, Lock, Maximize2, Minimize2, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet } from 'lucide-react';
+import { call, native } from './api';
 import { Cash } from './Cash';
 import { initials } from './format';
 import { errorText, tr, type Lang } from './i18n';
@@ -14,6 +14,7 @@ import { useToast } from './toast';
 import type { ItemDraft } from './ItemDialog';
 import type { Logo, Product, Settings, TicketRecord, User, VerifactuStatus } from './types';
 import { Mark, Modal } from './ui';
+import { UpdateBar, useUpdate } from './Update';
 import { Users } from './Users';
 import { sendError, stuck } from './Verifactu';
 
@@ -22,6 +23,7 @@ export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'data' | 'verifactu';
 
 interface Props {
   installId: string;
+  version: string;
   user: User;
   setUser: (u: User) => void;
   lang: Lang;
@@ -29,7 +31,7 @@ interface Props {
   onLogout: () => void;
 }
 
-export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Props) {
+export function Shell({ installId, version, user, setUser, lang, onLang, onLogout }: Props) {
   const toast = useToast();
   const [screen, setScreen] = useState<Screen>('sale');
   const [tabRequest, setTabRequest] = useState<{ tab: SettingsTab; n: number }>({ tab: 'shop', n: 0 });
@@ -41,6 +43,10 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
   const [leave, setLeave] = useState<null | (() => void)>(null);
   const [incoming, setIncoming] = useState<{ lines: ItemDraft[]; from: string; n: number } | null>(null);
   const [vf, setVf] = useState<VerifactuStatus | null>(null);
+  // a ticket on the screen or being charged: no update is offered then
+  const [saleBusy, setSaleBusy] = useState(false);
+  const updates = useUpdate(saleBusy);
+  const [full, setFull] = useState(false);
   const admin = user.role === 'admin';
 
   const loadProducts = useCallback(() => {
@@ -105,6 +111,24 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
   useEffect(() => {
     if (!admin && screen !== 'sale' && screen !== 'tickets' && screen !== 'cash') setScreen('sale');
   }, [admin, screen]);
+
+  // the core opened the window full screen if Ajustes says so; only the
+  // button in the header leaves it, Esc never does
+  const fullscreenSet = !!settings?.fullscreen;
+  useEffect(() => {
+    if (!native || !fullscreenSet) return;
+    call<{ on: boolean }>('app.fullscreen')
+      .then((r) => setFull(r.on))
+      .catch(() => {});
+  }, [fullscreenSet]);
+
+  const fullscreen = useCallback(
+    (on: boolean) =>
+      call<{ on: boolean }>('app.fullscreen', { on })
+        .then((r) => setFull(r.on))
+        .catch((e) => toast.error(errorText(e))),
+    [toast],
+  );
 
   // records that cannot reach the AEAT are shown to whoever is at the till
   // (OM HAC/1177/2024 art. 16); selling goes on regardless
@@ -256,9 +280,20 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
             <Lock size={16} />
             <span>{tr('Bloquear', 'Lock')}</span>
           </button>
+          {native && settings.fullscreen && (
+            <button
+              className="btn btn-ghost icon-only"
+              onClick={() => fullscreen(!full)}
+              title={full ? tr('Salir de pantalla completa', 'Leave full screen') : tr('Pantalla completa', 'Full screen')}
+              aria-label={full ? tr('Salir de pantalla completa', 'Leave full screen') : tr('Pantalla completa', 'Full screen')}
+            >
+              {full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+            </button>
+          )}
         </div>
       </header>
       <div className="bars">
+        <UpdateBar u={updates} saleBusy={saleBusy} />
         {vf && stuck(vf) && (
           <div className={`vf-bar${vf.problems.length > 0 ? ' bad' : ''}`} role="status">
             <BadgeCheck size={16} />
@@ -306,6 +341,8 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
           products={products}
           onSold={loadProducts}
           onSetupPrinter={setupPrinter}
+          onBusy={setSaleBusy}
+          onCash={() => go('cash')}
         />
         {screen === 'tickets' && (
           <Tickets
@@ -332,7 +369,13 @@ export function Shell({ installId, user, setUser, lang, onLang, onLogout }: Prop
             onDirty={setSettingsDirty}
             request={tabRequest}
             settings={settings}
-            onSaved={setSettings}
+            onSaved={(s) => {
+              if (native && s.fullscreen !== settings.fullscreen) fullscreen(s.fullscreen);
+              setSettings(s);
+            }}
+            version={version}
+            updates={updates}
+            saleBusy={saleBusy}
             logo={logo}
             onLogo={loadLogo}
             lang={lang}

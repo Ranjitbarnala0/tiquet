@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
 use chrono::{DateTime, Local};
@@ -65,19 +66,41 @@ fn prune(dir: &Path) {
     }
 }
 
-// once a day: at the first sign-in and, for a till left open overnight, at
+// once a day: at the first sign-in and, for a till left open overnight, after
 // the first sale. A failure is recorded, never fatal.
 pub fn auto(conn: &Connection) {
-    let Ok(s) = settings::load(conn) else { return };
-    if !s.auto_backup {
+    if !due(conn) {
         return;
     }
+    if let Ok(s) = settings::load(conn) {
+        let _ = run(conn, &dir(&s));
+    }
+}
+
+pub fn due(conn: &Connection) -> bool {
+    let Ok(s) = settings::load(conn) else { return false };
     let today = Local::now().format("%Y-%m-%d").to_string();
     let last = settings::get(conn, "lastBackupAt").ok().flatten().unwrap_or_default();
-    if last.starts_with(&today) {
+    s.auto_backup && !last.starts_with(&today)
+}
+
+// auto() on a thread and a connection of its own, for a caller that must not
+// wait for the copy
+pub fn later(db: PathBuf) {
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if RUNNING.swap(true, Ordering::SeqCst) {
         return;
     }
-    let _ = run(conn, &dir(&s));
+    let spawned = std::thread::Builder::new().name("backup".into()).spawn(move || {
+        match db::open(&db) {
+            Ok(conn) => auto(&conn),
+            Err(e) => log::error(format!("daily backup: {}", e.0)),
+        }
+        RUNNING.store(false, Ordering::SeqCst);
+    });
+    if spawned.is_err() {
+        RUNNING.store(false, Ordering::SeqCst);
+    }
 }
 
 #[derive(Serialize, Debug)]

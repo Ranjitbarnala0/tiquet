@@ -8,6 +8,7 @@ import { Paper } from './Paper';
 import { useToast } from './toast';
 import type { Finalized, Logo, Method, RefundPreview, Settings, TicketRecord } from './types';
 import { Field, Modal, Segmented } from './ui';
+import { printerLabel } from './usePrinter';
 
 interface Props {
   ticket: TicketRecord;
@@ -31,7 +32,7 @@ export function RefundModal({ ticket, settings, logo, onClose, onDone, onSetupPr
   const [busy, setBusy] = useState(false);
   const [clock, setClock] = useState<{ last: string; print: boolean } | null>(null);
   const seq = useRef(0);
-  const noPrinter = !settings.printerName.trim();
+  const noPrinter = !printerLabel(settings);
 
   const left = (id: number) => {
     const l = ticket.lines.find((x) => x.id === id);

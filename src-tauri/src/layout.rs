@@ -592,7 +592,7 @@ pub fn test_page(s: &Settings, user: &str, logo: bool) -> Vec<Line> {
     }
     d.center("PRUEBA DE IMPRESIÓN", true, Size::Big);
     d.blank();
-    d.pair("Impresora", &s.printer_name, false, Size::Normal);
+    d.pair("Impresora", &crate::printer::label(s), false, Size::Normal);
     d.pair("Ancho", &format!("{} columnas", s.columns), false, Size::Normal);
     d.pair("Caracteres", &s.codepage.to_uppercase(), false, Size::Normal);
     d.rule('=');

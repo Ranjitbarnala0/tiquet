@@ -5,6 +5,7 @@ pub mod backup;
 pub mod cash;
 pub mod codepage;
 pub mod db;
+pub mod diag;
 pub mod error;
 pub mod escpos;
 pub mod layout;
@@ -24,5 +25,6 @@ pub mod users;
 pub mod verifactu;
 
 mod app;
+mod update;
 
 pub use app::run;

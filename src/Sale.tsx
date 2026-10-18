@@ -17,20 +17,21 @@ import {
   Star,
   Trash2,
   Undo2,
+  Wallet,
   X,
 } from 'lucide-react';
 import { ApiError, call, toError } from './api';
-import { eur, fmt, norm, parseMoney, rate } from './format';
+import { eur, fmt, isoDate, norm, parseMoney, rate } from './format';
 import { errorText, isPrinterSetup, isTransient, printerStateText, tr, warningText } from './i18n';
 import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
 import { customerNif } from './nif';
 import { Paper } from './Paper';
 import { useToast } from './toast';
-import type { CartLine, Customer, Finalized, Logo, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
+import type { CartLine, CashDrawer, CashSession, Customer, Finalized, Logo, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
 
 type Shown = Preview & { forLines: string };
-import { usePrinterStatus } from './usePrinter';
+import { printerLabel, usePrinterStatus } from './usePrinter';
 import { Field, useTrap } from './ui';
 
 type Option =
@@ -235,9 +236,19 @@ interface Props {
   products: Product[];
   onSold: () => void;
   onSetupPrinter?: () => void;
+  // whether a ticket is on the screen or being charged
+  onBusy: (busy: boolean) => void;
+  onCash: () => void;
 }
 
-export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, logo, products, onSold, onSetupPrinter }: Props) {
+// "9:00", or "17/10 21:05" when it was opened another day
+function since(s: CashSession): string {
+  const at = s.openedAt;
+  const time = at.slice(11, 16).replace(/^0/, '');
+  return at.slice(0, 10) === isoDate(new Date()) ? time : `${at.slice(8, 10)}/${at.slice(5, 7)} ${time}`;
+}
+
+export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, logo, products, onSold, onSetupPrinter, onBusy, onCash }: Props) {
   const toast = useToast();
   const [restored] = useState(() => storedCart(cartKey));
   const [lines, setLines] = useState<CartLine[]>(restored.lines);
@@ -272,8 +283,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const burst = useRef({ text: '', last: 0, fast: 0, given: '' });
   const pendingScans = useRef<string[]>([]);
   const printing = useRef(false);
-  const noPrinter = !settings.printerName.trim();
-  const { status: printer, refresh: refreshPrinter } = usePrinterStatus(active, settings.printerName);
+  const noPrinter = !printerLabel(settings);
+  const { status: printer, refresh: refreshPrinter } = usePrinterStatus(active, printerLabel(settings));
+  // the till: undefined until known, null while closed
+  const [till, setTill] = useState<CashSession | null | undefined>(undefined);
+  const [float, setFloat] = useState('');
+  const [opening, setOpening] = useState(false);
 
   // survives a crash or a power cut mid-sale
   useEffect(() => {
@@ -309,6 +324,21 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   useEffect(loadRecent, [loadRecent, products]);
 
+  const loadTill = useCallback(() => {
+    call<CashDrawer>('cash.state')
+      .then((d) => setTill(d.session))
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    loadTill();
+    const t = setInterval(loadTill, 30_000);
+    return () => clearInterval(t);
+  }, [active, loadTill]);
+
+  useEffect(() => onBusy(lines.length > 0 || paying || busy), [lines.length, paying, busy, onBusy]);
+
   useEffect(() => {
     try {
       localStorage.setItem(TAB_KEY, tab);
@@ -325,6 +355,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const payload = lines.map(({ productId, name, qty, unitCents, vatBp }) => ({ productId, name, qty, unitCents, vatBp }));
   const linesKey = JSON.stringify(payload);
   const customerOk = !invoice || (customer.name.trim().length > 0 && customerNif(customer.nif));
+  const floatCents = parseMoney(float || '0', 999_999_999);
   const previewArgs = JSON.stringify({
     lines: payload,
     payment: paying ? { method, tenderedCents: tendered ?? undefined } : undefined,
@@ -570,6 +601,25 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       printFailed('', e, () => reprint(id, copy));
     } finally {
       printing.current = false;
+    }
+  };
+
+  // a cash sale with the till closed: opened here with the float typed in,
+  // and the sale carries on in the same window
+  const openTill = async () => {
+    if (opening || floatCents === null || floatCents < 0) return;
+    setOpening(true);
+    try {
+      const d = await call<CashDrawer>('cash.open', { floatCents });
+      setTill(d.session);
+      setFloat('');
+      toast.ok(tr('Caja abierta', 'Till opened'));
+      givenRef.current?.focus();
+    } catch (e) {
+      toast.error(errorText(e));
+      loadTill();
+    } finally {
+      setOpening(false);
     }
   };
 
@@ -984,6 +1034,31 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
             <div className="pay" onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={tr('Cobrar', 'Charge')} ref={payRef}>
               <div className="pay-head">
                 <h2>{tr('Cobrar', 'Charge')}</h2>
+                {method === 'cash' && till === null && (
+                  <div className="till-note">
+                    <Wallet size={17} />
+                    <span>{tr('Caja cerrada', 'Till closed')}</span>
+                    <div className="money-input">
+                      <input
+                        value={float}
+                        onChange={(e) => setFloat(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key !== 'Enter') return;
+                          e.preventDefault();
+                          e.stopPropagation();
+                          openTill();
+                        }}
+                        inputMode="decimal"
+                        placeholder={tr('Fondo', 'Float')}
+                        aria-label={tr('Fondo inicial', 'Starting float')}
+                      />
+                      <span>€</span>
+                    </div>
+                    <button className="btn sm" onMouseDown={keep} onClick={openTill} disabled={opening || floatCents === null || floatCents < 0}>
+                      {tr('Abrir caja', 'Open till')}
+                    </button>
+                  </div>
+                )}
                 <button className="icon-btn" onMouseDown={keep} onClick={() => setPaying(false)} disabled={busy} aria-label={tr('Cerrar', 'Close')}>
                   <X size={18} />
                 </button>
@@ -1116,24 +1191,32 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           <span>{paying ? tr('Así se imprimirá', 'This is what will print') : tr('Vista previa del ticket', 'Ticket preview')}</span>
           {preview && <span className="mono">{preview.number}</span>}
         </div>
-        {printer && (
-          <button
-            className={`printer-pill ${lastFailed ? 'paper' : printer.state}`}
-            onMouseDown={keep}
-            onClick={onSetupPrinter}
-            disabled={!onSetupPrinter}
-            title={printer.name || tr('Ajustes > Impresora', 'Settings > Printer')}
-          >
-            <i aria-hidden="true" />
-            <span>{lastFailed ? tr('Último ticket sin imprimir', 'Last ticket not printed') : printerStateText(printer.state)}</span>
-            {printer.name && <small>{printer.name}</small>}
-            {printer.jobs > 0 && (
-              <small>
-                {printer.jobs} {tr('en cola', 'queued')}
-              </small>
-            )}
-          </button>
-        )}
+        <div className="side-pills">
+          {printer && (
+            <button
+              className={`printer-pill ${lastFailed ? 'paper' : printer.state}`}
+              onMouseDown={keep}
+              onClick={onSetupPrinter}
+              disabled={!onSetupPrinter}
+              title={printer.name || tr('Ajustes > Impresora', 'Settings > Printer')}
+            >
+              <i aria-hidden="true" />
+              <span>{lastFailed ? tr('Último ticket sin imprimir', 'Last ticket not printed') : printerStateText(printer.state)}</span>
+              {printer.name && <small>{printer.name}</small>}
+              {printer.jobs > 0 && (
+                <small>
+                  {printer.jobs} {tr('en cola', 'queued')}
+                </small>
+              )}
+            </button>
+          )}
+          {till !== undefined && (
+            <button className={`printer-pill${till ? ' ready' : ''}`} onMouseDown={keep} onClick={onCash} title={tr('Caja', 'Till')}>
+              <i aria-hidden="true" />
+              <span>{till ? `${tr('Caja abierta desde', 'Till open since')} ${since(till)}` : tr('Caja cerrada', 'Till closed')}</span>
+            </button>
+          )}
+        </div>
         <div className="paper-scroll" ref={paperRef}>
           {preview && <Paper lines={preview.lines} logo={logo} cols={settings.columns} />}
           {previewErr && <p className="form-error">{previewErr}</p>}
