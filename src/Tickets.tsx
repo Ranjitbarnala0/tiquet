@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Ban, Banknote, CreditCard, Printer, ReceiptText, Repeat2, Search, Smartphone, Undo2 } from 'lucide-react';
+import { Ban, Banknote, CreditCard, Printer, ReceiptText, Repeat2, Search, Send, Smartphone, Undo2 } from 'lucide-react';
 import { call } from './api';
 import { addDays, dateTime, eur, isoDate } from './format';
 import { errorText, isPrinterSetup, isTransient, printText, tr, warningText } from './i18n';
 import { Paper } from './Paper';
 import { RefundModal } from './Refund';
+import { ShareDialog } from './Share';
 import { useToast } from './toast';
 import type { Logo, Method, PLine, Settings, TicketRecord, TicketSummary, User } from './types';
 import { Empty, Field, Modal } from './ui';
@@ -69,6 +70,7 @@ export function Tickets({
   const [unprinted, setUnprinted] = useState(false);
   const [voiding, setVoiding] = useState(false);
   const [refunding, setRefunding] = useState(false);
+  const [sharing, setSharing] = useState(false);
   const [reason, setReason] = useState('');
   const [busy, setBusy] = useState(false);
   const admin = user.role === 'admin';
@@ -298,6 +300,10 @@ export function Tickets({
                   <Printer size={16} />
                   {onPaper ? tr('Reimprimir copia', 'Reprint copy') : tr('Imprimir', 'Print')}
                 </button>
+                <button className="btn" onClick={() => setSharing(true)} title={tr('WhatsApp, email o PDF', 'WhatsApp, email or PDF')}>
+                  <Send size={16} />
+                  {tr('Enviar', 'Send')}
+                </button>
                 {t.kind === 'sale' && t.lines.some((l) => !l.repairId) && (
                   <button className="btn" onClick={() => onRepeat(t)} title={tr('Una venta nueva con los mismos artículos', 'A new sale with the same items')}>
                     <Repeat2 size={16} />
@@ -327,6 +333,7 @@ export function Tickets({
         )}
       </section>
 
+      {sharing && t && <ShareDialog ticketId={t.id} number={t.number} onClose={() => setSharing(false)} />}
       {voiding && t && (
         <Modal
           title={`${tr('Anular', 'Void')} ${t.number}`}

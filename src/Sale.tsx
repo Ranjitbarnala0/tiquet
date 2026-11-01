@@ -13,6 +13,7 @@ import {
   Save,
   ScanBarcode,
   Search,
+  Send,
   Smartphone,
   Star,
   Trash2,
@@ -27,6 +28,7 @@ import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
 import { customerNif } from './nif';
 import { Paper } from './Paper';
+import { ShareDialog } from './Share';
 import { useToast } from './toast';
 import type { CartLine, CashDrawer, CashSession, Customer, Finalized, Logo, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
 
@@ -271,6 +273,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [previewErr, setPreviewErr] = useState('');
   const [busy, setBusy] = useState(false);
   const [last, setLast] = useState<TicketRecord | null>(null);
+  const [sharing, setSharing] = useState<TicketRecord | null>(null);
   // the add/change dialog: 'add', or the key of the line being changed
   const [item, setItem] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>(storedTab);
@@ -1273,6 +1276,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                     {tr('Copia', 'Copy')}
                   </button>
                 )}
+                <button className="link" onClick={() => setSharing(last)} title={tr('Enviar por WhatsApp, email o PDF', 'Send by WhatsApp, email or PDF')}>
+                  <Send size={14} />
+                  {tr('Enviar', 'Send')}
+                </button>
               </span>
             </div>
           )}
@@ -1292,6 +1299,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           </button>
         </div>
       </aside>
+      {sharing && <ShareDialog ticketId={sharing.id} number={sharing.number} onClose={() => setSharing(null)} />}
       {clock && (
         <ClockModal
           last={clock.last}

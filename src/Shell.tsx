@@ -20,7 +20,7 @@ import { Users } from './Users';
 import { sendError, stuck } from './Verifactu';
 
 type Screen = 'sale' | 'tickets' | 'repairs' | 'cash' | 'products' | 'reports' | 'users' | 'settings';
-export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'data' | 'verifactu';
+export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'mail' | 'data' | 'verifactu';
 
 interface Props {
   installId: string;
@@ -75,16 +75,23 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
     loadProducts();
   }, [loadSettings, loadLogo, loadProducts]);
 
-  // the screen locks itself too, so a till left alone does not stay open on
-  // the last admin's session; the core enforces the same limit
+  // Only when chosen in Ajustes: the screen locks itself too, so a till left
+  // alone does not stay open on the last admin's session. The core keeps the
+  // same limit and hears about every touch, key and click, so someone using
+  // the screen is never asked for the password.
   const lockMin = settings?.autoLockMin ?? 0;
   useEffect(() => {
     if (!lockMin) return;
     let last = Date.now();
+    let told = Date.now();
     const seen = () => {
       last = Date.now();
+      if (last - told > 30_000) {
+        told = last;
+        call('session.ping').catch(() => {});
+      }
     };
-    const kinds = ['keydown', 'mousedown', 'wheel', 'touchstart'];
+    const kinds = ['keydown', 'mousedown', 'wheel', 'touchstart', 'pointermove'];
     kinds.forEach((k) => window.addEventListener(k, seen, true));
     const t = setInterval(() => {
       if (Date.now() - last < lockMin * 60_000) return;
@@ -169,24 +176,37 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
       .catch(() => {});
   }, [admin, toast]);
 
-  // a new PC: if nobody has chosen a printer yet and one is clearly the
-  // receipt printer, the core takes it; Ajustes can change it any time
+  // Plug and print: with no printer set up, or the one set up gone (another
+  // USB port renames it), a receipt printer that appears is taken on its own,
+  // checked now and every few seconds. Ajustes can change it any time.
   useEffect(() => {
-    if (!admin) return;
-    call<{ applied: boolean; name?: string; settings?: Settings }>('printers.auto')
-      .then((r) => {
-        if (!r.applied || !r.settings) return;
-        const s = r.settings;
-        setSettings(s);
-        toast.ok(`${tr('Impresora de tickets detectada', 'Receipt printer found')}: ${r.name}`, {
-          sticky: true,
-          action: {
-            label: tr('Imprimir prueba', 'Print a test'),
-            run: () => call('printers.test', { settings: s, kind: 'page' }).catch((e) => toast.error(errorText(e))),
-          },
-        });
-      })
-      .catch(() => {});
+    let live = true;
+    const look = () =>
+      call<{ applied: boolean; name?: string; replaced?: string | null; settings?: Settings }>('printers.auto')
+        .then((r) => {
+          if (!live || !r.applied || !r.settings) return;
+          const s = r.settings;
+          setSettings(s);
+          const text = r.replaced
+            ? `${tr('La impresora', 'The printer')} «${r.replaced}» ${tr('ya no está; ahora se imprime en', 'is gone; tickets now print on')} ${r.name}`
+            : `${tr('Impresora de tickets conectada', 'Receipt printer connected')}: ${r.name}`;
+          toast.ok(text, {
+            sticky: true,
+            action: admin
+              ? {
+                  label: tr('Imprimir prueba', 'Print a test'),
+                  run: () => call('printers.test', { settings: s, kind: 'page' }).catch((e) => toast.error(errorText(e))),
+                }
+              : undefined,
+          });
+        })
+        .catch(() => {});
+    look();
+    const t = setInterval(look, 20_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
   }, [admin, toast]);
 
   // installs from before recovery codes existed have none until an admin makes one

@@ -1,6 +1,6 @@
 [package]
 name = "tiquet"
-version = "1.4.0"
+version = "1.5.0"
 description = "Tiquet: caja y tickets para comercio"
 edition = "2021"
 rust-version = "1.77"
@@ -30,9 +30,25 @@ tiny_http = { version = "0.12", optional = true }
 tauri-plugin-autostart = "2"
 zip = { version = "4.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tauri-plugin-updater = { version = "2.14", default-features = false, features = ["native-tls", "system-proxy"] }
+lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls", "hostname"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Graphics_Printing", "Win32_Security", "Win32_System_Registry", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Devices_Communication",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Printing",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Xps",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_Memory",
+    "Win32_System_Registry",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 webview2-com = "0.39"
 windows-core = "0.62"
 schannel = "0.1"

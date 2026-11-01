@@ -6,9 +6,11 @@ import { dateTime, eur, fmt, parseMoney } from './format';
 import { errorText, isPrinterSetup, isTransient, tr, warningText } from './i18n';
 import type { ItemDraft } from './ItemDialog';
 import { Paper } from './Paper';
+import { RepairWhatsApp } from './Share';
 import { useToast } from './toast';
 import type { Logo, Method, PLine, Repair, RepairCreated, RepairData, RepairDetail, RepairEvent, RepairStatus, RepairSummary, Settings, User } from './types';
 import { Drawer, Empty, Field, Modal, Segmented } from './ui';
+import { printerLabel } from './usePrinter';
 
 type Filter = 'open' | 'all' | RepairStatus;
 
@@ -150,7 +152,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
   const [busy, setBusy] = useState(false);
   const [clock, setClock] = useState<{ last: string; print: boolean } | null>(null);
   const requestId = useRef(newId());
-  const noPrinter = !settings.printerName.trim();
+  const noPrinter = !printerLabel(settings);
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((p) => ({ ...p, [k]: v }));
 
   const estimate = d.estimate.trim() ? parseMoney(d.estimate) : null;
@@ -751,6 +753,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                     {tr('Entregar y cobrar', 'Hand back and charge')}
                   </button>
                 )}
+                {open && <RepairWhatsApp repair={r} shop={settings.shopName} disabled={busy} />}
                 <button className="btn" onClick={() => print('resguardo')} disabled={busy}>
                   <Printer size={16} />
                   {tr('Resguardo', 'Receipt')}

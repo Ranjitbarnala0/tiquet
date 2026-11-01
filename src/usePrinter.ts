@@ -5,6 +5,7 @@ import type { PrinterStatus, Settings } from './types';
 // what the core prints to, named as it names it; empty when nothing is set up
 export function printerLabel(s: Settings): string {
   if (s.printerKind === 'network') return s.printerHost.trim() ? `${s.printerHost.trim()}:${s.printerPort}` : '';
+  if (s.printerKind === 'serial') return (s.printerCom ?? '').trim();
   return s.printerName.trim();
 }
 

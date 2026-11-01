@@ -87,6 +87,17 @@ const errors: Record<string, [string, string]> = {
     '"{s}" is a virtual printer (PDF, XPS…) and cannot print tickets. Choose the receipt printer in Settings.',
   ],
   E_PRINT: ['No se imprimió', 'Not printed'],
+  E_MAIL_SETUP: ['Falta configurar el correo en Ajustes > Enviar tickets', 'Mail is not set up yet in Settings > Send tickets'],
+  E_MAIL_PASS: [
+    'Falta la contraseña del correo (o se guardó en otro usuario de Windows). Escríbela otra vez en Ajustes > Enviar tickets.',
+    'The mail password is missing (or was saved under another Windows user). Type it again in Settings > Send tickets.',
+  ],
+  E_MAIL_AUTH: [
+    'El servidor de correo no aceptó el usuario o la contraseña. Con Gmail hace falta una «contraseña de aplicación».',
+    'The mail server did not accept the user or password. Gmail needs an "app password".',
+  ],
+  E_MAIL_CONNECT: ['No se pudo conectar con el servidor de correo ({s})', 'Could not connect to the mail server ({s})'],
+  E_MAIL: ['El correo no se pudo enviar ({s})', 'The email could not be sent ({s})'],
   E_BARCODE: ['Ese código de barras ya lo usa otro producto', 'That barcode is already used by another product'],
   E_USER_EXISTS: ['Ya existe un usuario con ese nombre', 'A user with that name already exists'],
   E_LAST_ADMIN: ['Debe quedar al menos un administrador activo', 'At least one active administrator must remain'],
@@ -163,6 +174,10 @@ const fields: Record<string, [string, string]> = {
   status: ['estado', 'status'],
   requestId: ['identificador del formulario', 'form identifier'],
   ticketPrefix: ['prefijo de numeración (RE y REP son de las reparaciones)', 'numbering prefix (RE and REP belong to repairs)'],
+  phone: ['teléfono (con prefijo si no es de España)', 'phone (with the country code if not Spanish)'],
+  email: ['email', 'email'],
+  mailHost: ['servidor de correo', 'mail server'],
+  mailFrom: ['dirección del remitente', 'sender address'],
 };
 
 export function errorText(e: unknown): string {
@@ -223,6 +238,7 @@ const warnings: Record<string, [string, string]> = {
 };
 
 export function warningText(code: string): string {
+  if (code.startsWith('W_SAVED:')) return `${tr('Guardado en', 'Saved to')} ${code.slice(8)}`;
   const w = warnings[code];
   return w ? tr(w[0], w[1]) : code;
 }

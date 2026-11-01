@@ -19,11 +19,15 @@ pub struct Settings {
     pub default_vat_bp: i64,
     pub show_vat: bool,
     pub printer_name: String,
-    // "windows": the queue above; "network": raw ESC/POS over TCP to
-    // printer_host:printer_port
+    // "windows": raw ESC/POS to the queue above; "document": the same queue
+    // printing a page through its own driver (an office printer, a PDF);
+    // "network": raw ESC/POS over TCP to printer_host:printer_port;
+    // "serial": raw ESC/POS to a COM port (Bluetooth and USB-serial printers)
     pub printer_kind: String,
     pub printer_host: String,
     pub printer_port: u16,
+    pub printer_com: String,
+    pub printer_baud: u32,
     pub columns: u32,
     pub codepage: String,
     pub cut: bool,
@@ -36,6 +40,8 @@ pub struct Settings {
     pub lang: String,
     // minutes without use before the till locks itself; 0 never
     pub auto_lock_min: u32,
+    // the user signed in when Tiquet opens, with no password asked; 0 asks
+    pub auto_login: i64,
     // practice mode: sales get their own series, print as not valid and
     // never count anywhere
     pub training: bool,
@@ -68,6 +74,8 @@ impl Default for Settings {
             printer_kind: "windows".into(),
             printer_host: String::new(),
             printer_port: 9100,
+            printer_com: String::new(),
+            printer_baud: 9600,
             columns: 48,
             codepage: "cp858".into(),
             cut: true,
@@ -78,7 +86,8 @@ impl Default for Settings {
             backup_dir: String::new(),
             auto_backup: true,
             lang: "es".into(),
-            auto_lock_min: 10,
+            auto_lock_min: 0,
+            auto_login: 0,
             training: false,
             verifactu: "off".into(),
             cert: String::new(),
@@ -107,8 +116,17 @@ impl Settings {
         if !["cp858", "cp850", "cp1252", "ascii"].contains(&self.codepage.as_str()) {
             self.codepage = "cp858".into();
         }
-        if !["windows", "network"].contains(&self.printer_kind.as_str()) {
+        if !["windows", "document", "network", "serial"].contains(&self.printer_kind.as_str()) {
             self.printer_kind = "windows".into();
+        }
+        // "com5", " COM5 " or a whole "\\.\COM5": the port's own name
+        let com = self.printer_com.trim().trim_start_matches(r"\\.\").to_uppercase();
+        self.printer_com = match com.strip_prefix("COM") {
+            Some(n) if !n.is_empty() && n.len() <= 3 && n.chars().all(|c| c.is_ascii_digit()) => com,
+            _ => String::new(),
+        };
+        if ![1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200].contains(&self.printer_baud) {
+            self.printer_baud = 9600;
         }
         self.printer_host = self.printer_host.trim().chars().take(253).collect();
         // "192.168.1.50:9100" typed into the address box
@@ -127,9 +145,10 @@ impl Settings {
         if !["es", "en"].contains(&self.lang.as_str()) {
             self.lang = "es".into();
         }
-        if ![0, 2, 5, 10, 15, 30, 60].contains(&self.auto_lock_min) {
-            self.auto_lock_min = 10;
+        if ![0, 2, 5, 10, 15, 30, 60, 120, 240].contains(&self.auto_lock_min) {
+            self.auto_lock_min = 0;
         }
+        self.auto_login = self.auto_login.max(0);
         if !["off", "test", "prod"].contains(&self.verifactu.as_str()) {
             self.verifactu = "off".into();
         }
@@ -190,6 +209,24 @@ pub fn load(conn: &Connection) -> Result<Settings> {
         }
     }
     Ok(serde_json::from_value::<Settings>(merged)?.clean())
+}
+
+// 1.5 on: the till locks itself only when someone chooses it in Ajustes.
+// Installs from before kept the old default of 10 minutes, which asked for
+// the password far too often at a busy counter, so it is switched off once.
+pub fn upgrade(conn: &Connection) -> Result<()> {
+    if get(conn, "lockOff15")?.is_some() {
+        return Ok(());
+    }
+    if get(conn, "settings")?.is_some() {
+        let mut s = load(conn)?;
+        if s.auto_lock_min != 0 {
+            s.auto_lock_min = 0;
+            put(conn, "settings", &serde_json::to_string(&s)?)?;
+            crate::log::info("the till no longer locks itself when unused (1.5 default)");
+        }
+    }
+    put(conn, "lockOff15", "1")
 }
 
 pub fn save(conn: &Connection, s: Settings) -> Result<Settings> {

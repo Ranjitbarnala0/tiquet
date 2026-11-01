@@ -11,11 +11,12 @@ use serde_json::{json, Value};
 use crate::error::{fail, Error, Result};
 use crate::escpos::{self, Opts};
 use crate::layout::{self, TicketView};
+use crate::printer::Job;
 use crate::settings::{self, Logo, Settings};
 use crate::state::{AppState, SessionUser};
 use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
 use crate::verifactu::{self, Env};
-use crate::{aeat, auth, backup, cash, diag, log, money, os, printer, products, recovery, repairs, reports, users};
+use crate::{aeat, auth, backup, cash, diag, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
 
 // key of the recovery code's own attempt counter (no user has id 0)
 const RECOVERY: i64 = 0;
@@ -24,6 +25,7 @@ const RECOVERY: i64 = 0;
 // not keep an idle till unlocked
 const PASSIVE: &[&str] = &[
     "printers.status",
+    "printers.auto",
     "bootstrap",
     "log.client",
     "sale.status",
@@ -106,12 +108,18 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let me = st.admin()?;
             let code = a.get("code").and_then(Value::as_str).unwrap_or_default();
             let s = settings::load(&st.conn())?;
-            let bytes = escpos::document(&layout::recovery_slip(&s, code, &me.name), None, &Opts::new(&s, false));
-            let warning = printer::send(&st.sink, &s, "recuperacion", &bytes)?;
+            let job = Job::doc(&layout::recovery_slip(&s, code, &me.name), None, &Opts::new(&s, false));
+            let warning = printer::send_job(&st.sink, &s, "recuperacion", &job)?;
             Ok(json!({ "warning": warning }))
         }
         "logout" => {
             st.set_session(None);
+            Ok(Value::Null)
+        }
+        // the screen says someone is using it (typing, clicking, scrolling):
+        // a till in use never locks itself
+        "session.ping" => {
+            st.user()?;
             Ok(Value::Null)
         }
         "log.client" => {
@@ -128,7 +136,8 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             log::info(format!("settings saved by {}", me.name));
             // keys the caller leaves out keep their saved value
             let conn = st.conn();
-            let mut merged = serde_json::to_value(settings::load(&conn)?)?;
+            let old = settings::load(&conn)?;
+            let mut merged = serde_json::to_value(&old)?;
             if let (Some(cur), Some(new)) = (merged.as_object_mut(), a.as_object()) {
                 for (k, v) in new {
                     cur.insert(k.clone(), v.clone());
@@ -136,6 +145,12 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             }
             let saved = settings::save(&conn, parse(merged)?)?;
             st.set_lock_after(saved.auto_lock_min);
+            // "None" chosen on purpose: no printer is then picked on its own
+            if saved.printer_name.trim().is_empty() && !old.printer_name.trim().is_empty() {
+                settings::put(&conn, "printerOff", "1")?;
+            } else if !saved.printer_name.trim().is_empty() {
+                conn.execute("DELETE FROM settings WHERE key = 'printerOff'", [])?;
+            }
             to(saved)
         }
         "logo.get" => {
@@ -213,6 +228,70 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             };
             let warning = print_ticket(st, &rec, &s, logo.as_ref(), false)?;
             Ok(json!({ "warning": warning }))
+        }
+        // the ticket for the customer's phone or inbox, as text and as PDF
+        "tickets.text" => {
+            st.user()?;
+            let conn = st.conn();
+            let rec = tickets::load(&conn, id(&a)?)?;
+            Ok(json!({ "text": share::text(&rec, &settings::load(&conn)?) }))
+        }
+        "tickets.pdf" => {
+            st.user()?;
+            let path = {
+                let conn = st.conn();
+                let rec = tickets::load(&conn, id(&a)?)?;
+                let logo = tickets::logo_for(&conn, &rec)?;
+                share::save_pdf(&rec, &settings::load(&conn)?, logo.as_ref())?
+            };
+            let copied = flag(&a, "copy", false) && st.desktop && os::copy_file(&path);
+            if flag(&a, "reveal", false) && st.desktop {
+                os::reveal(&path);
+            }
+            Ok(json!({ "path": path.to_string_lossy(), "copied": copied }))
+        }
+        "tickets.whatsapp" => {
+            st.user()?;
+            let phone = share::phone(a.get("phone").and_then(Value::as_str).unwrap_or_default()).ok_or_else(|| Error("E_INVALID:phone".into()))?;
+            let (number, text) = {
+                let conn = st.conn();
+                let rec = tickets::load(&conn, id(&a)?)?;
+                (rec.number.clone(), share::text(&rec, &settings::load(&conn)?))
+            };
+            let out = whatsapp(st, &phone, &share::whatsapp_ticket(&text), flag(&a, "web", false));
+            log::info(format!("ticket {number} sent by WhatsApp"));
+            Ok(out)
+        }
+        // with no mail account set up, the mail app this PC has opens with
+        // the PDF on the clipboard to paste in
+        "tickets.email" => {
+            let me = st.user()?;
+            let to = a.get("to").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+            if !mail::valid(&to) {
+                return fail("E_INVALID:email");
+            }
+            let (account, rec, s, logo) = {
+                let conn = st.conn();
+                let rec = tickets::load(&conn, id(&a)?)?;
+                let logo = tickets::logo_for(&conn, &rec)?;
+                (mail::account(&conn), rec, settings::load(&conn)?, logo)
+            };
+            match account {
+                Ok(acc) => {
+                    let pdf = share::pdf(&rec, &s, logo.as_ref());
+                    acc.send(&rec.shop.name, &to, &share::subject(&rec), &share::email_body(&rec), Some((share::file_name(&rec.number), pdf)))?;
+                    log::info(format!("ticket {} emailed by {}", rec.number, me.name));
+                    Ok(json!({ "sent": true }))
+                }
+                Err(e) if e.0 == "E_MAIL_SETUP" => {
+                    let path = share::save_pdf(&rec, &s, logo.as_ref())?;
+                    let url = share::mailto_url(&to, &share::subject(&rec), &share::email_body(&rec));
+                    let opened = st.desktop && os::handles("mailto") && os::open(&url);
+                    let copied = st.desktop && os::copy_file(&path);
+                    Ok(json!({ "sent": false, "opened": opened, "copied": copied, "url": url, "path": path.to_string_lossy() }))
+                }
+                Err(e) => Err(e),
+            }
         }
         "tickets.void" => {
             let me = st.admin()?;
@@ -305,6 +384,50 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             repair_get(st, id(&a)?)
         }
 
+        "share.whatsapp" => {
+            st.user()?;
+            let phone = share::phone(a.get("phone").and_then(Value::as_str).unwrap_or_default()).ok_or_else(|| Error("E_INVALID:phone".into()))?;
+            let text = a.get("text").and_then(Value::as_str).unwrap_or_default();
+            if text.trim().is_empty() || text.chars().count() > 4000 {
+                return fail("E_ARGS:text");
+            }
+            Ok(whatsapp(st, &phone, text, flag(&a, "web", false)))
+        }
+
+        // the shop's own mail account, for tickets sent straight from here
+        // whether tickets go straight from Tiquet or through the mail app
+        "email.status" => {
+            st.user()?;
+            Ok(json!({ "ready": mail::load(&st.conn())?.0.ready() }))
+        }
+        "email.get" => {
+            st.admin()?;
+            let (config, has_password) = mail::load(&st.conn())?;
+            Ok(json!({ "config": config, "hasPassword": has_password }))
+        }
+        "email.save" => {
+            let me = st.admin()?;
+            let cfg: mail::Config = parse(a.get("config").cloned().unwrap_or_default())?;
+            let conn = st.conn();
+            let config = mail::save(&conn, cfg, a.get("password").and_then(Value::as_str))?;
+            log::info(format!("mail account saved by {}", me.name));
+            Ok(json!({ "config": config, "hasPassword": mail::load(&conn)?.1 }))
+        }
+        "email.test" => {
+            st.admin()?;
+            let to = a.get("to").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+            if !mail::valid(&to) {
+                return fail("E_INVALID:email");
+            }
+            let (acc, shop) = {
+                let conn = st.conn();
+                (mail::account(&conn)?, settings::load(&conn)?.shop_name)
+            };
+            let body = "Este es un correo de prueba enviado desde Tiquet.\n\nSi lo recibes, los tickets ya se pueden enviar por email.";
+            acc.send(&shop, &to, "Prueba de Tiquet", body, None)?;
+            Ok(json!({ "sent": true }))
+        }
+
         "reports.summary" => {
             st.admin()?;
             to(reports::summary(&st.conn(), &parse(a)?)?)
@@ -318,8 +441,8 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let sum = reports::summary(&conn, &r)?;
                 (layout::summary(&sum, &r.from, &r.to, &s, &me.name), s)
             };
-            let bytes = escpos::document(&lines, None, &Opts::new(&s, false));
-            let warning = printer::send(&st.sink, &s, "resumen", &bytes)?;
+            let job = Job::doc(&lines, None, &Opts::new(&s, false));
+            let warning = printer::send_job(&st.sink, &s, "resumen", &job)?;
             Ok(json!({ "warning": warning }))
         }
         "reports.export" => {
@@ -416,29 +539,36 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
 
         "printers.list" => {
             st.admin()?;
-            Ok(json!({ "printers": printer::list() }))
+            Ok(json!({ "printers": printer::list(), "ports": printer::ports() }))
         }
         "printers.detect" => {
             st.admin()?;
             to(printer::detect(&printer::list()))
         }
-        // once on a new PC: if nobody has chosen a printer yet and one is
-        // clearly the receipt printer, use it
+        // A receipt printer set up on its own, asked every few seconds by the
+        // screen: on a new PC, when one is plugged in later, or when Windows
+        // renamed its queue (another USB port makes "POS-80 (Copia 1)"). Only
+        // a clear receipt printer is taken, never over a network or COM
+        // printer, nor when someone chose "None" on purpose.
         "printers.auto" => {
-            let me = st.admin()?;
-            let conn = st.conn();
-            let s = settings::load(&conn)?;
-            if s.printer_kind == "network" || !s.printer_name.trim().is_empty() || settings::get(&conn, "printerAutoDone")?.is_some() {
+            let me = st.user()?;
+            let (s, off) = {
+                let conn = st.conn();
+                (settings::load(&conn)?, settings::get(&conn, "printerOff")?.is_some())
+            };
+            let name = s.printer_name.trim().to_string();
+            let kind_ok = ["windows", "document"].contains(&s.printer_kind.as_str());
+            if !kind_ok || (name.is_empty() && off) || (!name.is_empty() && printer::status(&st.sink, &s).state != "missing") {
                 return Ok(json!({ "applied": false }));
             }
-            settings::put(&conn, "printerAutoDone", &tickets::now())?;
             let found = printer::detect(&printer::list());
-            let Some(name) = found.best.clone() else {
+            let Some(best) = found.best.clone().filter(|b| *b != name) else {
                 return Ok(json!({ "applied": false, "candidates": found.candidates }));
             };
-            let saved = settings::save(&conn, Settings { printer_name: name.clone(), columns: found.columns, ..s })?;
-            log::info(format!("receipt printer {name} chosen automatically for {}", me.name));
-            Ok(json!({ "applied": true, "name": name, "settings": saved }))
+            let columns = if name.is_empty() { found.columns } else { s.columns };
+            let saved = settings::save(&st.conn(), Settings { printer_name: best.clone(), printer_kind: "windows".into(), columns, ..s })?;
+            log::info(format!("receipt printer {best} chosen automatically for {} (was {name:?})", me.name));
+            Ok(json!({ "applied": true, "name": best, "replaced": Some(name).filter(|n| !n.is_empty()), "settings": saved }))
         }
         "printers.status" => {
             st.user()?;
@@ -577,9 +707,29 @@ fn backup_dirs(st: &AppState, s: &Settings) -> Vec<PathBuf> {
     dirs
 }
 
+// WhatsApp opens on that chat with the message written, ready to send: the
+// app when this PC has it, WhatsApp Web otherwise
+fn whatsapp(st: &AppState, phone: &str, message: &str, web: bool) -> Value {
+    let app = !web && os::handles("whatsapp");
+    let url = share::whatsapp_url(phone, message, app);
+    let opened = st.desktop && os::open(&url);
+    json!({ "url": url, "opened": opened, "app": app })
+}
+
 fn bootstrap(st: &AppState) -> Result<Value> {
     let conn = st.conn();
     let s = settings::load(&conn)?;
+    // Ajustes can sign someone in as Tiquet opens: on its first screen only,
+    // never again after they lock the till or sign out
+    let first = st.first_open();
+    if first && st.current().is_none() && s.auto_login > 0 {
+        if let Some((u, _, true)) = users::credentials(&conn, s.auto_login)? {
+            log::info(format!("{} signed in as Tiquet opened", u.name));
+            st.touch();
+            st.set_session(Some(u));
+            backup::auto(&conn);
+        }
+    }
     let list: Vec<Value> = users::list(&conn, true)?
         .into_iter()
         .map(|u| json!({ "id": u.id, "name": u.name, "role": u.role }))
@@ -900,14 +1050,14 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
 fn print_ticket(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>, at_sale: bool) -> Result<Option<String>> {
     let (attempt, copy) = tickets::begin_print(&st.conn(), rec.id, false)?;
     let kick = at_sale && !copy && drawer_opens(s, &rec.payment.method);
-    let mut data = escpos::document(&layout::record(rec, s, logo.is_some(), copy), logo, &Opts::new(s, kick));
+    let mut job = Job::doc(&layout::record(rec, s, logo.is_some(), copy), logo, &Opts::new(s, kick));
     if !copy {
         let extra = layout::record(rec, s, logo.is_some(), true);
         for _ in 1..s.copies {
-            data.extend(escpos::document(&extra, logo, &Opts::new(s, false)));
+            job.push(&extra, logo, &Opts::new(s, false));
         }
     }
-    let out = printer::send(&st.sink, s, &rec.number, &data);
+    let out = printer::send_job(&st.sink, s, &rec.number, &job);
     let (status, detail) = match &out {
         Ok(None) => ("printed", None),
         Ok(Some(w)) => ("sent", Some(w.as_str())),
@@ -930,20 +1080,20 @@ fn print_close(st: &AppState, id: i64, user: &str) -> Result<Option<String>> {
         let drawer = cash::drawer(&conn, Some(session.clone()))?;
         (layout::cash_close(&s, &session, &drawer, &sum, user), s)
     };
-    let bytes = escpos::document(&lines, None, &Opts::new(&s, false));
-    printer::send(&st.sink, &s, "cierre", &bytes)
+    let job = Job::doc(&lines, None, &Opts::new(&s, false));
+    printer::send_job(&st.sink, &s, "cierre", &job)
 }
 
 // the resguardo goes first, then the slip for the phone
 fn print_repair(st: &AppState, r: &repairs::Repair, s: &Settings, logo: Option<&Logo>, what: &str) -> Result<Option<String>> {
-    let mut data = Vec::new();
+    let mut job = Job::default();
     if what != "slip" {
-        data.extend(escpos::document(&layout::resguardo(r, s, logo.is_some()), logo, &Opts::new(s, false)));
+        job.push(&layout::resguardo(r, s, logo.is_some()), logo, &Opts::new(s, false));
     }
     if what != "resguardo" {
-        data.extend(escpos::document(&layout::repair_slip(r, s), None, &Opts::new(s, false)));
+        job.push(&layout::repair_slip(r, s), None, &Opts::new(s, false));
     }
-    printer::send(&st.sink, s, &r.number, &data)
+    printer::send_job(&st.sink, s, &r.number, &job)
 }
 
 fn repair_get(st: &AppState, id: i64) -> Result<Value> {
@@ -1057,15 +1207,15 @@ fn printer_test(st: &AppState, t: TestIn) -> Result<Value> {
     let me = st.admin()?;
     let s = t.settings.clean();
     let logo = settings::logo(&st.conn())?;
-    let bytes = match t.kind.as_str() {
-        "charset" => escpos::charset_test(&s),
-        "drawer" => escpos::kick(&s),
+    let job = match t.kind.as_str() {
+        "charset" => Job::raw(escpos::charset_test(&s)),
+        "drawer" => Job::raw(escpos::kick(&s)),
         _ => {
             let lines = layout::test_page(&s, &me.name, logo.is_some());
-            escpos::document(&lines, logo.as_ref(), &Opts::new(&s, false))
+            Job::doc(&lines, logo.as_ref(), &Opts::new(&s, false))
         }
     };
-    let warning = printer::send(&st.sink, &s, "prueba", &bytes)?;
+    let warning = printer::send_job(&st.sink, &s, "prueba", &job)?;
     Ok(json!({ "warning": warning }))
 }
 
@@ -1553,5 +1703,115 @@ mod tests {
         let off = json!({ "id": me.id, "name": "Ana", "role": "admin", "active": false });
         assert_eq!(dispatch(&st, "users.save", off).unwrap_err(), "E_SELF");
         assert_eq!(dispatch(&st, "products.list", json!({})).unwrap().as_array().unwrap().len(), 12);
+    }
+    #[test]
+    fn the_till_no_longer_locks_itself_unless_chosen_and_use_keeps_it_open() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        assert_eq!(dispatch(&st, "settings.get", json!({})).unwrap()["autoLockMin"], 0);
+        // the old default was 10 minutes; a fresh CI machine may not have been up for much longer
+        let ago = std::time::Instant::now().checked_sub(std::time::Duration::from_secs(11 * 60));
+        *st.active_for_test() = ago.unwrap_or_else(std::time::Instant::now);
+        assert!(dispatch(&st, "tickets.list", json!({})).is_ok());
+        // chosen in Ajustes: the screen's pings keep a till in use open
+        dispatch(&st, "settings.save", json!({ "autoLockMin": 2 })).unwrap();
+        *st.active_for_test() = std::time::Instant::now() - std::time::Duration::from_secs(100);
+        dispatch(&st, "session.ping", json!({})).unwrap();
+        *st.active_for_test() -= std::time::Duration::from_secs(60);
+        assert!(dispatch(&st, "tickets.list", json!({})).is_ok());
+    }
+
+    #[test]
+    fn an_old_ten_minute_lock_is_switched_off_once_by_the_upgrade() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let conn = st.conn();
+        let mut s = settings::load(&conn).unwrap();
+        s.auto_lock_min = 10;
+        settings::put(&conn, "settings", &serde_json::to_string(&s).unwrap()).unwrap();
+        conn.execute("DELETE FROM settings WHERE key = 'lockOff15'", []).unwrap();
+        settings::upgrade(&conn).unwrap();
+        assert_eq!(settings::load(&conn).unwrap().auto_lock_min, 0);
+        // a lock chosen after the upgrade stays
+        s.auto_lock_min = 15;
+        settings::put(&conn, "settings", &serde_json::to_string(&s).unwrap()).unwrap();
+        settings::upgrade(&conn).unwrap();
+        assert_eq!(settings::load(&conn).unwrap().auto_lock_min, 15);
+    }
+
+    #[test]
+    fn auto_sign_in_happens_once_as_tiquet_opens() {
+        let dir = {
+            let st = state(|d| PrintSink::Dir(d.join("prints")));
+            setup(&st);
+            dispatch(&st, "settings.save", json!({ "autoLogin": 1 })).unwrap();
+            st.data_dir.clone()
+        };
+        let st = AppState::open(&dir, PrintSink::Dir(dir.join("prints"))).unwrap();
+        let b = dispatch(&st, "bootstrap", json!({})).unwrap();
+        assert_eq!(b["session"]["name"], "Ana");
+        // locking the till asks for the password from then on
+        dispatch(&st, "logout", json!({})).unwrap();
+        assert!(dispatch(&st, "bootstrap", json!({})).unwrap()["session"].is_null());
+    }
+
+    #[test]
+    fn a_ticket_goes_out_as_text_pdf_whatsapp_or_email() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let r = dispatch(&st, "sale.finalize", json!({ "lines": [{ "name": "Funda iPhone", "qty": 1, "unitCents": 1250, "vatBp": 2100 }], "payment": { "method": "card" }, "print": false })).unwrap();
+        let id = r["ticket"]["id"].as_i64().unwrap();
+        let text = dispatch(&st, "tickets.text", json!({ "id": id })).unwrap()["text"].as_str().unwrap().to_string();
+        assert!(text.contains("Funda iPhone") && text.contains("12,50"), "{text}");
+        assert!(text.lines().all(|l| l.chars().count() <= 32), "{text}");
+        // never printed: it goes out as the original
+        assert!(!text.contains("COPIA"));
+        // the shop's name is centred, as on paper
+        assert!(text.lines().next().unwrap().starts_with("  "), "{text}");
+        let pdf = dispatch(&st, "tickets.pdf", json!({ "id": id })).unwrap();
+        let bytes = std::fs::read(pdf["path"].as_str().unwrap()).unwrap();
+        assert!(bytes.starts_with(b"%PDF") && bytes.ends_with(b"%%EOF\n"));
+        let w = dispatch(&st, "tickets.whatsapp", json!({ "id": id, "phone": "612 345 678", "web": true })).unwrap();
+        assert!(w["url"].as_str().unwrap().starts_with("https://web.whatsapp.com/send?phone=34612345678&text=%60%60%60"));
+        assert_eq!(dispatch(&st, "tickets.whatsapp", json!({ "id": id, "phone": "12" })).unwrap_err(), "E_INVALID:phone");
+        // no mail account: the mail app, with the PDF ready to attach
+        assert_eq!(dispatch(&st, "tickets.email", json!({ "id": id, "to": "no es un email" })).unwrap_err(), "E_INVALID:email");
+        let m = dispatch(&st, "tickets.email", json!({ "id": id, "to": "cliente@example.com" })).unwrap();
+        assert_eq!(m["sent"], false);
+        assert!(m["url"].as_str().unwrap().starts_with("mailto:cliente@example.com?subject=Ticket%20"));
+        // an account with a wrong server reports the connection, not a crash
+        let cfg = json!({ "config": { "host": "smtp.invalid", "port": 587, "user": "x@example.com" }, "password": "x" });
+        dispatch(&st, "email.save", cfg).unwrap();
+        let err = dispatch(&st, "tickets.email", json!({ "id": id, "to": "cliente@example.com" })).unwrap_err();
+        assert!(err.starts_with("E_MAIL"), "{err}");
+        let got = dispatch(&st, "email.get", json!({})).unwrap();
+        assert_eq!((got["config"]["host"].as_str(), got["hasPassword"].as_bool()), (Some("smtp.invalid"), Some(true)));
+        assert!(got.to_string().find("\"x\"").is_none());
+    }
+
+    #[test]
+    fn a_printer_switched_off_on_purpose_is_not_picked_again() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        // the test printer is there: nothing to do
+        assert_eq!(dispatch(&st, "printers.auto", json!({})).unwrap()["applied"], false);
+        dispatch(&st, "settings.save", json!({ "printerName": "" })).unwrap();
+        assert!(settings::get(&st.conn(), "printerOff").unwrap().is_some());
+        assert_eq!(dispatch(&st, "printers.auto", json!({})).unwrap()["applied"], false);
+        dispatch(&st, "settings.save", json!({ "printerName": "POS-80" })).unwrap();
+        assert!(settings::get(&st.conn(), "printerOff").unwrap().is_none());
+    }
+
+    #[test]
+    fn every_print_works_as_a_document_too() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        dispatch(&st, "settings.save", json!({ "printerKind": "document", "printerName": "Oficina" })).unwrap();
+        let r = dispatch(&st, "sale.finalize", sale()).unwrap();
+        assert_eq!(r["printed"], true);
+        let s = settings::load(&st.conn()).unwrap();
+        assert_eq!(printer::target(&s), Some(printer::Target::Doc("Oficina".into())));
+        let serial = Settings { printer_kind: "serial".into(), printer_com: " com7 ".into(), printer_baud: 7, ..s }.clean();
+        assert_eq!(printer::target(&serial), Some(printer::Target::Serial("COM7".into(), 9600)));
     }
 }

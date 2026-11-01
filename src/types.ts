@@ -37,9 +37,11 @@ export interface Settings {
   defaultVatBp: number;
   showVat: boolean;
   printerName: string;
-  printerKind: 'windows' | 'network';
+  printerKind: PrinterKind;
   printerHost: string;
   printerPort: number;
+  printerCom: string;
+  printerBaud: number;
   columns: number;
   codepage: string;
   cut: boolean;
@@ -51,6 +53,7 @@ export interface Settings {
   autoBackup: boolean;
   lang: Lang;
   autoLockMin: number;
+  autoLogin: number;
   training: boolean;
   verifactu: 'off' | 'test' | 'prod';
   cert: string;
@@ -336,12 +339,30 @@ export interface RepairCreated {
   printWarning: string | null;
 }
 
+// windows: receipt printer (raw ESC/POS) · document: any printer through
+// its driver · network: IP · serial: COM port (Bluetooth, USB-serial)
+export type PrinterKind = 'windows' | 'document' | 'network' | 'serial';
+
 export interface PrinterEntry {
   name: string;
   port: string;
   driver: string;
   virtual: boolean;
   default: boolean;
+  receipt: boolean;
+}
+
+export interface PortEntry {
+  name: string;
+  kind: 'bluetooth' | 'usb' | 'serial';
+}
+
+export interface MailConfig {
+  host: string;
+  port: number;
+  security: 'starttls' | 'tls' | 'none';
+  user: string;
+  from: string;
 }
 
 export interface PrinterStatus {

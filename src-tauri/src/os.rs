@@ -21,6 +21,98 @@ pub fn reveal(path: &Path) {
 #[cfg(not(windows))]
 pub fn reveal(_path: &Path) {}
 
+// Opens a link with the program Windows has for it: the browser, the mail
+// app, WhatsApp. False when nothing took it.
+#[cfg(windows)]
+pub fn open(url: &str) -> bool {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (verb, url) = (wide("open"), wide(url));
+    let r = unsafe { ShellExecuteW(std::ptr::null_mut(), verb.as_ptr(), url.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL) };
+    r as isize > 32
+}
+
+#[cfg(not(windows))]
+pub fn open(_url: &str) -> bool {
+    false
+}
+
+// whether some program on this PC takes links like whatsapp: or mailto:
+// (Store apps register theirs here too)
+#[cfg(windows)]
+pub fn handles(scheme: &str) -> bool {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CLASSES_ROOT, RRF_RT_ANY};
+
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    let (key, value) = (wide(scheme), wide("URL Protocol"));
+    unsafe {
+        RegGetValueW(HKEY_CLASSES_ROOT, key.as_ptr(), value.as_ptr(), RRF_RT_ANY, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) == 0
+    }
+}
+
+#[cfg(not(windows))]
+pub fn handles(_scheme: &str) -> bool {
+    false
+}
+
+// Puts a file on the clipboard the way Explorer's Copy does, so Ctrl+V in a
+// WhatsApp chat or an email attaches it. The clipboard needs a window to
+// own it: a message-only one that is never shown.
+#[cfg(windows)]
+pub fn copy_file(path: &Path) -> bool {
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows_sys::Win32::Foundation::GlobalFree;
+    use windows_sys::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    use windows_sys::Win32::UI::Shell::DROPFILES;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{CreateWindowExW, DestroyWindow, HWND_MESSAGE};
+
+    const CF_HDROP: u32 = 15;
+    let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+    // the list of files: each one ends in a 0, the list in another
+    let mut files = wide(&path.to_string_lossy());
+    files.push(0);
+    let head = std::mem::size_of::<DROPFILES>();
+    let bytes = head + files.len() * 2;
+    unsafe {
+        let class = wide("STATIC");
+        let owner = CreateWindowExW(0, class.as_ptr(), std::ptr::null(), 0, 0, 0, 0, 0, HWND_MESSAGE, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null());
+        if owner.is_null() {
+            return false;
+        }
+        let mut ok = false;
+        let mem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if !mem.is_null() {
+            let p = GlobalLock(mem) as *mut u8;
+            if !p.is_null() {
+                std::ptr::write_bytes(p, 0, bytes);
+                let df = p as *mut DROPFILES;
+                (*df).pFiles = head as u32;
+                (*df).fWide = 1;
+                std::ptr::copy_nonoverlapping(files.as_ptr() as *const u8, p.add(head), files.len() * 2);
+                GlobalUnlock(mem);
+                if OpenClipboard(owner) != 0 {
+                    EmptyClipboard();
+                    ok = !SetClipboardData(CF_HDROP, mem).is_null();
+                    CloseClipboard();
+                }
+            }
+            // once on the clipboard the memory is Windows' to free
+            if !ok {
+                GlobalFree(mem);
+            }
+        }
+        DestroyWindow(owner);
+        ok
+    }
+}
+
+#[cfg(not(windows))]
+pub fn copy_file(_path: &Path) -> bool {
+    false
+}
+
 // a plain Windows message box, for failures before the app has a window
 #[cfg(windows)]
 pub fn alert(title: &str, text: &str) {

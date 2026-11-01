@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::error::{fail, Error, Result};
-use crate::settings::Settings;
+use crate::escpos::{self, Opts};
+use crate::layout::Line;
+use crate::settings::{Logo, Settings};
 use crate::state::PrintSink;
 
 // A job the queue has not started printing in this long is cancelled: the
@@ -24,6 +26,8 @@ const GRACE: Duration = Duration::from_millis(1500);
 // a network printer: getting a connection, then taking the whole job
 const CONNECT: Duration = Duration::from_secs(3);
 const WRITE: Duration = Duration::from_secs(10);
+// a page drawn through a printer's own driver: spooled, not watched
+const DRAW: Duration = Duration::from_secs(30);
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +38,56 @@ pub struct Entry {
     #[serde(rename = "virtual")]
     pub is_virtual: bool,
     pub default: bool,
+    // looks like a receipt printer: raw ESC/POS suits it; anything else
+    // prints tickets as a document through its driver
+    pub receipt: bool,
+}
+
+// A serial port a printer can hang on: Bluetooth printers paired in Windows
+// and USB-serial ones show up as COM ports.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Port {
+    pub name: String,
+    // bluetooth | usb | serial
+    pub kind: &'static str,
+}
+
+// What a print is: the ESC/POS bytes for a receipt printer, and the same
+// documents as lines for a printer that prints pages through its driver.
+#[derive(Default, Clone)]
+pub struct Job {
+    pub raw: Vec<u8>,
+    pub pages: Vec<Page>,
+}
+
+#[derive(Clone)]
+pub struct Page {
+    pub lines: Vec<Line>,
+    pub logo: Option<Logo>,
+    pub cols: usize,
+}
+
+impl Job {
+    pub fn raw(bytes: Vec<u8>) -> Job {
+        Job { raw: bytes, pages: Vec::new() }
+    }
+
+    pub fn doc(lines: &[Line], logo: Option<&Logo>, o: &Opts) -> Job {
+        let mut j = Job::default();
+        j.push(lines, logo, o);
+        j
+    }
+
+    pub fn push(&mut self, lines: &[Line], logo: Option<&Logo>, o: &Opts) {
+        self.raw.extend(escpos::document(lines, logo, o));
+        self.pages.push(Page { lines: lines.to_vec(), logo: logo.cloned(), cols: o.cols });
+    }
+
+    pub fn append(&mut self, other: Job) {
+        self.raw.extend(other.raw);
+        self.pages.extend(other.pages);
+    }
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
@@ -50,21 +104,29 @@ impl Status {
     }
 }
 
-// Where tickets go: a queue installed in Windows, or a printer on the network
-// that takes raw ESC/POS on a TCP port (9100 on nearly all of them).
+// Where tickets go: a queue installed in Windows that takes raw ESC/POS,
+// the same kind of queue printing pages through its own driver (an office
+// printer, a label printer, Microsoft Print to PDF), a printer on the network
+// that takes raw ESC/POS on a TCP port (9100 on nearly all of them), or a
+// COM port (Bluetooth and USB-serial printers).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Target {
     Queue(String),
+    Doc(String),
     Net(String, u16),
+    Serial(String, u32),
 }
 
 // None: no printer set up yet
 pub fn target(s: &Settings) -> Option<Target> {
-    let (name, host) = (s.printer_name.trim(), s.printer_host.trim());
+    let (name, host, com) = (s.printer_name.trim(), s.printer_host.trim(), s.printer_com.trim());
     match s.printer_kind.as_str() {
         "network" if host.is_empty() => None,
         "network" => Some(Target::Net(host.into(), s.printer_port)),
+        "serial" if com.is_empty() => None,
+        "serial" => Some(Target::Serial(com.into(), s.printer_baud)),
         _ if name.is_empty() => None,
+        "document" => Some(Target::Doc(name.into())),
         _ => Some(Target::Queue(name.into())),
     }
 }
@@ -72,10 +134,25 @@ pub fn target(s: &Settings) -> Option<Target> {
 // what the screen and the test page call it
 pub fn label(s: &Settings) -> String {
     match target(s) {
-        Some(Target::Queue(name)) => name,
+        Some(Target::Queue(name) | Target::Doc(name)) => name,
         Some(Target::Net(host, port)) => format!("{host}:{port}"),
+        Some(Target::Serial(port, _)) => port,
         None => String::new(),
     }
+}
+
+// fax and OneNote queues open windows of their own for every job: they are
+// no place for a ticket, even as a document
+pub fn shows_ui(name: &str, port: &str, driver: &str) -> bool {
+    let all = format!("{name} {port} {driver}").to_lowercase();
+    ["onenote", "fax"].iter().any(|k| all.contains(k))
+}
+
+// a queue that asks where to save each job (PDF and XPS writers): Tiquet
+// gives it a file instead, so no dialog ever opens
+fn asks_for_file(port: &str) -> bool {
+    let p = port.to_lowercase();
+    p.starts_with("portprompt:") || p.starts_with("file:")
 }
 
 // PDF and XPS writers, OneNote and fax queues accept a job and then ask
@@ -241,39 +318,45 @@ pub struct Detected {
 // port that says POS, receipt, thermal, a receipt brand, 58/80 mm or USB
 // counts for it, an office printer brand against it. Only a clear winner is
 // picked; a tie is left for the person to choose.
-pub fn detect(entries: &[Entry]) -> Detected {
+fn score(e: &Entry) -> (i32, bool) {
     const RECEIPT: &[&str] = &[
         "pos", "receipt", "ticket", "tickets", "thermal", "termica", "tm", "escpos", "xprinter", "premier", "itp", "bixolon",
         "citizen", "sewoo", "rongta", "hprt", "zjiang", "gprinter", "posbank", "custom", "metapace", "sam4s", "star",
     ];
     const OFFICE: &[&str] = &[
         "laserjet", "deskjet", "officejet", "envy", "pixma", "ecotank", "workforce", "brother", "canon", "samsung", "lexmark",
-        "ricoh", "kyocera", "xerox", "sharp", "konica", "oki", "mfp", "pcl", "postscript",
+        "ricoh", "kyocera", "xerox", "sharp", "konica", "oki", "mfp", "pcl", "postscript", "series", "inkjet", "laser", "dcp", "mfc",
+        "ecosys", "sensys", "imagerunner", "photosmart",
     ];
+    let all = format!("{} {} {}", e.name, e.driver, e.port).to_lowercase();
+    // name and driver often repeat each other: each word counts once
+    let mut words: Vec<&str> = all.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
+    words.sort_unstable();
+    words.dedup();
+    let mut score = 0;
+    for w in &words {
+        let digits = |p: &str| w.strip_prefix(p).is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()));
+        if RECEIPT.contains(w) || digits("pos") || digits("itp") || digits("tm") || matches!(*w, "58mm" | "80mm" | "58" | "80") {
+            score += 10;
+        }
+        if OFFICE.contains(w) {
+            score -= 10;
+        }
+    }
+    if all.contains("generic / text only") {
+        score += 5;
+    }
+    if e.port.to_lowercase().starts_with("usb") {
+        score += 3;
+    }
+    let narrow = words.iter().any(|w| w.contains("58"));
+    (score, narrow)
+}
+
+pub fn detect(entries: &[Entry]) -> Detected {
     let mut scored: Vec<(i32, &Entry, bool)> = Vec::new();
     for e in entries.iter().filter(|e| !e.is_virtual) {
-        let all = format!("{} {} {}", e.name, e.driver, e.port).to_lowercase();
-        // name and driver often repeat each other: each word counts once
-        let mut words: Vec<&str> = all.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()).collect();
-        words.sort_unstable();
-        words.dedup();
-        let mut score = 0;
-        for w in &words {
-            let digits = |p: &str| w.strip_prefix(p).is_some_and(|r| !r.is_empty() && r.chars().all(|c| c.is_ascii_digit()));
-            if RECEIPT.contains(w) || digits("pos") || digits("itp") || digits("tm") || matches!(*w, "58mm" | "80mm" | "58" | "80") {
-                score += 10;
-            }
-            if OFFICE.contains(w) {
-                score -= 10;
-            }
-        }
-        if all.contains("generic / text only") {
-            score += 5;
-        }
-        if e.port.to_lowercase().starts_with("usb") {
-            score += 3;
-        }
-        let narrow = words.iter().any(|w| w.contains("58"));
+        let (score, narrow) = score(e);
         if score > 0 {
             scored.push((score, e, narrow));
         }
@@ -295,35 +378,70 @@ pub fn list() -> Vec<Entry> {
     let (rows, default) = win::list();
     let mut out: Vec<Entry> = rows
         .into_iter()
-        .map(|(name, port, driver)| Entry {
-            is_virtual: is_virtual(&name, &port, &driver),
-            default: default.as_deref() == Some(name.as_str()),
-            name,
-            port,
-            driver,
+        .map(|(name, port, driver)| {
+            let mut e = Entry {
+                is_virtual: is_virtual(&name, &port, &driver),
+                default: default.as_deref() == Some(name.as_str()),
+                receipt: false,
+                name,
+                port,
+                driver,
+            };
+            e.receipt = !e.is_virtual && score(&e).0 > 0;
+            e
         })
         .collect();
     out.sort_by(|a, b| a.is_virtual.cmp(&b.is_virtual).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase())));
     out
 }
 
+// COM ports Windows knows about, Bluetooth ones included, by number
+pub fn ports() -> Vec<Port> {
+    let mut out: Vec<Port> = win::ports()
+        .into_iter()
+        .map(|(device, name)| {
+            let d = device.to_lowercase();
+            let kind = if d.contains("bth") {
+                "bluetooth"
+            } else if ["usb", "vcp", "silab", "ch34", "prolific", "ftdi", "cdc"].iter().any(|k| d.contains(k)) {
+                "usb"
+            } else {
+                "serial"
+            };
+            Port { name: name.to_uppercase(), kind }
+        })
+        .collect();
+    let num = |p: &Port| p.name.trim_start_matches("COM").parse::<u32>().unwrap_or(u32::MAX);
+    out.sort_by_key(num);
+    out.dedup_by(|a, b| a.name == b.name);
+    out
+}
+
 // What the printer says. An idle queue's state can be stale (Windows
 // refreshes it while a job prints), so it informs the cashier but never
-// blocks a print. A network printer is ready when it takes a connection.
+// blocks a print. A network printer is ready when it takes a connection; a
+// COM port while Windows still has it.
 pub fn status(sink: &PrintSink, s: &Settings) -> Status {
     let Some(to) = target(s) else {
         return Status::of("none");
     };
     match (sink, to) {
         (PrintSink::Dir(_), _) => Status::of("ready"),
-        (PrintSink::Spooler, Target::Queue(name)) => {
+        (PrintSink::Spooler, Target::Queue(name) | Target::Doc(name)) => {
+            let doc = s.printer_kind == "document";
             let n = name.clone();
             match status_lane().run(Duration::from_secs(2), Duration::from_secs(3), move || win::info(&n)) {
                 Err(_) => Status::of("unknown"),
                 Ok(Err(_)) => Status::of("missing"),
-                Ok(Ok(i)) if is_virtual(&name, &i.port, &i.driver) => Status { state: "virtual", jobs: i.jobs },
+                Ok(Ok(i)) if doc && shows_ui(&name, &i.port, &i.driver) => Status { state: "virtual", jobs: i.jobs },
+                Ok(Ok(i)) if !doc && is_virtual(&name, &i.port, &i.driver) => Status { state: "virtual", jobs: i.jobs },
                 Ok(Ok(i)) => Status { state: classify(i.attributes, i.status), jobs: i.jobs },
             }
+        }
+        // Windows lists a Bluetooth port only while it can reach the radio
+        (PrintSink::Spooler, Target::Serial(port, _)) => {
+            let here = ports().iter().any(|p| p.name.eq_ignore_ascii_case(&port));
+            Status::of(if here { "ready" } else { "offline" })
         }
         // many network printers take one connection at a time: a probe made
         // while a ticket prints would find it offline, so none is made then,
@@ -344,15 +462,21 @@ pub fn status(sink: &PrintSink, s: &Settings) -> Status {
 // queue. E_PRINT:partial-<why> and E_PRINT:timeout: part or all of it may be
 // on paper, so the next print of that ticket must be marked as a copy.
 pub fn send(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) -> Result<Option<String>> {
+    send_job(sink, s, doc, &Job::raw(data.to_vec()))
+}
+
+// Ok(Some("W_SAVED:<path>")): a PDF or XPS writer saved the document there.
+pub fn send_job(sink: &PrintSink, s: &Settings, doc: &str, job: &Job) -> Result<Option<String>> {
     let Some(to) = target(s) else {
         return fail("E_NO_PRINTER");
     };
-    if let Target::Queue(name) = &to {
-        match status(sink, s).state {
+    match &to {
+        Target::Queue(name) | Target::Doc(name) => match status(sink, s).state {
             "missing" => return fail(format!("E_PRINTER_MISSING:{name}")),
             "virtual" => return fail(format!("E_PRINTER_VIRTUAL:{name}")),
             _ => {}
-        }
+        },
+        _ => {}
     }
     match (sink, to) {
         (PrintSink::Dir(dir), _) => {
@@ -362,18 +486,51 @@ pub fn send(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) -> Result<Op
                 .chars()
                 .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
                 .collect();
-            std::fs::write(dir.join(format!("{stamp}-{name}.bin")), data)?;
+            std::fs::write(dir.join(format!("{stamp}-{name}.bin")), &job.raw)?;
             Ok(None)
         }
         (PrintSink::Spooler, Target::Queue(p)) => {
-            let (d, b) = (doc.to_string(), data.to_vec());
+            let (d, b) = (doc.to_string(), job.raw.clone());
             on_lane(STALL + SLOW + Duration::from_secs(5), move || spool(&p, &d, &b, None))
         }
+        // a drawer kick on its own has nothing to draw: a document printer
+        // has no drawer
+        (PrintSink::Spooler, Target::Doc(_)) if job.pages.is_empty() => Ok(None),
+        (PrintSink::Spooler, Target::Doc(p)) => {
+            let (d, pages) = (doc.to_string(), job.pages.clone());
+            let out = win::info(&p).ok().filter(|i| asks_for_file(&i.port)).map(|i| saved_as(&p, &i.driver, doc));
+            on_lane(DRAW + Duration::from_secs(5), move || {
+                if let Some(dir) = out.as_ref().and_then(|f| f.parent()) {
+                    std::fs::create_dir_all(dir).map_err(|e| format!("E_PRINT:{e}"))?;
+                }
+                win::draw(&p, &d, &pages, out.as_deref()).map_err(|e| format!("E_PRINT:{e}"))?;
+                Ok(out.map(|f| format!("W_SAVED:{}", f.display())))
+            })
+        }
         (PrintSink::Spooler, Target::Net(host, port)) => {
-            let b = data.to_vec();
+            let b = job.raw.clone();
             on_lane(CONNECT + WRITE + Duration::from_secs(5), move || net(&host, port, &b, CONNECT, WRITE).map(|_| None))
         }
+        (PrintSink::Spooler, Target::Serial(port, baud)) => {
+            let b = job.raw.clone();
+            on_lane(WRITE + Duration::from_secs(8), move || win::serial(&port, baud, &b, WRITE).map(|_| None))
+        }
     }
+}
+
+// where a PDF or XPS writer puts what it is sent: Documents\Tiquet\PDF
+fn saved_as(printer: &str, driver: &str, doc: &str) -> std::path::PathBuf {
+    let all = format!("{printer} {driver}").to_lowercase();
+    let ext = if all.contains("pdf") {
+        "pdf"
+    } else if all.contains("xps") {
+        "oxps"
+    } else {
+        "prn"
+    };
+    let name: String = doc.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    crate::backup::documents().join("PDF").join(format!("{name}-{stamp}.{ext}"))
 }
 
 // a print that could not start in time never went out; one that started and
@@ -395,12 +552,16 @@ pub fn send_detached(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) {
         PrintSink::Dir(_) => {
             let _ = send(sink, s, doc, data);
         }
+        // a document printer has no drawer to open
+        PrintSink::Spooler if matches!(to, Target::Doc(_)) => {}
         PrintSink::Spooler => {
             let (name, d, b) = (label(s), doc.to_string(), data.to_vec());
             let task = Box::new(move || {
                 let out = match &to {
                     Target::Queue(p) => spool(p, &d, &b, None).map(|_| ()),
+                    Target::Doc(_) => Ok(()),
                     Target::Net(host, port) => net(host, *port, &b, CONNECT, WRITE),
+                    Target::Serial(port, baud) => win::serial(port, *baud, &b, WRITE),
                 };
                 if let Err(e) = out {
                     crate::log::warn(format!("{d} on {name}: {e}"));
@@ -481,6 +642,8 @@ mod win {
     use std::path::Path;
     use std::ptr::{null, null_mut};
 
+    use crate::layout::{Line, Size};
+    use crate::settings::Logo;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Graphics::Printing::{
         AbortPrinter, ClosePrinter, EndDocPrinter, EndPagePrinter, EnumPrintersW, GetDefaultPrinterW, GetJobW,
@@ -693,6 +856,355 @@ mod win {
             None => Ok(()),
         }
     }
+
+    // HARDWARE\DEVICEMAP\SERIALCOMM: one value per COM port, named after the
+    // device behind it (\Device\BthModem0, \Device\Silabser0)
+    pub fn ports() -> Vec<(String, String)> {
+        use windows_sys::Win32::System::Registry::{RegCloseKey, RegEnumValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ};
+
+        let mut out = Vec::new();
+        let path = wide("HARDWARE\\DEVICEMAP\\SERIALCOMM");
+        unsafe {
+            let mut key: HKEY = null_mut();
+            if RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+                return out;
+            }
+            for i in 0..256u32 {
+                let mut name = [0u16; 256];
+                let mut name_len = name.len() as u32;
+                let mut data = [0u16; 64];
+                let mut data_len = std::mem::size_of_val(&data) as u32;
+                let mut kind = 0u32;
+                let r = RegEnumValueW(key, i, name.as_mut_ptr(), &mut name_len, null(), &mut kind, data.as_mut_ptr() as *mut u8, &mut data_len);
+                if r != 0 {
+                    break;
+                }
+                if kind == REG_SZ {
+                    let device = String::from_utf16_lossy(&name[..(name_len as usize).min(name.len())]);
+                    let n = (data_len as usize / 2).min(data.len());
+                    let com = String::from_utf16_lossy(&data[..n]).trim_end_matches('\0').trim().to_string();
+                    if !com.is_empty() {
+                        out.push((device, com));
+                    }
+                }
+            }
+            RegCloseKey(key);
+        }
+        out
+    }
+
+    // Raw bytes to a COM port. A Bluetooth port reaches the printer when it
+    // is opened, which can take a few seconds; a USB-serial one sends at the
+    // speed set here (Bluetooth ignores it). Nothing written: offline.
+    pub fn serial(port: &str, baud: u32, data: &[u8], limit: std::time::Duration) -> Result<(), String> {
+        use windows_sys::Win32::Devices::Communication::{GetCommState, SetCommState, SetCommTimeouts, COMMTIMEOUTS, DCB, NOPARITY, ONESTOPBIT};
+        use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_WRITE, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::Storage::FileSystem::{CreateFileW, WriteFile, FILE_SHARE_NONE, OPEN_EXISTING};
+
+        let path = wide(&format!("\\\\.\\{port}"));
+        unsafe {
+            let h = CreateFileW(path.as_ptr(), GENERIC_WRITE, FILE_SHARE_NONE, null(), OPEN_EXISTING, 0, null_mut());
+            if h == INVALID_HANDLE_VALUE {
+                return Err("E_PRINT:offline".into());
+            }
+            let mut dcb: DCB = std::mem::zeroed();
+            dcb.DCBlength = std::mem::size_of::<DCB>() as u32;
+            if GetCommState(h, &mut dcb) != 0 {
+                dcb.BaudRate = baud;
+                dcb.ByteSize = 8;
+                dcb.Parity = NOPARITY;
+                dcb.StopBits = ONESTOPBIT;
+                SetCommState(h, &dcb);
+            }
+            let t = COMMTIMEOUTS {
+                ReadIntervalTimeout: 0,
+                ReadTotalTimeoutMultiplier: 0,
+                ReadTotalTimeoutConstant: 0,
+                WriteTotalTimeoutMultiplier: 0,
+                WriteTotalTimeoutConstant: limit.as_millis().min(u32::MAX as u128) as u32,
+            };
+            SetCommTimeouts(h, &t);
+            let mut sent = 0usize;
+            let mut out = Ok(());
+            while sent < data.len() {
+                let chunk = &data[sent..data.len().min(sent + 4096)];
+                let mut n = 0u32;
+                if WriteFile(h, chunk.as_ptr(), chunk.len() as u32, &mut n, null_mut()) == 0 || n == 0 {
+                    out = Err(if sent == 0 { "E_PRINT:offline" } else { "E_PRINT:partial-error" }.to_string());
+                    break;
+                }
+                sent += n as usize;
+            }
+            CloseHandle(h);
+            out
+        }
+    }
+
+    // A ticket drawn as a page through the printer's own driver, so every
+    // printer Windows has can print it: an office or label printer, a
+    // receipt printer installed with its Windows driver, a PDF writer (given
+    // `out`, it writes that file and asks nothing). It keeps the look of the
+    // paper roll: the receipt's columns, 80 mm wide at most, centred.
+    pub fn draw(printer: &str, doc: &str, pages: &[super::Page], out: Option<&Path>) -> Result<(), String> {
+        use windows_sys::Win32::Graphics::Gdi::{CreateDCW, DeleteDC, GetDeviceCaps, SetBkMode, HORZRES, LOGPIXELSX, TRANSPARENT, VERTRES};
+        use windows_sys::Win32::Storage::Xps::{AbortDoc, EndDoc, EndPage, StartDocW, StartPage, DOCINFOW};
+
+        let (driver, device) = (wide("WINSPOOL"), wide(printer));
+        let hdc = unsafe { CreateDCW(driver.as_ptr(), device.as_ptr(), null(), null()) };
+        if hdc.is_null() {
+            return Err("offline".into());
+        }
+        let name = wide(doc);
+        let out_w = out.map(|p| wide(&p.to_string_lossy()));
+        let info = DOCINFOW {
+            cbSize: std::mem::size_of::<DOCINFOW>() as i32,
+            lpszDocName: name.as_ptr(),
+            lpszOutput: out_w.as_ref().map_or(null(), |w| w.as_ptr()),
+            lpszDatatype: null(),
+            fwType: 0,
+        };
+        let result = unsafe {
+            if StartDocW(hdc, &info) <= 0 {
+                Err("error".to_string())
+            } else {
+                let dpi = GetDeviceCaps(hdc, LOGPIXELSX as i32).max(96);
+                let page_w = GetDeviceCaps(hdc, HORZRES as i32).max(1);
+                let page_h = GetDeviceCaps(hdc, VERTRES as i32).max(1);
+                let roll = page_w.min(80 * dpi * 10 / 254);
+                let mut ok = true;
+                for p in pages {
+                    let cols = p.cols.clamp(16, 64) as i32;
+                    let cw = (roll / cols).max(1);
+                    let mut c = Canvas { hdc, x0: (page_w - cw * cols) / 2, width: cw * cols, cw, lh: cw * 2 + cw / 4, y: 0, bottom: page_h, dpi, fonts: Vec::new() };
+                    if StartPage(hdc) <= 0 {
+                        ok = false;
+                        break;
+                    }
+                    SetBkMode(hdc, TRANSPARENT as i32);
+                    for line in &p.lines {
+                        let fine = match line {
+                            Line::Text { text, bold, size } => c.text(text, *bold, *size),
+                            Line::Logo => p.logo.as_ref().map_or(true, |l| c.logo(l)),
+                            Line::Qr { rows, module } => c.qr(rows, *module),
+                        };
+                        if !fine {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    c.free();
+                    if !ok || EndPage(hdc) <= 0 {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok && EndDoc(hdc) > 0 {
+                    Ok(())
+                } else {
+                    AbortDoc(hdc);
+                    Err("error".to_string())
+                }
+            }
+        };
+        unsafe {
+            DeleteDC(hdc);
+        }
+        result
+    }
+
+    struct Canvas {
+        hdc: windows_sys::Win32::Graphics::Gdi::HDC,
+        x0: i32,
+        width: i32,
+        // one character cell of the receipt, and a line's height
+        cw: i32,
+        lh: i32,
+        y: i32,
+        bottom: i32,
+        dpi: i32,
+        fonts: Vec<((bool, u8), windows_sys::Win32::Graphics::Gdi::HFONT)>,
+    }
+
+    impl Canvas {
+        // a line that does not fit goes on a new sheet
+        fn room(&mut self, h: i32) -> bool {
+            use windows_sys::Win32::Graphics::Gdi::{SetBkMode, TRANSPARENT};
+            use windows_sys::Win32::Storage::Xps::{EndPage, StartPage};
+
+            if self.y + h <= self.bottom || self.y == 0 {
+                return true;
+            }
+            unsafe {
+                if EndPage(self.hdc) <= 0 || StartPage(self.hdc) <= 0 {
+                    return false;
+                }
+                SetBkMode(self.hdc, TRANSPARENT as i32);
+            }
+            self.y = 0;
+            true
+        }
+
+        fn font(&mut self, bold: bool, size: Size) -> windows_sys::Win32::Graphics::Gdi::HFONT {
+            use windows_sys::Win32::Graphics::Gdi::{CreateFontW, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, FW_BOLD, FW_NORMAL, OUT_TT_PRECIS};
+
+            let key = (bold, size as u8);
+            if let Some((_, f)) = self.fonts.iter().find(|(k, _)| *k == key) {
+                return *f;
+            }
+            let (h, w) = match size {
+                Size::Normal => (self.cw * 2, self.cw),
+                Size::Tall => (self.cw * 4, self.cw),
+                Size::Big => (self.cw * 4, self.cw * 2),
+            };
+            let face = wide("Consolas");
+            let weight = if bold { FW_BOLD } else { FW_NORMAL };
+            let f = unsafe {
+                CreateFontW(
+                    h,
+                    w,
+                    0,
+                    0,
+                    weight as i32,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET as u32,
+                    OUT_TT_PRECIS as u32,
+                    CLIP_DEFAULT_PRECIS as u32,
+                    ANTIALIASED_QUALITY as u32,
+                    (FIXED_PITCH | FF_MODERN) as u32,
+                    face.as_ptr(),
+                )
+            };
+            self.fonts.push((key, f));
+            f
+        }
+
+        fn free(&mut self) {
+            use windows_sys::Win32::Graphics::Gdi::{DeleteObject, GetStockObject, SelectObject, SYSTEM_FONT};
+
+            unsafe {
+                SelectObject(self.hdc, GetStockObject(SYSTEM_FONT));
+                for (_, f) in self.fonts.drain(..) {
+                    DeleteObject(f);
+                }
+            }
+        }
+
+        fn text(&mut self, text: &str, bold: bool, size: Size) -> bool {
+            use windows_sys::Win32::Graphics::Gdi::{ExtTextOutW, SelectObject};
+
+            let (advance, dx) = match size {
+                Size::Normal => (self.lh, self.cw),
+                Size::Tall => (self.lh * 2, self.cw),
+                Size::Big => (self.lh * 2, self.cw * 2),
+            };
+            if !self.room(advance) {
+                return false;
+            }
+            let t = text.trim_end();
+            if !t.is_empty() {
+                let f = self.font(bold, size);
+                let w: Vec<u16> = t.encode_utf16().collect();
+                let dxs = vec![dx; w.len()];
+                unsafe {
+                    SelectObject(self.hdc, f);
+                    ExtTextOutW(self.hdc, self.x0, self.y, 0, null(), w.as_ptr(), w.len() as u32, dxs.as_ptr());
+                }
+            }
+            self.y += advance;
+            true
+        }
+
+        // the 1-bit logo at the size it prints on a 203 dpi roll
+        fn logo(&mut self, l: &Logo) -> bool {
+            use windows_sys::Win32::Graphics::Gdi::{StretchDIBits, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, RGBQUAD, SRCCOPY};
+
+            let Some(bits) = l.raster() else { return true };
+            let (w, h) = (l.w as i32, l.h as i32);
+            let dw = (w * self.dpi / 203).min(self.width).max(1);
+            let dh = (h * dw / w.max(1)).max(1);
+            if !self.room(dh) {
+                return false;
+            }
+            let row = (l.w as usize).div_ceil(8);
+            let stride = (l.w as usize).div_ceil(32) * 4;
+            let mut buf = vec![0u8; stride * l.h as usize];
+            for y in 0..l.h as usize {
+                buf[y * stride..y * stride + row].copy_from_slice(&bits[y * row..(y + 1) * row]);
+            }
+            #[repr(C)]
+            struct Bmi {
+                head: BITMAPINFOHEADER,
+                colors: [RGBQUAD; 2],
+            }
+            let white = RGBQUAD { rgbBlue: 255, rgbGreen: 255, rgbRed: 255, rgbReserved: 0 };
+            let black = RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 };
+            let bmi = Bmi {
+                head: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: w,
+                    biHeight: -h,
+                    biPlanes: 1,
+                    biBitCount: 1,
+                    biCompression: BI_RGB,
+                    biSizeImage: buf.len() as u32,
+                    biXPelsPerMeter: 0,
+                    biYPelsPerMeter: 0,
+                    biClrUsed: 2,
+                    biClrImportant: 2,
+                },
+                colors: [white, black],
+            };
+            unsafe {
+                StretchDIBits(
+                    self.hdc,
+                    self.x0 + (self.width - dw) / 2,
+                    self.y,
+                    dw,
+                    dh,
+                    0,
+                    0,
+                    w,
+                    h,
+                    buf.as_ptr() as *const c_void,
+                    &bmi as *const Bmi as *const BITMAPINFO,
+                    DIB_RGB_COLORS,
+                    SRCCOPY,
+                );
+            }
+            self.y += dh;
+            true
+        }
+
+        fn qr(&mut self, rows: &[String], module: usize) -> bool {
+            use windows_sys::Win32::Foundation::RECT;
+            use windows_sys::Win32::Graphics::Gdi::{FillRect, GetStockObject, BLACK_BRUSH};
+
+            let m = (module as i32 * self.dpi / 203).max(1);
+            let size = rows.len() as i32 * m;
+            let pad = self.lh / 2;
+            if !self.room(size + 2 * pad) {
+                return false;
+            }
+            let (x, y) = (self.x0 + (self.width - size) / 2, self.y + pad);
+            unsafe {
+                let brush = GetStockObject(BLACK_BRUSH);
+                for (r, row) in rows.iter().enumerate() {
+                    for (c, ch) in row.chars().enumerate() {
+                        if ch == '1' {
+                            let (c, r) = (c as i32, r as i32);
+                            let rect = RECT { left: x + c * m, top: y + r * m, right: x + (c + 1) * m, bottom: y + (r + 1) * m };
+                            FillRect(self.hdc, &rect, brush);
+                        }
+                    }
+                }
+            }
+            self.y += size + 2 * pad;
+            true
+        }
+    }
+
 }
 
 // the network tests share the print lane, and a refused connection takes
@@ -738,6 +1250,17 @@ mod win {
     pub fn submit(_: &str, _: &str, _: &[u8], _: Option<&Path>) -> Result<u32, String> {
         Err("printing needs Windows".into())
     }
+    pub fn ports() -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    pub fn serial(_: &str, _: u32, _: &[u8], _: std::time::Duration) -> Result<(), String> {
+        Err("E_PRINT:offline".into())
+    }
+
+    pub fn draw(_: &str, _: &str, _: &[super::Page], _: Option<&Path>) -> Result<(), String> {
+        Err("printing needs Windows".into())
+    }
 }
 
 #[cfg(test)]
@@ -745,6 +1268,38 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::net::TcpListener;
+
+    // a page through a real Windows driver, the PDF writer every Windows has:
+    // cargo test --lib -- --ignored
+    #[test]
+    #[ignore]
+    fn a_ticket_prints_as_a_document_on_the_pdf_writer() {
+        use crate::layout::Size;
+        let Some(writer) = list().into_iter().find(|e| e.name == "Microsoft Print to PDF") else { return };
+        let out = std::env::var_os("TIQUET_DOC_OUT")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| std::env::temp_dir().join(format!("tiquet-doc-{}.pdf", std::process::id())));
+        let _ = std::fs::remove_file(&out);
+        let text = |t: &str, bold: bool, size: Size| Line::Text { text: t.into(), bold, size };
+        let lines = vec![
+            text("   MI TIENDA", true, Size::Big),
+            text("Calle Mayor 1, Figueres", false, Size::Normal),
+            text("------------------------------------------------", false, Size::Normal),
+            text("Funda silicona iPhone 15                  12,50", false, Size::Normal),
+            text("TOTAL                     12,50", true, Size::Tall),
+            Line::Qr { rows: (0..21).map(|r| (0..21).map(|c| if (r * c + r) % 3 == 0 { '1' } else { '0' }).collect()).collect(), module: 6 },
+            text("        ¡Gracias por su visita! €", false, Size::Normal),
+        ];
+        win::draw(&writer.name, "prueba", &[Page { lines, logo: None, cols: 48 }], Some(&out)).unwrap();
+        // the spooler writes the file a moment after the job ends
+        for _ in 0..100 {
+            if out.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(std::fs::read(&out).unwrap().starts_with(b"%PDF"));
+    }
 
     #[test]
     fn virtual_queues_are_recognised() {
@@ -764,7 +1319,12 @@ mod tests {
             driver: driver.into(),
             is_virtual: is_virtual(name, port, driver),
             default: false,
+            receipt: false,
         };
+        // an inkjet on USB is not a receipt printer, an Epson TM is
+        let inkjet = e("EPSON L3150 Series", "USB001", "EPSON L3150 Series");
+        assert!(score(&inkjet).0 <= 0);
+        assert!(score(&e("EPSON TM-T20II", "USB002", "EPSON TM-T20II Receipt")).0 > 0);
         let office = e("HP LaserJet Pro M404", "WSD-1234", "HP Universal Printing PCL 6");
         let pdf = e("Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF");
         let pos = e("POS-80C", "USB001", "POS-80C");

@@ -4068,3 +4068,32 @@ button.cart-name:hover > span:first-child {
   max-height: 60vh;
   overflow: auto;
 }
+
+/* WhatsApp's own green, so the button is recognised at a glance */
+.btn-whatsapp {
+  background: #1fa855;
+  border-color: #1fa855;
+  color: #fff;
+}
+
+.btn-whatsapp:hover:not(:disabled) {
+  background: #188f48;
+  border-color: #188f48;
+}
+
+.btn-whatsapp-ghost {
+  color: #188f48;
+  border-color: rgba(31, 168, 85, 0.45);
+}
+
+.share form {
+  margin: 0;
+}
+
+.share .row-gap .grow {
+  min-width: 180px;
+}
+
+.printer-choice small {
+  color: var(--ink-3, #6b7280);
+}

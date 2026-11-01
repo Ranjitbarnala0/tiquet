@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -28,6 +28,9 @@ pub struct AppState {
     // last thing someone did at the till, and how long it may sit unused
     active: Mutex<Instant>,
     lock_after: AtomicU64,
+    // Ajustes can sign someone in when Tiquet opens: once per start, never
+    // again after they lock the till or sign out
+    auto_login_done: AtomicBool,
     pub sink: PrintSink,
     pub data_dir: PathBuf,
     // only the packaged app opens Explorer windows; tests and the dev server
@@ -49,11 +52,13 @@ impl AppState {
             session: Mutex::new(None),
             active: Mutex::new(Instant::now()),
             lock_after: AtomicU64::new(0),
+            auto_login_done: AtomicBool::new(false),
             sink,
             data_dir: data_dir.to_path_buf(),
             desktop: false,
         };
         st.sync_marks()?;
+        crate::settings::upgrade(&st.conn())?;
         let minutes = crate::settings::load(&st.conn())?.auto_lock_min;
         st.set_lock_after(minutes);
         Ok(st)
@@ -76,6 +81,11 @@ impl AppState {
             "lastTicket": last,
             "integrity": conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).unwrap_or_default(),
         })
+    }
+
+    // true the first time it is asked after the app starts
+    pub fn first_open(&self) -> bool {
+        !self.auto_login_done.swap(true, Ordering::SeqCst)
     }
 
     pub fn set_lock_after(&self, minutes: u32) {

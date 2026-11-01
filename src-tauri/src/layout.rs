@@ -115,6 +115,37 @@ fn refund_label(m: &str) -> &'static str {
     }
 }
 
+// The lines as plain text, for a ticket sent by WhatsApp or email. A double
+// width line is laid out again at single width over the whole paper: a pair
+// with its two ends apart, a title centred. Logo and QR have no text form.
+pub fn plain(lines: &[Line], cols: usize) -> String {
+    let mut out = Vec::new();
+    for l in lines {
+        let Line::Text { text, size, .. } = l else { continue };
+        let t = text.trim_end();
+        if *size != Size::Big {
+            out.push(t.to_string());
+            continue;
+        }
+        let body = t.trim_start();
+        let gap = body.find("  ");
+        let line = match gap {
+            Some(i) => {
+                let (left, right) = (body[..i].trim(), body[i..].trim());
+                let n = len(left) + len(right);
+                format!("{left}{}{right}", " ".repeat(cols.saturating_sub(n).max(1)))
+            }
+            // titles: the shop's name, a repair's number
+            None => format!("{}{body}", " ".repeat(cols.saturating_sub(len(body)) / 2)),
+        };
+        out.push(line);
+    }
+    while out.last().is_some_and(|l| l.is_empty()) {
+        out.pop();
+    }
+    out.join("\n")
+}
+
 pub struct Doc {
     pub cols: usize,
     cp: CodePage,
