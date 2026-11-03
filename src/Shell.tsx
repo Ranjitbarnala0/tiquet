@@ -181,17 +181,21 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   // USB port renames it), a receipt printer that appears is taken on its own,
   // checked now and every few seconds. Ajustes can change it any time.
   useEffect(() => {
-    let live = true;
     const look = () =>
-      call<{ applied: boolean; name?: string; columns?: number; replaced?: string | null; settings?: Settings }>('printers.auto')
+      call<{ applied: boolean; paper?: boolean; name?: string; columns?: number; replaced?: string | null; settings?: Settings }>('printers.auto')
         .then((r) => {
-          if (!live || !r.applied || !r.settings) return;
+          // the core has already saved it: shown even when this effect ran
+          // again while the answer was on its way, or it would never show
+          if (!r.applied || !r.settings) return;
           const s = r.settings;
           setSettings(s);
-          const paper = ` · ${tr('papel', 'paper')} ${s.columns === 32 ? '58' : '80'} mm`;
-          const text = r.replaced
-            ? `${tr('La impresora', 'The printer')} «${r.replaced}» ${tr('ya no está; ahora se imprime en', 'is gone; tickets now print on')} ${r.name}${paper}`
-            : `${tr('Impresora de tickets conectada', 'Receipt printer connected')}: ${r.name}${paper}`;
+          const mm = s.columns === 32 ? '58' : '80';
+          const paper = ` · ${tr('papel', 'paper')} ${mm} mm`;
+          const text = r.paper
+            ? `${tr('Tickets ajustados al papel de', 'Tickets now fit the paper of')} ${r.name}: ${mm} mm, ${s.columns} ${tr('caracteres por línea', 'characters a line')}`
+            : r.replaced
+              ? `${tr('La impresora', 'The printer')} «${r.replaced}» ${tr('ya no está; ahora se imprime en', 'is gone; tickets now print on')} ${r.name}${paper}`
+              : `${tr('Impresora de tickets conectada', 'Receipt printer connected')}: ${r.name}${paper}`;
           toast.ok(text, {
             sticky: true,
             action: admin
@@ -205,10 +209,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
         .catch(() => {});
     look();
     const t = setInterval(look, 20_000);
-    return () => {
-      live = false;
-      clearInterval(t);
-    };
+    return () => clearInterval(t);
   }, [admin, toast]);
 
   // installs from before recovery codes existed have none until an admin makes one

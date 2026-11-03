@@ -135,15 +135,24 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let me = st.admin()?;
             log::info(format!("settings saved by {}", me.name));
             // keys the caller leaves out keep their saved value
-            let conn = st.conn();
-            let old = settings::load(&conn)?;
+            let old = settings::load(&st.conn())?;
             let mut merged = serde_json::to_value(&old)?;
             if let (Some(cur), Some(new)) = (merged.as_object_mut(), a.as_object()) {
                 for (k, v) in new {
                     cur.insert(k.clone(), v.clone());
                 }
             }
-            let saved = settings::save(&conn, parse(merged)?)?;
+            let mut new: Settings = parse(merged)?;
+            // a width given without Automático is the shop's own choice
+            if a.get("columns").is_some() && a.get("paperAuto").is_none() {
+                new.paper_auto = false;
+            }
+            // asked of the printer before the database is held
+            if new.paper_auto {
+                new.columns = printer::auto_columns(&st.sink, &new).unwrap_or(new.columns);
+            }
+            let conn = st.conn();
+            let saved = settings::save(&conn, new)?;
             st.set_lock_after(saved.auto_lock_min);
             // "None" chosen on purpose: no printer is then picked on its own
             if saved.printer_name.trim().is_empty() && !old.printer_name.trim().is_empty() {
@@ -613,16 +622,20 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             };
             let name = s.printer_name.trim().to_string();
             let kind_ok = ["windows", "document"].contains(&s.printer_kind.as_str());
-            if !kind_ok || (name.is_empty() && off) || (!name.is_empty() && printer::status(&st.sink, &s).state != "missing") {
+            if !kind_ok || (name.is_empty() && off) {
                 return Ok(json!({ "applied": false }));
+            }
+            if !name.is_empty() && printer::status(&st.sink, &s).state != "missing" {
+                return paper_check(st, &me.name, s);
             }
             let found = printer::detect(&printer::list());
             let Some(best) = found.best.clone().filter(|b| *b != name) else {
                 return Ok(json!({ "applied": false, "candidates": found.candidates }));
             };
-            // the paper its driver is set up for; a guess never overrides a width someone chose
-            let columns = if name.is_empty() || found.measured { found.columns } else { s.columns };
+            // the paper its driver or its name says, else 58 mm; a width someone chose stays
+            let columns = if s.paper_auto { found.columns } else { s.columns };
             let saved = settings::save(&st.conn(), Settings { printer_name: best.clone(), printer_kind: "windows".into(), columns, ..s })?;
+            st.set_paper_read();
             log::info(format!("receipt printer {best} chosen automatically for {}, {columns} columns (was {name:?})", me.name));
             Ok(json!({ "applied": true, "name": best, "columns": columns, "replaced": Some(name).filter(|n| !n.is_empty()), "settings": saved }))
         }
@@ -1122,6 +1135,26 @@ fn print_ticket(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&L
     };
     tickets::end_print(&st.conn(), attempt, status, detail)?;
     out
+}
+
+// Papel automático for the printer already set up, once a run: an install
+// from before it (48 columns on a 58 mm roll), or a driver set up for
+// another roll since. When Windows does not answer it is asked again later.
+fn paper_check(st: &AppState, user: &str, s: Settings) -> Result<Value> {
+    if !s.paper_auto || st.paper_read() {
+        return Ok(json!({ "applied": false }));
+    }
+    let Some(columns) = printer::auto_columns(&st.sink, &s) else {
+        return Ok(json!({ "applied": false }));
+    };
+    st.set_paper_read();
+    if columns == s.columns {
+        return Ok(json!({ "applied": false }));
+    }
+    let (name, was) = (s.printer_name.clone(), s.columns);
+    let saved = settings::save(&st.conn(), Settings { columns, ..s })?;
+    log::info(format!("paper of {name} read for {user}: {columns} columns, was {was}"));
+    Ok(json!({ "applied": true, "paper": true, "name": name, "columns": columns, "settings": saved }))
 }
 
 fn print_close(st: &AppState, id: i64, user: &str) -> Result<Option<String>> {
@@ -1868,6 +1901,39 @@ mod tests {
         assert_eq!(dispatch(&st, "printers.auto", json!({})).unwrap()["applied"], false);
         dispatch(&st, "settings.save", json!({ "printerName": "POS-80" })).unwrap();
         assert!(settings::get(&st.conn(), "printerOff").unwrap().is_none());
+    }
+
+    #[test]
+    fn the_paper_follows_the_printer_and_is_58_mm_when_nothing_says() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let cols = |s: &Value| (s["columns"].as_u64().unwrap(), s["paperAuto"].as_bool().unwrap());
+        assert_eq!(settings::load(&st.conn()).unwrap().columns, 48);
+        // a printer whose name says nothing: 58 mm prints right on any roll
+        assert_eq!(cols(&dispatch(&st, "settings.save", json!({ "printerName": "Disashop" })).unwrap()), (32, true));
+        assert_eq!(cols(&dispatch(&st, "settings.save", json!({ "printerName": "POS-58", "columns": 48, "paperAuto": true })).unwrap()), (32, true));
+        assert_eq!(cols(&dispatch(&st, "settings.save", json!({ "printerName": "POS-80" })).unwrap()), (48, true));
+        // Bluetooth and network printers say nothing either
+        assert_eq!(cols(&dispatch(&st, "settings.save", json!({ "printerKind": "serial", "printerCom": "COM5" })).unwrap()), (32, true));
+        // a width chosen by hand stays, whatever the printer
+        let s = dispatch(&st, "settings.save", json!({ "printerKind": "windows", "printerName": "POS-58", "columns": 48 })).unwrap();
+        assert_eq!(cols(&s), (48, false));
+        // an install from before Papel automático: 48 columns on a 58 mm
+        // printer, put right as Tiquet opens, once
+        let mut old = settings::load(&st.conn()).unwrap();
+        old.paper_auto = true;
+        settings::put(&st.conn(), "settings", &serde_json::to_string(&old).unwrap()).unwrap();
+        let r = dispatch(&st, "printers.auto", json!({})).unwrap();
+        assert_eq!((r["applied"].as_bool(), r["paper"].as_bool(), r["columns"].as_u64()), (Some(true), Some(true), Some(32)));
+        assert_eq!(settings::load(&st.conn()).unwrap().columns, 32);
+        assert_eq!(dispatch(&st, "printers.auto", json!({})).unwrap()["applied"], false);
+        // and a ticket is laid out 32 characters wide, 16 in big letters
+        let id = dispatch(&st, "sale.finalize", sale()).unwrap()["ticket"]["id"].clone();
+        let lines = dispatch(&st, "tickets.get", json!({ "id": id })).unwrap()["lines"].clone();
+        for l in lines.as_array().unwrap().iter().filter(|l| l["t"] == "text") {
+            let most = if l["size"] == "big" { 16 } else { 32 };
+            assert!(layout::len(l["text"].as_str().unwrap()) <= most, "{l}");
+        }
     }
 
     #[test]

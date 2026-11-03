@@ -105,7 +105,6 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
       if (r.best) {
         set('printerName', r.best);
         set('printerKind', 'windows');
-        set('columns', r.columns);
         toast.ok(`${tr('Encontrada', 'Found')}: ${r.best}. ${tr('Guarda los ajustes para usarla.', 'Save the settings to use it.')}`);
       } else if (r.candidates.length > 1) {
         toast.info(`${tr('Hay varias que podrían ser de tickets', 'Several could be receipt printers')}: ${r.candidates.join(', ')}. ${tr('Elige una en la lista.', 'Pick one from the list.')}`);
@@ -129,9 +128,30 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
   // a receipt printer gets raw tickets; any other prints them as a document
   const pickPrinter = (name: string) => {
     const p = printers?.find((x) => x.name === name);
-    // the paper its driver is set up for, when it says
-    setD((prev) => ({ ...prev, printerName: name, printerKind: p ? (p.receipt ? 'windows' : 'document') : prev.printerKind, columns: p?.columns ?? prev.columns }));
+    setD((prev) => ({ ...prev, printerName: name, printerKind: p ? (p.receipt ? 'windows' : 'document') : prev.printerKind }));
   };
+
+  // Papel automático, worked out as the core does on saving: a USB receipt
+  // printer's paper from its driver or name, a network or Bluetooth one
+  // 58 mm, which prints right on any roll; a page keeps its width
+  const autoColumns = useCallback(
+    (s: Settings): number => {
+      if (s.printerKind === 'windows') {
+        const p = printers?.find((x) => x.name === s.printerName);
+        return p ? (p.columns ?? 32) : s.columns;
+      }
+      if (s.printerKind === 'network') return s.printerHost.trim() ? 32 : s.columns;
+      if (s.printerKind === 'serial') return s.printerCom.trim() ? 32 : s.columns;
+      return s.columns;
+    },
+    [printers],
+  );
+
+  useEffect(() => {
+    if (!d.paperAuto) return;
+    const c = autoColumns(d);
+    if (c !== d.columns) setD((prev) => ({ ...prev, columns: c }));
+  }, [d, autoColumns]);
 
   useEffect(() => {
     if (tab !== 'data') return;
@@ -610,11 +630,23 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   </button>
                 </div>
               )}
-              <Field label={doc ? tr('Ancho del ticket', 'Ticket width') : tr('Papel', 'Paper')}>
+              <Field
+                label={doc ? tr('Ancho del ticket', 'Ticket width') : tr('Papel', 'Paper')}
+                hint={
+                  doc
+                    ? undefined
+                    : tr(
+                        'Automático: el que dice el driver o el nombre de la impresora; si no dice nada, 58 mm, que sale bien en cualquier rollo.',
+                        'Automatic: what the printer’s driver or name says; if nothing says, 58 mm, which prints right on any roll.',
+                      )
+                }
+              >
                 <Segmented
-                  value={d.columns}
-                  onChange={(v) => set('columns', v)}
+                  // 0 is Automático
+                  value={!doc && d.paperAuto ? 0 : d.columns}
+                  onChange={(v) => setD((prev) => (v === 0 ? { ...prev, paperAuto: true, columns: autoColumns(prev) } : { ...prev, paperAuto: false, columns: v }))}
                   options={[
+                    ...(doc ? [] : [{ value: 0, label: `${tr('Automático', 'Automatic')} · ${autoColumns(d) === 32 ? '58' : '80'} mm` }]),
                     { value: 48, label: '80 mm · 48' },
                     { value: 42, label: '80 mm · 42' },
                     { value: 32, label: '58 mm · 32' },

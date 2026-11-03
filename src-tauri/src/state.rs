@@ -31,6 +31,8 @@ pub struct AppState {
     // Ajustes can sign someone in when Tiquet opens: once per start, never
     // again after they lock the till or sign out
     auto_login_done: AtomicBool,
+    // Papel automático reads the paper of the printer set up once a run
+    paper_read: AtomicBool,
     pub sink: PrintSink,
     pub data_dir: PathBuf,
     // only the packaged app opens Explorer windows; tests and the dev server
@@ -53,6 +55,7 @@ impl AppState {
             active: Mutex::new(Instant::now()),
             lock_after: AtomicU64::new(0),
             auto_login_done: AtomicBool::new(false),
+            paper_read: AtomicBool::new(false),
             sink,
             data_dir: data_dir.to_path_buf(),
             desktop: false,
@@ -86,6 +89,14 @@ impl AppState {
     // true the first time it is asked after the app starts
     pub fn first_open(&self) -> bool {
         !self.auto_login_done.swap(true, Ordering::SeqCst)
+    }
+
+    pub fn paper_read(&self) -> bool {
+        self.paper_read.load(Ordering::SeqCst)
+    }
+
+    pub fn set_paper_read(&self) {
+        self.paper_read.store(true, Ordering::SeqCst);
     }
 
     pub fn set_lock_after(&self, minutes: u32) {

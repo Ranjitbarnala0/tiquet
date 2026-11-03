@@ -47,6 +47,8 @@ export interface Settings {
   printerCom: string;
   printerBaud: number;
   columns: number;
+  // the columns follow the printer, 58 mm when nothing says
+  paperAuto: boolean;
   codepage: string;
   cut: boolean;
   feedLines: number;

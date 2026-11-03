@@ -32,7 +32,7 @@ Upgrading from 1.0, 1.1 or 1.2: run the new installer over it. From 1.3 on Tique
 - **Red (IP):** a receipt printer with its own network port needs no driver: type the IP address it prints on its configuration sheet (the port is 9100 on nearly all of them).
 - **Bluetooth / COM:** pair the printer in Windows Settings > Bluetooth, then choose the outgoing COM port Windows gave it. Serial and USB-serial printers work the same way, at the speed set there.
 
-Picking a printer from the list sets the kind: a receipt printer prints raw, any other as a document. The paper width comes from the printer's Windows driver when it says (58 mm rolls print 32 characters a line, 80 mm rolls 48); **Papel** changes it by hand.
+Picking a printer from the list sets the kind: a receipt printer prints raw, any other as a document. **Papel: Automático** takes the paper width from the printer's Windows driver or its name (POS-58, XP-80C, 58mm…), and uses 58 mm when nothing says, since a 58 mm ticket prints right on any roll (58 mm rolls print 32 characters a line, 80 mm rolls 48). It is read again each time Tiquet opens. Choosing 58 or 80 mm in **Papel** sets it by hand.
 
 ## What it does
 

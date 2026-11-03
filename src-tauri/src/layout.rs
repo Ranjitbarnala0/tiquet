@@ -760,11 +760,14 @@ pub fn test_page(s: &Settings, user: &str, logo: bool) -> Vec<Line> {
     d.center("PRUEBA DE IMPRESIÓN", true, Size::Big);
     d.blank();
     d.pair("Impresora", &crate::printer::label(s), false, Size::Normal);
-    d.pair("Ancho", &format!("{} columnas", s.columns), false, Size::Normal);
+    let mm = if s.columns == 32 { 58 } else { 80 };
+    let how = if s.paper_auto { ", automático" } else { "" };
+    d.pair("Papel", &format!("{mm} mm, {} col.{how}", s.columns), false, Size::Normal);
     d.pair("Caracteres", &s.codepage.to_uppercase(), false, Size::Normal);
     d.rule('=');
     let ruler: String = (1..=d.cols).map(|i| char::from(b'0' + (i % 10) as u8)).collect();
     d.raw(ruler, false, Size::Normal);
+    d.left("Los números caben en una línea si el papel es el correcto. Si se parten, elija 58 mm en Ajustes > Impresora > Papel.", false, Size::Normal);
     d.left("Acentos: áéíóú ÁÉÍÓÚ ñÑ çÇ üÜ", false, Size::Normal);
     d.left("Signos: € ¿? ¡! ºª", false, Size::Normal);
     d.rule('-');

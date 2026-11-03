@@ -41,9 +41,9 @@ pub struct Entry {
     // looks like a receipt printer: raw ESC/POS suits it; anything else
     // prints tickets as a document through its driver
     pub receipt: bool,
-    // characters per line for the paper its Windows driver is set up for:
-    // 32 on 58 mm rolls, 48 (or 42) on 80 mm; None when the driver does not
-    // say (Generic / Text Only describes a Letter page)
+    // characters per line for its paper, from the roll its Windows driver is
+    // set up for or a 58 / 80 in its name: 32 on 58 mm rolls, 48 (or 42) on
+    // 80 mm; None when nothing says (Generic / Text Only describes a Letter page)
     pub columns: Option<u32>,
 }
 
@@ -331,12 +331,62 @@ pub fn columns_for(paper_mm: u32, dots: u32) -> Option<u32> {
     }
 }
 
+// Characters per line when nothing says how wide the roll is: 32 prints
+// right on 58 and 80 mm rolls alike, 48 breaks every line on 58 mm.
+pub const SAFE_COLUMNS: u32 = 32;
+
+// A 58 or an 80 in a queue's or driver's name, the way the shop installed
+// it: POS-58, POS58, XP-58IIH, GP-5890, 58mm, POS-80C, 80mm.
+pub fn named_columns(text: &str) -> Option<u32> {
+    let mut wide = false;
+    for run in text.split(|c: char| !c.is_ascii_digit()).filter(|r| !r.is_empty()) {
+        if run == "58" || run == "57" || (run.starts_with("58") && run.len() >= 4) {
+            return Some(32);
+        }
+        wide |= run == "80" || (run.starts_with("80") && run.len() >= 4);
+    }
+    wide.then_some(48)
+}
+
+// What the driver's paper and the name say together. A 58 from either
+// wins: a narrow ticket on a wide roll is only narrow, a wide one on a
+// narrow roll breaks every line.
+pub fn known_columns(paper: Option<u32>, named: Option<u32>) -> Option<u32> {
+    match (paper, named) {
+        (Some(32), _) | (_, Some(32)) => Some(32),
+        (Some(c), _) => Some(c),
+        (None, n) => n,
+    }
+}
+
+// Papel automático: the width for the printer set up. A Windows queue gets
+// what its driver's paper and its name say, a network or Bluetooth printer
+// 58 mm; nothing saying means 58 mm too. A page drawn through the driver
+// (document) and no printer at all keep the width they have. None also
+// when Windows did not answer in time: nothing then changes.
+pub fn auto_columns(sink: &PrintSink, s: &Settings) -> Option<u32> {
+    match (sink, target(s)?) {
+        (_, Target::Doc(_)) => None,
+        (_, Target::Net(..) | Target::Serial(..)) => Some(SAFE_COLUMNS),
+        (PrintSink::Dir(_), Target::Queue(name)) => Some(named_columns(&name).unwrap_or(SAFE_COLUMNS)),
+        (PrintSink::Spooler, Target::Queue(name)) => status_lane()
+            .run(Duration::from_secs(2), Duration::from_secs(4), move || {
+                // a queue that is not there tells nothing about any paper
+                let driver = win::info(&name).ok()?.driver;
+                let paper = win::paper(&name).and_then(|(mm, dots)| columns_for(mm, dots));
+                Some(known_columns(paper, named_columns(&format!("{name} {driver}"))).unwrap_or(SAFE_COLUMNS))
+            })
+            .ok()
+            .flatten(),
+    }
+}
+
 // Which installed printer is the receipt printer, for a new PC or the
 // Detectar button. PDF, XPS and fax queues never qualify; a name, driver or
 // port that says POS, receipt, thermal, a receipt brand, 58/80 mm or USB
 // counts for it, an office printer brand against it. Only a clear winner is
 // picked; a tie is left for the person to choose.
-fn score(e: &Entry) -> (i32, bool) {
+fn score(e: &Entry) -> i32 {
     const RECEIPT: &[&str] = &[
         "pos", "receipt", "ticket", "tickets", "thermal", "termica", "tm", "escpos", "xprinter", "premier", "itp", "bixolon",
         "citizen", "sewoo", "rongta", "hprt", "zjiang", "gprinter", "posbank", "custom", "metapace", "sam4s", "star",
@@ -367,30 +417,23 @@ fn score(e: &Entry) -> (i32, bool) {
     if e.port.to_lowercase().starts_with("usb") {
         score += 3;
     }
-    let narrow = words.iter().any(|w| w.contains("58"));
-    (score, narrow)
+    score
 }
 
 pub fn detect(entries: &[Entry]) -> Detected {
-    let mut scored: Vec<(i32, &Entry, bool)> = Vec::new();
-    for e in entries.iter().filter(|e| !e.is_virtual) {
-        let (score, narrow) = score(e);
-        if score > 0 {
-            scored.push((score, e, narrow));
-        }
-    }
+    let mut scored: Vec<(i32, &Entry)> = entries.iter().filter(|e| !e.is_virtual).map(|e| (score(e), e)).filter(|(s, _)| *s > 0).collect();
     scored.sort_by_key(|s| std::cmp::Reverse(s.0));
     let clear = match scored.as_slice() {
-        [(top, ..), (next, ..), ..] => top > next,
+        [(top, _), (next, _), ..] => top > next,
         [_] => true,
         [] => false,
     };
-    let measured = clear.then(|| scored[0].1.columns).flatten();
+    let known = clear.then(|| scored[0].1).and_then(|e| known_columns(e.columns, named_columns(&format!("{} {}", e.name, e.driver))));
     Detected {
         best: clear.then(|| scored[0].1.name.clone()),
-        columns: measured.unwrap_or(if clear && scored[0].2 { 32 } else { 48 }),
-        measured: measured.is_some(),
-        candidates: scored.iter().map(|(_, e, _)| e.name.clone()).collect(),
+        columns: known.unwrap_or(SAFE_COLUMNS),
+        measured: known.is_some(),
+        candidates: scored.iter().map(|(_, e)| e.name.clone()).collect(),
     }
 }
 
@@ -408,10 +451,9 @@ pub fn list() -> Vec<Entry> {
                 port,
                 driver,
             };
-            e.receipt = !e.is_virtual && score(&e).0 > 0;
-            if e.receipt {
-                e.columns = win::paper(&e.name).and_then(|(mm, dots)| columns_for(mm, dots));
-            }
+            e.receipt = !e.is_virtual && score(&e) > 0;
+            let paper = if e.receipt { win::paper(&e.name).and_then(|(mm, dots)| columns_for(mm, dots)) } else { None };
+            e.columns = known_columns(paper, named_columns(&format!("{} {}", e.name, e.driver)));
             e
         })
         .collect();
@@ -1385,8 +1427,8 @@ mod tests {
         };
         // an inkjet on USB is not a receipt printer, an Epson TM is
         let inkjet = e("EPSON L3150 Series", "USB001", "EPSON L3150 Series");
-        assert!(score(&inkjet).0 <= 0);
-        assert!(score(&e("EPSON TM-T20II", "USB002", "EPSON TM-T20II Receipt")).0 > 0);
+        assert!(score(&inkjet) <= 0);
+        assert!(score(&e("EPSON TM-T20II", "USB002", "EPSON TM-T20II Receipt")) > 0);
         let office = e("HP LaserJet Pro M404", "WSD-1234", "HP Universal Printing PCL 6");
         let pdf = e("Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF");
         let pos = e("POS-80C", "USB001", "POS-80C");
@@ -1400,6 +1442,29 @@ mod tests {
         let two = detect(&[e("POS-80", "USB001", "POS-80"), e("XP-80", "USB002", "Xprinter XP-80")]);
         assert_eq!((two.best, two.candidates.len()), (None, 2));
         assert_eq!(detect(&[e("Premier ITP-73", "USB001", "ITP-73")]).best.as_deref(), Some("Premier ITP-73"));
+        // a receipt printer whose name and driver say nothing of its paper:
+        // 58 mm, which prints right on any roll
+        let plain = detect(&[e("Disashop", "USB001", "Generic / Text Only")]);
+        assert_eq!((plain.best.as_deref(), plain.columns, plain.measured), (Some("Disashop"), 32, false));
+    }
+
+    #[test]
+    fn the_name_tells_the_roll_and_58_wins() {
+        for n in ["POS-58", "POS58 Printer", "XP-58IIH", "GP-5890X", "ZJ-5802", "Impresora tickets 58mm", "RP57"] {
+            assert_eq!(named_columns(n), Some(32), "{n}");
+        }
+        for n in ["POS-80C", "XP-80", "80mm Series Printer", "GP-80250", "POS-80 (Copia 1)"] {
+            assert_eq!(named_columns(n), Some(48), "{n}");
+        }
+        for n in ["Disashop", "Premier ITP-73", "EPSON TM-T20II", "Generic / Text Only", "Brother HL-5580D"] {
+            assert_eq!(named_columns(n), None, "{n}");
+        }
+        // the driver set up for 80 mm on a printer named 58: the narrow width
+        assert_eq!(known_columns(Some(48), Some(32)), Some(32));
+        assert_eq!(known_columns(Some(32), Some(48)), Some(32));
+        assert_eq!(known_columns(Some(42), Some(48)), Some(42));
+        assert_eq!(known_columns(None, Some(48)), Some(48));
+        assert_eq!(known_columns(None, None), None);
     }
 
     #[test]

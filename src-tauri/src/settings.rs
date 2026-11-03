@@ -36,6 +36,9 @@ pub struct Settings {
     pub printer_com: String,
     pub printer_baud: u32,
     pub columns: u32,
+    // Papel automático: the columns follow the printer (printer::auto_columns),
+    // 58 mm when nothing says; choosing a width in Ajustes turns it off
+    pub paper_auto: bool,
     pub codepage: String,
     pub cut: bool,
     pub feed_lines: u32,
@@ -91,6 +94,7 @@ impl Default for Settings {
             printer_com: String::new(),
             printer_baud: 9600,
             columns: 48,
+            paper_auto: true,
             codepage: "cp858".into(),
             cut: true,
             feed_lines: 4,
@@ -257,6 +261,19 @@ pub fn upgrade(conn: &Connection) -> Result<()> {
         }
         put(conn, "terms16", "1")?;
     }
+    // 1.7.1: Papel automático. 48 columns on a Windows queue was nearly always
+    // the old default, and is read again from the printer; any other width,
+    // or a network or Bluetooth printer set up by hand, stays as chosen.
+    if get(conn, "paper171")?.is_none() {
+        if get(conn, "settings")?.is_some() {
+            let mut s = load(conn)?;
+            if s.columns != 48 || s.printer_kind != "windows" {
+                s.paper_auto = false;
+                put(conn, "settings", &serde_json::to_string(&s)?)?;
+            }
+        }
+        put(conn, "paper171", "1")?;
+    }
     Ok(())
 }
 
@@ -346,6 +363,19 @@ mod tests {
         put(&conn, "settings", r#"{"shopName":"Mi Tienda","shopNif":"B12345678","columns":"ancho","copies":2}"#).unwrap();
         let s = load(&conn).unwrap();
         assert_eq!((s.shop_name.as_str(), s.shop_nif.as_str(), s.copies, s.columns), ("Mi Tienda", "B12345678", 2, 48));
+    }
+
+    #[test]
+    fn papel_automatico_reads_the_old_default_again_and_keeps_a_chosen_width() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        for (i, (columns, kind, auto)) in [(48, "windows", true), (42, "windows", false), (32, "windows", false), (48, "network", false)].into_iter().enumerate() {
+            let conn = crate::db::open(&std::env::temp_dir().join(format!("tiquet-paper-{n}-{i}")).join("t.db")).unwrap();
+            // stored by 1.7.0, which had no paperAuto
+            put(&conn, "settings", &format!(r#"{{"shopName":"Mi Tienda","columns":{columns},"printerKind":"{kind}"}}"#)).unwrap();
+            upgrade(&conn).unwrap();
+            let s = load(&conn).unwrap();
+            assert_eq!((s.paper_auto, s.columns), (auto, columns), "{columns} {kind}");
+        }
     }
 
     #[test]
