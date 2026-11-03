@@ -261,7 +261,9 @@ pub struct TicketView<'a> {
     pub qr: Option<&'a str>,
 }
 
-fn header(d: &mut Doc, shop: &ShopInfo) {
+// What the shop chose to show; an invoice made out to a customer always
+// shows the NIF and address
+fn header(d: &mut Doc, shop: &ShopInfo, invoice: bool) {
     let name = shop.name.trim();
     if !name.is_empty() {
         let size = if len(name) <= d.cols / 2 { Size::Big } else { Size::Tall };
@@ -272,15 +274,22 @@ fn header(d: &mut Doc, shop: &ShopInfo) {
     if !legal.is_empty() && !legal.eq_ignore_ascii_case(name) {
         d.center(legal, false, Size::Normal);
     }
-    for l in shop.address.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        d.center(l, false, Size::Normal);
+    if invoice || shop.show_address.unwrap_or(true) {
+        for l in shop.address.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            d.center(l, false, Size::Normal);
+        }
     }
-    if !shop.phone.trim().is_empty() {
+    if shop.show_phone.unwrap_or(true) && !shop.phone.trim().is_empty() {
         d.center(&format!("Tel. {}", shop.phone.trim()), false, Size::Normal);
     }
-    if !shop.nif.trim().is_empty() {
+    if (invoice || shop.show_nif.unwrap_or(true)) && !shop.nif.trim().is_empty() {
         d.center(&format!("NIF: {}", shop.nif.trim()), false, Size::Normal);
     }
+}
+
+// a ticket is a factura simplificada only when it names the shop's NIF
+fn fiscal(shop: &ShopInfo) -> bool {
+    shop.show_nif.unwrap_or(true) && !shop.nif.trim().is_empty()
 }
 
 // a full invoice states each unit price without VAT
@@ -373,15 +382,17 @@ pub fn ticket(v: &TicketView, s: &Settings, logo: bool) -> Vec<Line> {
         d.center("VERI*FACTU", true, Size::Normal);
         d.blank();
     }
-    header(&mut d, v.shop);
+    let full = v.customer.is_some();
+    header(&mut d, v.shop, full);
     d.blank();
     let refund = v.kind == "refund";
-    let full = v.customer.is_some();
-    let title = match (full, refund) {
-        (false, false) => "FACTURA SIMPLIFICADA",
-        (false, true) => "FACTURA SIMPLIFICADA RECTIFICATIVA",
-        (true, false) => "FACTURA",
-        (true, true) => "FACTURA RECTIFICATIVA",
+    let title = match (full, refund, fiscal(v.shop)) {
+        (true, false, _) => "FACTURA",
+        (true, true, _) => "FACTURA RECTIFICATIVA",
+        (false, false, true) => "FACTURA SIMPLIFICADA",
+        (false, true, true) => "FACTURA SIMPLIFICADA RECTIFICATIVA",
+        (false, false, false) => "TICKET",
+        (false, true, false) => "TICKET DE DEVOLUCIÓN",
     };
     d.center(title, true, Size::Normal);
     d.pair(&format!("Nº {}", v.number), &datetime(v.issued_at), false, Size::Normal);
@@ -398,7 +409,7 @@ pub fn ticket(v: &TicketView, s: &Settings, logo: bool) -> Vec<Line> {
     if let Some(r) = v.reason.map(str::trim).filter(|r| !r.is_empty()) {
         d.left(&format!("Motivo: {r}"), false, Size::Normal);
     }
-    if !v.user_name.trim().is_empty() {
+    if v.shop.show_cashier.unwrap_or(true) && !v.user_name.trim().is_empty() {
         d.left(&format!("Le atendió: {}", v.user_name.trim()), false, Size::Normal);
     }
     if v.copy {
@@ -504,11 +515,11 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
     if logo {
         d.logo();
     }
-    header(&mut d, &r.shop);
+    header(&mut d, &r.shop, false);
     d.blank();
     d.center("RESGUARDO DE REPARACIÓN", true, Size::Normal);
     d.pair(&format!("Nº {}", r.number), &datetime(&r.created_at), false, Size::Normal);
-    if !r.created_by.trim().is_empty() {
+    if r.shop.show_cashier.unwrap_or(true) && !r.created_by.trim().is_empty() {
         d.left(&format!("Le atendió: {}", r.created_by.trim()), false, Size::Normal);
     }
     match (r.status.as_str(), r.closed_at.as_deref()) {
@@ -551,6 +562,41 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
     d.rule('-');
     d.center("Presente este resguardo para recoger", true, Size::Normal);
     d.center(&r.number, true, Size::Tall);
+    d.lines
+}
+
+// Printed when the phone goes back to its owner: the shop keeps it, signed,
+// with the resguardo the customer hands back.
+pub fn repair_delivery(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
+    let mut d = Doc::new(s);
+    if logo {
+        d.logo();
+    }
+    header(&mut d, &r.shop, false);
+    d.blank();
+    d.center("JUSTIFICANTE DE ENTREGA", true, Size::Normal);
+    let at = r.closed_at.clone().filter(|_| r.status == "delivered").unwrap_or_else(now);
+    d.pair(&format!("Nº {}", r.number), &datetime(&at), false, Size::Normal);
+    d.rule('-');
+    let x = &r.data;
+    d.left(&format!("Cliente: {}", x.customer_name), false, Size::Normal);
+    d.left(&format!("Teléfono: {}", x.customer_phone), false, Size::Normal);
+    d.left(&format!("Equipo: {}", device(r)), false, Size::Normal);
+    if !x.imei.is_empty() {
+        d.left(&format!("IMEI/N.º serie: {}", x.imei), false, Size::Normal);
+    }
+    d.left(&format!("Recibido el {}", date(&r.created_at)), false, Size::Normal);
+    if let Some(t) = &r.ticket {
+        d.left(&format!("Cobrado en el ticket {} ({} €)", t.number, fmt(t.total_cents)), false, Size::Normal);
+    }
+    d.rule('-');
+    d.left("El cliente recoge el equipo y devuelve el resguardo.", false, Size::Normal);
+    d.blank();
+    d.left("Recibí el equipo conforme.", false, Size::Normal);
+    d.left("Firma:", false, Size::Normal);
+    d.blank();
+    d.blank();
+    d.rule('_');
     d.lines
 }
 
@@ -1004,7 +1050,7 @@ mod tests {
         has(&format!("Presupuesto{}80,00 €", sp(30)));
         has(&format!("Anticipo{}20,00 €", sp(33)));
         has(&format!("A pagar al recoger{}60,00 €", sp(23)));
-        has("La reparación tiene 3 meses de garantía.");
+        has("Si el equipo no se recoge en 3 meses");
         has("Presente este resguardo para recoger");
         // the shop's own notes never go to the customer
         assert!(!body.iter().any(|l| l.contains("desbloqueo")), "{}", body.join("\n"));

@@ -182,14 +182,15 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   useEffect(() => {
     let live = true;
     const look = () =>
-      call<{ applied: boolean; name?: string; replaced?: string | null; settings?: Settings }>('printers.auto')
+      call<{ applied: boolean; name?: string; columns?: number; replaced?: string | null; settings?: Settings }>('printers.auto')
         .then((r) => {
           if (!live || !r.applied || !r.settings) return;
           const s = r.settings;
           setSettings(s);
+          const paper = ` · ${tr('papel', 'paper')} ${s.columns === 32 ? '58' : '80'} mm`;
           const text = r.replaced
-            ? `${tr('La impresora', 'The printer')} «${r.replaced}» ${tr('ya no está; ahora se imprime en', 'is gone; tickets now print on')} ${r.name}`
-            : `${tr('Impresora de tickets conectada', 'Receipt printer connected')}: ${r.name}`;
+            ? `${tr('La impresora', 'The printer')} «${r.replaced}» ${tr('ya no está; ahora se imprime en', 'is gone; tickets now print on')} ${r.name}${paper}`
+            : `${tr('Impresora de tickets conectada', 'Receipt printer connected')}: ${r.name}${paper}`;
           toast.ok(text, {
             sticky: true,
             action: admin

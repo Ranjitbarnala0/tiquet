@@ -4097,3 +4097,63 @@ button.cart-name:hover > span:first-child {
 .printer-choice small {
   color: var(--ink-3, #6b7280);
 }
+
+/* The name and the price of a cart line open their editors. Touch screens
+   have no hover, so both always look like something to tap. */
+.price-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-color: var(--line-2);
+  background: var(--panel);
+  cursor: pointer;
+}
+
+.price-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.price-edit {
+  color: var(--faint);
+  flex: none;
+}
+
+.price-btn:hover .price-edit {
+  color: var(--accent);
+}
+
+.cart-edit {
+  opacity: 0.55;
+}
+
+/* one-tap choices: a phone's make, the usual faults */
+.picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.pick {
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line-2);
+  background: var(--panel);
+  color: var(--ink-2);
+  font-size: 13px;
+  font-weight: 540;
+  cursor: pointer;
+}
+
+.pick:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.pick.on {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}

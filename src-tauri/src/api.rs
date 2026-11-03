@@ -358,7 +358,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         "repairs.print" => {
             st.user()?;
             let what = a.get("what").and_then(Value::as_str).unwrap_or("both");
-            if !["resguardo", "slip", "both"].contains(&what) {
+            if !["resguardo", "slip", "both", "delivery"].contains(&what) {
                 return fail("E_ARGS:what");
             }
             let (r, s, logo) = {
@@ -565,10 +565,11 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let Some(best) = found.best.clone().filter(|b| *b != name) else {
                 return Ok(json!({ "applied": false, "candidates": found.candidates }));
             };
-            let columns = if name.is_empty() { found.columns } else { s.columns };
+            // the paper its driver is set up for; a guess never overrides a width someone chose
+            let columns = if name.is_empty() || found.measured { found.columns } else { s.columns };
             let saved = settings::save(&st.conn(), Settings { printer_name: best.clone(), printer_kind: "windows".into(), columns, ..s })?;
-            log::info(format!("receipt printer {best} chosen automatically for {} (was {name:?})", me.name));
-            Ok(json!({ "applied": true, "name": best, "replaced": Some(name).filter(|n| !n.is_empty()), "settings": saved }))
+            log::info(format!("receipt printer {best} chosen automatically for {}, {columns} columns (was {name:?})", me.name));
+            Ok(json!({ "applied": true, "name": best, "columns": columns, "replaced": Some(name).filter(|n| !n.is_empty()), "settings": saved }))
         }
         "printers.status" => {
             st.user()?;
@@ -772,8 +773,8 @@ fn setup(st: &AppState, a: SetupIn) -> Result<Value> {
     if a.shop_name.trim().is_empty() {
         return fail("E_INVALID:shopName");
     }
-    // every ticket carries it, so it is asked for once, here
-    if !crate::nif::spanish(&a.shop_nif) {
+    // optional: a shop that only wants simple tickets may leave it out
+    if !a.shop_nif.trim().is_empty() && !crate::nif::spanish(&a.shop_nif) {
         return fail("E_INVALID:nif");
     }
     let s = Settings {
@@ -1087,6 +1088,10 @@ fn print_close(st: &AppState, id: i64, user: &str) -> Result<Option<String>> {
 // the resguardo goes first, then the slip for the phone
 fn print_repair(st: &AppState, r: &repairs::Repair, s: &Settings, logo: Option<&Logo>, what: &str) -> Result<Option<String>> {
     let mut job = Job::default();
+    if what == "delivery" {
+        job.push(&layout::repair_delivery(r, s, logo.is_some()), logo, &Opts::new(s, false));
+        return printer::send_job(&st.sink, s, &r.number, &job);
+    }
     if what != "slip" {
         job.push(&layout::resguardo(r, s, logo.is_some()), logo, &Opts::new(s, false));
     }
@@ -1737,6 +1742,14 @@ mod tests {
         settings::put(&conn, "settings", &serde_json::to_string(&s).unwrap()).unwrap();
         settings::upgrade(&conn).unwrap();
         assert_eq!(settings::load(&conn).unwrap().auto_lock_min, 15);
+        // a till already on 1.5 still gets the 1.6 resguardo text, once
+        let mut s = settings::load(&conn).unwrap();
+        s.repair_terms = "La reparación tiene 3 meses de garantía. Haga una copia de sus datos antes de dejar el equipo.".into();
+        settings::put(&conn, "settings", &serde_json::to_string(&s).unwrap()).unwrap();
+        conn.execute("DELETE FROM settings WHERE key = 'terms16'", []).unwrap();
+        settings::upgrade(&conn).unwrap();
+        assert!(settings::load(&conn).unwrap().repair_terms.contains("no se recoge en 3 meses"));
+        assert_eq!(settings::load(&conn).unwrap().auto_lock_min, 15);
     }
 
     #[test]
@@ -1813,5 +1826,43 @@ mod tests {
         assert_eq!(printer::target(&s), Some(printer::Target::Doc("Oficina".into())));
         let serial = Settings { printer_kind: "serial".into(), printer_com: " com7 ".into(), printer_baud: 7, ..s }.clean();
         assert_eq!(printer::target(&serial), Some(printer::Target::Serial("COM7".into(), 9600)));
+    }
+    #[test]
+    fn a_shop_without_nif_prints_simple_tickets_and_cannot_invoice() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        let args = json!({ "shopName": "Fundas Ya", "shopNif": "", "adminName": "Ana", "password": "123456", "lang": "es" });
+        dispatch(&st, "setup", args).unwrap();
+        dispatch(&st, "settings.save", json!({ "shopAddress": "Calle Mayor 1", "shopPhone": "600000000", "ticketAddress": false, "ticketCashier": false })).unwrap();
+        let r = dispatch(&st, "sale.finalize", json!({ "lines": [{ "name": "Funda", "qty": 1, "unitCents": 900, "vatBp": 2100 }], "payment": { "method": "cash" }, "print": false })).unwrap();
+        let t = dispatch(&st, "tickets.get", json!({ "id": r["ticket"]["id"] })).unwrap();
+        let text: Vec<String> = t["lines"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str().map(|s| s.trim().to_string())).collect();
+        assert!(text.contains(&"TICKET".to_string()), "{text:?}");
+        assert!(!text.iter().any(|l| l.contains("FACTURA") || l.contains("NIF") || l.contains("Calle Mayor") || l.contains("atendió")), "{text:?}");
+        assert!(text.iter().any(|l| l.contains("600000000")));
+        // an invoice made out to a customer needs the shop's own NIF
+        let inv = json!({ "lines": [{ "name": "Funda", "qty": 1, "unitCents": 900, "vatBp": 2100 }], "payment": { "method": "cash" }, "print": false,
+            "customer": { "name": "Cliente SL", "nif": "B12345674", "address": "" } });
+        let err = dispatch(&st, "sale.finalize", inv).unwrap_err();
+        assert_eq!(err, "E_SHOP_NIF");
+    }
+
+    #[test]
+    fn a_repair_handed_back_prints_a_pickup_receipt() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let terms = dispatch(&st, "settings.get", json!({})).unwrap()["repairTerms"].as_str().unwrap().to_string();
+        assert!(terms.contains("no se recoge en 3 meses"), "{terms}");
+        let rep = json!({ "customerName": "Juan", "customerPhone": "612345678", "brand": "Apple", "model": "iPhone 13", "fault": "Pantalla rota", "estimateCents": 0, "requestId": "r1", "print": false });
+        let r = dispatch(&st, "repairs.create", rep).unwrap();
+        let id = r["repair"]["id"].as_i64().unwrap();
+        dispatch(&st, "repairs.deliver", json!({ "id": id })).unwrap();
+        let before = std::fs::read_dir(st.data_dir.join("prints")).map(|d| d.count()).unwrap_or(0);
+        dispatch(&st, "repairs.print", json!({ "id": id, "what": "delivery" })).unwrap();
+        let after = std::fs::read_dir(st.data_dir.join("prints")).unwrap().count();
+        assert_eq!(after, before + 1);
+        let rr = crate::repairs::load(&st.conn(), id).unwrap();
+        let s = settings::load(&st.conn()).unwrap();
+        let text: Vec<String> = layout::repair_delivery(&rr, &s, false).iter().filter_map(|l| match l { layout::Line::Text { text, .. } => Some(text.clone()), _ => None }).collect();
+        assert!(text.iter().any(|l| l.contains("JUSTIFICANTE DE ENTREGA")) && text.iter().any(|l| l.contains("iPhone 13")), "{text:?}");
     }
 }

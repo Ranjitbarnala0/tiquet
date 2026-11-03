@@ -18,6 +18,13 @@ pub struct Settings {
     pub ticket_prefix: String,
     pub default_vat_bp: i64,
     pub show_vat: bool,
+    // what the ticket shows of the shop: a shop that only wants a simple
+    // ticket can leave its NIF, address, phone or the cashier off (a full
+    // invoice and VERI*FACTU always carry the NIF)
+    pub ticket_nif: bool,
+    pub ticket_address: bool,
+    pub ticket_phone: bool,
+    pub ticket_cashier: bool,
     pub printer_name: String,
     // "windows": raw ESC/POS to the queue above; "document": the same queue
     // printing a page through its own driver (an office printer, a PDF);
@@ -70,6 +77,10 @@ impl Default for Settings {
             ticket_prefix: "T".into(),
             default_vat_bp: 2100,
             show_vat: true,
+            ticket_nif: true,
+            ticket_address: true,
+            ticket_phone: true,
+            ticket_cashier: true,
             printer_name: String::new(),
             printer_kind: "windows".into(),
             printer_host: String::new(),
@@ -93,7 +104,7 @@ impl Default for Settings {
             cert: String::new(),
             autostart: false,
             fullscreen: false,
-            repair_terms: "La reparación tiene 3 meses de garantía. Haga una copia de sus datos antes de dejar el equipo.".into(),
+            repair_terms: "Si el equipo no se recoge en 3 meses desde el aviso de que está listo, la tienda deja de responder de él. La reparación tiene 3 meses de garantía. Haga una copia de sus datos antes de dejar el equipo.".into(),
         }
     }
 }
@@ -151,6 +162,10 @@ impl Settings {
         self.auto_login = self.auto_login.max(0);
         if !["off", "test", "prod"].contains(&self.verifactu.as_str()) {
             self.verifactu = "off".into();
+        }
+        // every VERI*FACTU record names the NIF, and so must its ticket
+        if self.verifactu != "off" {
+            self.ticket_nif = true;
         }
         self.cert = self.cert.chars().filter(char::is_ascii_hexdigit).take(40).collect::<String>().to_uppercase();
         self.repair_terms = self.repair_terms.trim().chars().take(600).collect();
@@ -215,18 +230,30 @@ pub fn load(conn: &Connection) -> Result<Settings> {
 // Installs from before kept the old default of 10 minutes, which asked for
 // the password far too often at a busy counter, so it is switched off once.
 pub fn upgrade(conn: &Connection) -> Result<()> {
-    if get(conn, "lockOff15")?.is_some() {
-        return Ok(());
-    }
-    if get(conn, "settings")?.is_some() {
-        let mut s = load(conn)?;
-        if s.auto_lock_min != 0 {
-            s.auto_lock_min = 0;
-            put(conn, "settings", &serde_json::to_string(&s)?)?;
-            crate::log::info("the till no longer locks itself when unused (1.5 default)");
+    if get(conn, "lockOff15")?.is_none() {
+        if get(conn, "settings")?.is_some() {
+            let mut s = load(conn)?;
+            if s.auto_lock_min != 0 {
+                s.auto_lock_min = 0;
+                put(conn, "settings", &serde_json::to_string(&s)?)?;
+                crate::log::info("the till no longer locks itself when unused (1.5 default)");
+            }
         }
+        put(conn, "lockOff15", "1")?;
     }
-    put(conn, "lockOff15", "1")
+    // 1.6: the default resguardo text also gives the 3 months to collect;
+    // a text the shop wrote itself stays
+    if get(conn, "terms16")?.is_none() {
+        if get(conn, "settings")?.is_some() {
+            let mut s = load(conn)?;
+            if s.repair_terms == "La reparación tiene 3 meses de garantía. Haga una copia de sus datos antes de dejar el equipo." {
+                s.repair_terms = Settings::default().repair_terms;
+                put(conn, "settings", &serde_json::to_string(&s)?)?;
+            }
+        }
+        put(conn, "terms16", "1")?;
+    }
+    Ok(())
 }
 
 pub fn save(conn: &Connection, s: Settings) -> Result<Settings> {

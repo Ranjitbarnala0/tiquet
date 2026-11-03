@@ -41,6 +41,10 @@ pub struct Entry {
     // looks like a receipt printer: raw ESC/POS suits it; anything else
     // prints tickets as a document through its driver
     pub receipt: bool,
+    // characters per line for the paper its Windows driver is set up for:
+    // 32 on 58 mm rolls, 48 (or 42) on 80 mm; None when the driver does not
+    // say (Generic / Text Only describes a Letter page)
+    pub columns: Option<u32>,
 }
 
 // A serial port a printer can hang on: Bluetooth printers paired in Windows
@@ -310,7 +314,21 @@ fn status_lane() -> &'static Lane {
 pub struct Detected {
     pub best: Option<String>,
     pub columns: u32,
+    // the columns come from the paper the driver is set up for, not a guess
+    pub measured: bool,
     pub candidates: Vec<String>,
+}
+
+// Characters per line for a roll this wide: 58 mm paper prints 32, 80 mm
+// prints 48, or 42 on heads 64 mm wide. Anything wider is an office page
+// (a Generic / Text Only driver says Letter) and tells nothing.
+pub fn columns_for(paper_mm: u32, dots: u32) -> Option<u32> {
+    match paper_mm {
+        40..=65 => Some(32),
+        66..=90 if (440..540).contains(&dots) => Some(42),
+        66..=90 => Some(48),
+        _ => None,
+    }
 }
 
 // Which installed printer is the receipt printer, for a new PC or the
@@ -367,9 +385,11 @@ pub fn detect(entries: &[Entry]) -> Detected {
         [_] => true,
         [] => false,
     };
+    let measured = clear.then(|| scored[0].1.columns).flatten();
     Detected {
         best: clear.then(|| scored[0].1.name.clone()),
-        columns: if clear && scored[0].2 { 32 } else { 48 },
+        columns: measured.unwrap_or(if clear && scored[0].2 { 32 } else { 48 }),
+        measured: measured.is_some(),
         candidates: scored.iter().map(|(_, e, _)| e.name.clone()).collect(),
     }
 }
@@ -383,11 +403,15 @@ pub fn list() -> Vec<Entry> {
                 is_virtual: is_virtual(&name, &port, &driver),
                 default: default.as_deref() == Some(name.as_str()),
                 receipt: false,
+                columns: None,
                 name,
                 port,
                 driver,
             };
             e.receipt = !e.is_virtual && score(&e).0 > 0;
+            if e.receipt {
+                e.columns = win::paper(&e.name).and_then(|(mm, dots)| columns_for(mm, dots));
+            }
             e
         })
         .collect();
@@ -857,6 +881,29 @@ mod win {
         }
     }
 
+    // The paper the printer's own driver is set up for, read from an
+    // information context (nothing is printed): its width in mm and the dots
+    // it prints across, counted at 203 dpi.
+    pub fn paper(printer: &str) -> Option<(u32, u32)> {
+        use windows_sys::Win32::Graphics::Gdi::{CreateICW, DeleteDC, GetDeviceCaps, HORZRES, LOGPIXELSX, PHYSICALWIDTH};
+
+        let (driver, device) = (wide("WINSPOOL"), wide(printer));
+        unsafe {
+            let ic = CreateICW(driver.as_ptr(), device.as_ptr(), null(), null());
+            if ic.is_null() {
+                return None;
+            }
+            let dpi = GetDeviceCaps(ic, LOGPIXELSX as i32) as i64;
+            let physical = GetDeviceCaps(ic, PHYSICALWIDTH as i32) as i64;
+            let printable = GetDeviceCaps(ic, HORZRES as i32) as i64;
+            DeleteDC(ic);
+            if dpi <= 0 || physical <= 0 {
+                return None;
+            }
+            Some(((physical * 254 / (dpi * 10)) as u32, (printable.max(0) * 203 / dpi) as u32))
+        }
+    }
+
     // HARDWARE\DEVICEMAP\SERIALCOMM: one value per COM port, named after the
     // device behind it (\Device\BthModem0, \Device\Silabser0)
     pub fn ports() -> Vec<(String, String)> {
@@ -1254,6 +1301,10 @@ mod win {
         Vec::new()
     }
 
+    pub fn paper(_: &str) -> Option<(u32, u32)> {
+        None
+    }
+
     pub fn serial(_: &str, _: u32, _: &[u8], _: std::time::Duration) -> Result<(), String> {
         Err("E_PRINT:offline".into())
     }
@@ -1302,6 +1353,16 @@ mod tests {
     }
 
     #[test]
+    fn the_paper_width_gives_the_columns() {
+        assert_eq!(columns_for(58, 384), Some(32));
+        assert_eq!(columns_for(80, 576), Some(48));
+        assert_eq!(columns_for(80, 512), Some(42));
+        // a Letter or A4 page is no roll at all
+        assert_eq!(columns_for(216, 1600), None);
+        assert_eq!(columns_for(210, 1600), None);
+    }
+
+    #[test]
     fn virtual_queues_are_recognised() {
         assert!(is_virtual("Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF"));
         assert!(is_virtual("Microsoft XPS Document Writer", "PORTPROMPT:", "Microsoft XPS Document Writer v4"));
@@ -1320,6 +1381,7 @@ mod tests {
             is_virtual: is_virtual(name, port, driver),
             default: false,
             receipt: false,
+            columns: None,
         };
         // an inkjet on USB is not a receipt printer, an Epson TM is
         let inkjet = e("EPSON L3150 Series", "USB001", "EPSON L3150 Series");

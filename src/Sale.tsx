@@ -992,8 +992,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                         }}
                       />
                     ) : (
-                      <button className={`price-btn${l.unitCents === 0 ? ' zero' : ''}`} onClick={() => setPriceEdit(l.key)} title={tr('Cambiar precio', 'Change price')}>
+                      <button className={`price-btn${l.unitCents === 0 ? ' zero' : ''}`} onClick={() => setPriceEdit(l.key)} title={tr('Toca para cambiar el precio', 'Tap to change the price')}>
                         {fmt(l.unitCents)}
+                        <Pencil size={12} className="price-edit" aria-hidden="true" />
                       </button>
                     )}
                   </div>

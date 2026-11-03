@@ -87,6 +87,10 @@ const errors: Record<string, [string, string]> = {
     '"{s}" is a virtual printer (PDF, XPS…) and cannot print tickets. Choose the receipt printer in Settings.',
   ],
   E_PRINT: ['No se imprimió', 'Not printed'],
+  E_SHOP_NIF: [
+    'Para hacer una factura con datos del cliente, pon el NIF del comercio en Ajustes > Comercio.',
+    'An invoice with customer details needs the shop NIF in Settings > Shop.',
+  ],
   E_MAIL_SETUP: ['Falta configurar el correo en Ajustes > Enviar tickets', 'Mail is not set up yet in Settings > Send tickets'],
   E_MAIL_PASS: [
     'Falta la contraseña del correo (o se guardó en otro usuario de Windows). Escríbela otra vez en Ajustes > Enviar tickets.',

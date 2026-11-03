@@ -146,6 +146,11 @@ pub struct ShopInfo {
     pub logo: i64,
     // None for tickets from before this was kept
     pub show_vat: Option<bool>,
+    // what the ticket shows of the shop; None (tickets before 1.6) shows it
+    pub show_nif: Option<bool>,
+    pub show_address: Option<bool>,
+    pub show_phone: Option<bool>,
+    pub show_cashier: Option<bool>,
 }
 
 impl Default for ShopInfo {
@@ -159,6 +164,10 @@ impl Default for ShopInfo {
             legal_name: String::new(),
             logo: -1,
             show_vat: None,
+            show_nif: None,
+            show_address: None,
+            show_phone: None,
+            show_cashier: None,
         }
     }
 }
@@ -174,6 +183,10 @@ impl ShopInfo {
             legal_name: s.legal_name.clone(),
             logo: -1,
             show_vat: Some(s.show_vat),
+            show_nif: Some(s.ticket_nif),
+            show_address: Some(s.ticket_address),
+            show_phone: Some(s.ticket_phone),
+            show_cashier: Some(s.ticket_cashier),
         }
     }
 }
@@ -647,6 +660,10 @@ pub fn check(s: &Settings, lines: Vec<SaleLine>, pay: &PaymentIn, opts: &SaleOpt
         return fail("E_TOTAL_CHANGED");
     }
     let customer = opts.customer.as_ref().map(Customer::checked).transpose()?;
+    // an invoice made out to a customer names the shop's NIF
+    if customer.is_some() && s.shop_nif.trim().is_empty() {
+        return fail("E_SHOP_NIF");
+    }
     if customer.is_none() && totals.total_cents > SIMPLIFIED_LIMIT {
         return fail("E_OVER_LIMIT");
     }
@@ -1306,6 +1323,11 @@ mod tests {
     #[test]
     fn a_customer_makes_it_a_full_invoice_in_its_own_series() {
         let (mut conn, user, s) = setup();
+        // an invoice names the shop's NIF: without one there is none
+        let bad = SaleOpts { customer: Some(Customer { name: "Acme SL".into(), nif: "B12345674".into(), address: String::new() }), ..SaleOpts::default() };
+        let no_nif = Settings { shop_nif: String::new(), ..s.clone() };
+        assert_eq!(sell(&mut conn, &user, &no_nif, vec![line("Funda", 1, 995)], &cash(None), &bad).unwrap_err().0, "E_SHOP_NIF");
+        let s = Settings { shop_nif: "B12345674".into(), ..s };
         let year = now()[..4].to_string();
         let big = vec![line("Portátil", 1, 350_000)];
         assert_eq!(finalize(&mut conn, &user, &s, big.clone(), &cash(None)).unwrap_err().0, "E_OVER_LIMIT");

@@ -5,6 +5,7 @@ import { ClockModal } from './Clock';
 import { dateTime, eur, fmt, parseMoney } from './format';
 import { errorText, isPrinterSetup, isTransient, tr, warningText } from './i18n';
 import type { ItemDraft } from './ItemDialog';
+import { BRANDS, DEVICES, FAULTS } from './devices';
 import { Paper } from './Paper';
 import { RepairWhatsApp } from './Share';
 import { useToast } from './toast';
@@ -300,12 +301,29 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
               <input value={d.customerPhone} onChange={(e) => set('customerPhone', e.target.value)} inputMode="tel" maxLength={30} />
             </Field>
           </div>
+          <div className="picks" role="group" aria-label={tr('Marca', 'Make')}>
+            {BRANDS.map((b) => (
+              <button
+                key={b}
+                type="button"
+                className={`pick${d.brand === b ? ' on' : ''}`}
+                onClick={() => setD((p) => ({ ...p, brand: b, model: p.brand === b ? p.model : '' }))}
+              >
+                {b}
+              </button>
+            ))}
+          </div>
           <div className="grid3">
             <Field label={tr('Marca', 'Make')}>
               <input value={d.brand} onChange={(e) => set('brand', e.target.value)} maxLength={40} placeholder="Samsung" />
             </Field>
-            <Field label={tr('Modelo', 'Model')}>
-              <input value={d.model} onChange={(e) => set('model', e.target.value)} maxLength={60} placeholder="Galaxy A54" />
+            <Field label={tr('Modelo', 'Model')} hint={DEVICES[d.brand] ? tr('Elige de la lista o escríbelo', 'Pick from the list or type it') : undefined}>
+              <input value={d.model} onChange={(e) => set('model', e.target.value)} maxLength={60} placeholder="Galaxy A54" list="repair-models" />
+              <datalist id="repair-models">
+                {(DEVICES[d.brand] ?? []).map((m) => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
             </Field>
             <Field label={tr('Color', 'Colour')}>
               <input value={d.colour} onChange={(e) => set('colour', e.target.value)} maxLength={30} />
@@ -318,9 +336,33 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
           >
             <input className="mono" value={d.imei} onChange={(e) => set('imei', e.target.value)} maxLength={40} spellCheck={false} />
           </Field>
-          <Field label={tr('Avería', 'Fault')} hint={tr('Como la cuenta el cliente. Sale en el resguardo.', 'As the customer tells it. Printed on the receipt.')}>
-            <textarea rows={3} value={d.fault} onChange={(e) => set('fault', e.target.value)} maxLength={500} />
-          </Field>
+          {/* a div, not a label: a label would pass any click on it to the first button */}
+          <div className="field">
+            <span className="field-label">{tr('Avería', 'Fault')}</span>
+            <div className="picks" role="group" aria-label={tr('Averías habituales', 'Usual faults')}>
+              {FAULTS.map((f) => {
+                const has = d.fault.split('\n').some((l) => l.trim() === f);
+                return (
+                  <button
+                    key={f}
+                    type="button"
+                    className={`pick${has ? ' on' : ''}`}
+                    onClick={() =>
+                      setD((p) => {
+                        const lines = p.fault.split('\n').filter((l) => l.trim());
+                        const next = has ? lines.filter((l) => l.trim() !== f) : [...lines, f];
+                        return { ...p, fault: next.join('\n') };
+                      })
+                    }
+                  >
+                    {f}
+                  </button>
+                );
+              })}
+            </div>
+            <textarea rows={3} value={d.fault} onChange={(e) => set('fault', e.target.value)} maxLength={500} aria-label={tr('Avería', 'Fault')} />
+            <span className="field-hint">{tr('Toca las más comunes o escríbela como la cuenta el cliente. Sale en el resguardo.', 'Tap the usual ones or type it as the customer tells it. Printed on the receipt.')}</span>
+          </div>
           <Field label={tr('Notas internas', 'Internal notes')} hint={tr('Solo para la tienda: no se imprimen.', 'For the shop only: never printed.')}>
             <textarea rows={2} value={d.notes} onChange={(e) => set('notes', e.target.value)} maxLength={1000} />
           </Field>
@@ -599,7 +641,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
     }
   };
 
-  const print = async (what: 'resguardo' | 'slip') => {
+  const print = async (what: 'resguardo' | 'slip' | 'delivery') => {
     if (!detail || busy) return;
     const id = detail.repair.id;
     setBusy(true);
@@ -762,6 +804,12 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                   <Tag size={16} />
                   {tr('Etiqueta', 'Tag')}
                 </button>
+                {r.status === 'delivered' && (
+                  <button className="btn" onClick={() => print('delivery')} disabled={busy} title={tr('Para que el cliente firme que se lo lleva', 'For the customer to sign that they took it')}>
+                    <PackageCheck size={16} />
+                    {tr('Justificante de entrega', 'Pickup receipt')}
+                  </button>
+                )}
                 {open && (
                   <button className="btn" onClick={() => setForm(r)} disabled={busy}>
                     <Pencil size={16} />

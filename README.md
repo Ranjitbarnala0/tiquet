@@ -20,7 +20,7 @@ Runs on Windows 10 and 11 (64-bit). No administrator rights are needed: it insta
 
 1. Download `Tiquet_<version>_x64-setup.exe` from [Releases](../../releases/latest). The installer is built on a clean GitHub machine by the [release workflow](.github/workflows/release.yml), which also starts the built app once before publishing; the release lists its SHA-256.
 2. Run it. The installer is not code-signed yet, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then **Run anyway**.
-3. On first start, enter the shop details (the NIF is checked) and create the administrator account. Write down or print the **recovery code** it shows: it is the only way back in if the administrator password is forgotten.
+3. On first start, enter the shop details and create the administrator account. The NIF is optional and checked when given: with it the ticket is a factura simplificada, without it a simple ticket. Write down or print the **recovery code** it shows: it is the only way back in if the administrator password is forgotten.
 4. The receipt printer is picked automatically when it is clearly the only one (a POS, thermal or receipt printer, or a known brand), also when it is plugged in later or Windows renames it. To choose it by hand, or to change it, use **Ajustes > Impresora** (**Detectar** looks again), then press **Imprimir página de prueba**. The interface starts in the language Windows uses.
 
 Upgrading from 1.0, 1.1 or 1.2: run the new installer over it. From 1.3 on Tiquet updates itself: it looks for a newer release a few seconds after it starts and once a day, never while a sale is on the screen, and **Actualizar ahora** installs it silently and opens Tiquet again. **Ajustes > Datos y copias > Buscar actualización** looks by hand. Upgrading from 1.0 also moves the database: on first start it is copied to `%LOCALAPPDATA%\TiquetData`, checked, and only then is the old file renamed to `tiquet.db.moved`; a copy of the 1.0 database is also kept in `TiquetData\migraciones`.
@@ -32,7 +32,7 @@ Upgrading from 1.0, 1.1 or 1.2: run the new installer over it. From 1.3 on Tique
 - **Red (IP):** a receipt printer with its own network port needs no driver: type the IP address it prints on its configuration sheet (the port is 9100 on nearly all of them).
 - **Bluetooth / COM:** pair the printer in Windows Settings > Bluetooth, then choose the outgoing COM port Windows gave it. Serial and USB-serial printers work the same way, at the speed set there.
 
-Picking a printer from the list sets the kind: a receipt printer prints raw, any other as a document.
+Picking a printer from the list sets the kind: a receipt printer prints raw, any other as a document. The paper width comes from the printer's Windows driver when it says (58 mm rolls print 32 characters a line, 80 mm rolls 48); **Papel** changes it by hand.
 
 ## What it does
 
@@ -48,7 +48,7 @@ Picking a printer from the list sets the kind: a receipt printer prints raw, any
 - **Printing that tells the truth.** A ticket counts as printed once Windows has let go of it, or once a network printer has taken all of it. If the printer is off or out of paper the job is cancelled, so nothing prints and no drawer opens later on its own. The first print is the original; every other one says COPIA.
 - **Cash drawer.** Opening float, cash in and out with a reason, and a closing count against what the sales say, with a printed Z report.
 - **Admin.** Products (CSV import that picks the sale price and keeps barcodes), users with roles, sales reports by day or month, discounts and price changes made at the till, a printable summary, CSV export and a VAT book (libro de IVA) for the accountant. Training mode for learning: its sales never count and can be wiped.
-- **Shop identity.** Logo or photo on the ticket (converted to black and white for thermal paper), trade name and owner's name, header, footer, numbering prefix.
+- **Shop identity.** Logo or photo on the ticket (converted to black and white for thermal paper), trade name and owner's name, header, footer, numbering prefix. **Ajustes > Ticket** chooses which shop details print (NIF, address, phone, cashier): without the NIF the ticket is titled TICKET instead of factura simplificada. Invoices with customer details and VERI\*FACTU always print the NIF.
 - **Never loses a sale.** The sale is stored, with a full disk sync, before printing. The cart survives a crash or power cut and is never charged twice. A restored backup never reuses a ticket number already handed out. A database backup is taken every day and can be restored from Ajustes.
 - **Runs on its own.** Updates itself, can open when Windows starts, sign a user in as it opens and fill the screen, and **Guardar diagnóstico** writes a zip with the log and the state of Tiquet (no database, no passwords) to send to whoever gives support.
 - **VERI\*FACTU** (Real Decreto 1007/2023), off until switched on: every ticket, return and void leaves a billing record chained by its SHA-256 huella and sent to the AEAT with the owner's electronic certificate, and the ticket carries the AEAT's QR.
@@ -72,10 +72,10 @@ Picking a printer from the list sets the kind: a receipt printer prints raw, any
 
 **Reparaciones** in the top bar lists the phones in the shop, with filters by status and a search by number, name, phone or IMEI. Cashiers and administrators use it alike; only an administrator can cancel a repair.
 
-1. **Nueva reparación**: the customer's name and phone, the device (make, model, colour), the IMEI or serial number, the fault as the customer tells it, the estimate if there is one, and the deposit if one is paid. The resguardo on the right is what will print. Internal notes stay in the shop and never print.
+1. **Nueva reparación**: the customer's name and phone, the device (make from a row of brand buttons, model from that brand's list, colour), the IMEI or serial number, the fault as the customer tells it, the estimate if there is one, and the deposit if one is paid. The resguardo on the right is what will print. Internal notes stay in the shop and never print.
 2. **Guardar e imprimir** prints the deposit ticket, which opens the drawer when paid in cash. Then it prints the resguardo for the customer and the slip that goes with the phone.
 3. As the work goes on, set the status: Recibido, En curso, Listo or No reparado. Every change is kept with who made it and when.
-4. When the customer comes back, **Entregar y cobrar** asks for the final price and takes off the deposit. The rest goes to Venta as a line "Reparación REP2026-000001: device". Issuing that ticket marks the repair as delivered, and the ticket line keeps the repair it belongs to. With nothing left to pay, the phone is handed back straight away.
+4. When the customer comes back, **Entregar y cobrar** asks for the final price and takes off the deposit. The rest goes to Venta as a line "Reparación REP2026-000001: device". Issuing that ticket marks the repair as delivered, and the ticket line keeps the repair it belongs to. With nothing left to pay, the phone is handed back straight away. **Justificante de entrega** prints a pickup receipt with a line for the customer to sign; the shop keeps it with the resguardo the customer hands back.
 
 Rules:
 

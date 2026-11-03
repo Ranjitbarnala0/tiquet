@@ -28,7 +28,7 @@ export function Setup({ lang, onLang, onDone }: { lang: Lang; onLang: (l: Lang) 
   const mismatch = f.confirm.length > 0 && f.password !== f.confirm;
   const short = f.password.length > 0 && f.password.length < 6;
   const badNif = f.shopNif.trim().length > 0 && !spanishNif(f.shopNif);
-  const valid = f.shopName.trim() && spanishNif(f.shopNif) && f.adminName.trim() && f.password.length >= 6 && f.password === f.confirm;
+  const valid = f.shopName.trim() && !badNif && f.adminName.trim() && f.password.length >= 6 && f.password === f.confirm;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -96,7 +96,11 @@ export function Setup({ lang, onLang, onDone }: { lang: Lang; onLang: (l: Lang) 
             <Field label={tr('Teléfono', 'Phone')}>
               <input value={f.shopPhone} onChange={set('shopPhone')} placeholder="972 000 000" />
             </Field>
-            <Field label="NIF / CIF" error={badNif ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined} hint={tr('Sale en cada ticket', 'Printed on every ticket')}>
+            <Field
+              label={tr('NIF / CIF (opcional)', 'NIF / CIF (optional)')}
+              error={badNif ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}
+              hint={tr('Con NIF el ticket sale como factura simplificada; sin él, como ticket sencillo.', 'With a NIF the ticket is a simplified invoice; without one, a simple ticket.')}
+            >
               <input value={f.shopNif} onChange={(e) => setF({ ...f, shopNif: e.target.value.toUpperCase() })} placeholder="B12345674" />
             </Field>
           </div>

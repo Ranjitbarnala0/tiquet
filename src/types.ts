@@ -36,6 +36,10 @@ export interface Settings {
   ticketPrefix: string;
   defaultVatBp: number;
   showVat: boolean;
+  ticketNif: boolean;
+  ticketAddress: boolean;
+  ticketPhone: boolean;
+  ticketCashier: boolean;
   printerName: string;
   printerKind: PrinterKind;
   printerHost: string;
@@ -350,6 +354,8 @@ export interface PrinterEntry {
   virtual: boolean;
   default: boolean;
   receipt: boolean;
+  // characters per line for the paper its driver is set up for
+  columns: number | null;
 }
 
 export interface PortEntry {

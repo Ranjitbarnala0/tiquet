@@ -129,7 +129,8 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
   // a receipt printer gets raw tickets; any other prints them as a document
   const pickPrinter = (name: string) => {
     const p = printers?.find((x) => x.name === name);
-    setD((prev) => ({ ...prev, printerName: name, printerKind: p ? (p.receipt ? 'windows' : 'document') : prev.printerKind }));
+    // the paper its driver is set up for, when it says
+    setD((prev) => ({ ...prev, printerName: name, printerKind: p ? (p.receipt ? 'windows' : 'document') : prev.printerKind, columns: p?.columns ?? prev.columns }));
   };
 
   useEffect(() => {
@@ -331,14 +332,9 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   <input value={d.shopPhone} onChange={(e) => set('shopPhone', e.target.value)} />
                 </Field>
                 <Field
-                  label="NIF / CIF"
-                  error={
-                    !d.shopNif.trim()
-                      ? tr('Sin NIF los tickets no son válidos', 'Without a NIF the tickets are not valid')
-                      : !spanishNif(d.shopNif)
-                        ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match')
-                        : undefined
-                  }
+                  label={tr('NIF / CIF (opcional)', 'NIF / CIF (optional)')}
+                  error={d.shopNif.trim() && !spanishNif(d.shopNif) ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}
+                  hint={!d.shopNif.trim() ? tr('Sin NIF los tickets salen como ticket sencillo, no como factura.', 'Without a NIF, tickets print as simple tickets, not invoices.') : undefined}
                 >
                   <input value={d.shopNif} onChange={(e) => set('shopNif', e.target.value.toUpperCase())} />
                 </Field>
@@ -457,6 +453,14 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 </Field>
               </div>
               <Toggle checked={d.showVat} onChange={(v) => set('showVat', v)} label={tr('Imprimir desglose de IVA', 'Print VAT breakdown')} hint={tr('Base, cuota y total por tipo de IVA', 'Net, VAT and total per rate')} />
+              <Field label={tr('Datos del comercio en el ticket', 'Shop details on the ticket')} hint={tr('Quita lo que no quieras imprimir. Sin NIF, el ticket sale como «TICKET» en vez de factura simplificada. Las facturas con datos del cliente siempre llevan NIF y dirección.', 'Leave out what you do not want printed. Without the NIF the ticket says "TICKET" instead of simplified invoice. Invoices with customer details always carry the NIF and address.')}>
+                <div className="grid2">
+                  <Toggle checked={d.ticketNif || d.verifactu !== 'off'} onChange={(v) => set('ticketNif', v)} label={tr('NIF', 'NIF')} hint={d.verifactu !== 'off' ? tr('Obligatorio con VERI*FACTU', 'Required with VERI*FACTU') : undefined} />
+                  <Toggle checked={d.ticketAddress} onChange={(v) => set('ticketAddress', v)} label={tr('Dirección', 'Address')} />
+                  <Toggle checked={d.ticketPhone} onChange={(v) => set('ticketPhone', v)} label={tr('Teléfono', 'Phone')} />
+                  <Toggle checked={d.ticketCashier} onChange={(v) => set('ticketCashier', v)} label={tr('«Le atendió» (cajero)', '"Served by" (cashier)')} />
+                </div>
+              </Field>
             </div>
           )}
 
@@ -553,7 +557,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                       {printers?.map((p) => (
                         <option key={p.name} value={p.name} disabled={opensWindows(p) && p.name !== d.printerName}>
                           {p.name}
-                          {p.receipt ? ` · ${tr('tickets', 'receipt')}` : p.virtual ? ` · ${tr('guarda archivos', 'saves files')}` : ''}
+                          {p.receipt ? ` · ${tr('tickets', 'receipt')}${p.columns ? ` ${p.columns === 32 ? '58' : '80'} mm` : ''}` : p.virtual ? ` · ${tr('guarda archivos', 'saves files')}` : ''}
                           {p.default ? ` (${tr('predeterminada', 'default')})` : ''}
                         </option>
                       ))}
