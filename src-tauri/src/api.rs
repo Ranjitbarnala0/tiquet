@@ -16,7 +16,7 @@ use crate::settings::{self, Logo, Settings};
 use crate::state::{AppState, SessionUser};
 use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
 use crate::verifactu::{self, Env};
-use crate::{aeat, auth, backup, cash, diag, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
+use crate::{aeat, auth, backup, book, cash, diag, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
 
 // key of the recovery code's own attempt counter (no user has id 0)
 const RECOVERY: i64 = 0;
@@ -472,6 +472,60 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             to(row)
         }
 
+        // the book: sales without a ticket and expenses, one line each, with
+        // the tickets beside them; a cashier sees today, the owner any day
+        "book.add" => {
+            let me = st.user()?;
+            let conn = st.conn();
+            let s = settings::load(&conn)?;
+            let (entry, duplicate) = book::add(&conn, &me, &s, parse(a)?)?;
+            if !duplicate {
+                log::info(format!("book: {} {} {} by {}", entry.kind, entry.concept, money::fmt(entry.cents), me.name));
+            }
+            Ok(json!({ "entry": entry, "duplicate": duplicate }))
+        }
+        "book.list" => {
+            let me = st.user()?;
+            let admin = me.role == "admin";
+            let mut range: reports::Range = parse(a.clone())?;
+            if !admin {
+                let today = tickets::now()[..10].to_string();
+                range = reports::Range { from: today.clone(), to: today };
+            }
+            let conn = st.conn();
+            let s = settings::load(&conn)?;
+            let rows = book::rows(&conn, &range, s.training, admin && flag(&a, "deleted", false))?;
+            let summary = book::summary(&rows);
+            Ok(json!({ "rows": rows, "summary": summary, "from": range.from, "to": range.to, "staffDelete": s.book_staff_delete }))
+        }
+        "book.delete" => {
+            let me = st.user()?;
+            let conn = st.conn();
+            let staff = settings::load(&conn)?.book_staff_delete;
+            let reason = a.get("reason").and_then(Value::as_str).unwrap_or_default();
+            let e = book::delete(&conn, &me, staff, id(&a)?, reason)?;
+            log::info(format!("book: {} {} deleted by {}", e.concept, money::fmt(e.cents), me.name));
+            to(e)
+        }
+        "book.restore" => {
+            let me = st.user()?;
+            let conn = st.conn();
+            let staff = settings::load(&conn)?.book_staff_delete;
+            to(book::restore(&conn, &me, staff, id(&a)?)?)
+        }
+        "book.quick" => {
+            st.user()?;
+            let conn = st.conn();
+            let training = settings::load(&conn)?.training;
+            to(book::quick(&conn, training)?)
+        }
+        "book.export" => {
+            st.admin()?;
+            let r: reports::Range = parse(a)?;
+            let path = book::export(&st.conn(), &r)?;
+            Ok(json!({ "path": path.to_string_lossy() }))
+        }
+
         "cash.state" => {
             st.user()?;
             let conn = st.conn();
@@ -533,6 +587,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         "training.wipe" => {
             let me = st.admin()?;
             let n = tickets::wipe_training(&mut st.conn())?;
+            book::wipe_training(&st.conn())?;
             log::info(format!("{n} practice tickets wiped by {}", me.name));
             Ok(json!({ "deleted": n }))
         }
@@ -1864,5 +1919,33 @@ mod tests {
         let s = settings::load(&st.conn()).unwrap();
         let text: Vec<String> = layout::repair_delivery(&rr, &s, false).iter().filter_map(|l| match l { layout::Line::Text { text, .. } => Some(text.clone()), _ => None }).collect();
         assert!(text.iter().any(|l| l.contains("JUSTIFICANTE DE ENTREGA")) && text.iter().any(|l| l.contains("iPhone 13")), "{text:?}");
+    }
+    #[test]
+    fn the_book_counts_in_the_cash_drawer_and_the_owner_sees_deletions() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        dispatch(&st, "cash.open", json!({ "floatCents": 5000 })).unwrap();
+        dispatch(&st, "sale.finalize", sale()).unwrap();
+        let add = |kind: &str, concept: &str, cents: i64, method: &str| {
+            dispatch(&st, "book.add", json!({ "kind": kind, "concept": concept, "cents": cents, "method": method })).unwrap()["entry"]["id"].as_i64().unwrap()
+        };
+        let recarga = add("sale", "Recarga", 1000, "cash");
+        add("sale", "Funda", 1500, "card");
+        add("expense", "Café", 400, "cash");
+        let d = dispatch(&st, "cash.state", json!({})).unwrap();
+        assert_eq!((d["bookCents"].as_i64(), d["expectedCents"].as_i64()), (Some(600), Some(5000 + 690 + 600)));
+        let today = tickets::now()[..10].to_string();
+        let list = dispatch(&st, "book.list", json!({ "from": today, "to": today })).unwrap();
+        let sum = &list["summary"];
+        assert_eq!((sum["ticketCents"].as_i64(), sum["saleCents"].as_i64(), sum["expenseCents"].as_i64()), (Some(690), Some(2500), Some(400)));
+        assert_eq!(sum["resultCents"].as_i64(), Some(690 + 2500 - 400));
+        dispatch(&st, "book.delete", json!({ "id": recarga })).unwrap();
+        let d = dispatch(&st, "cash.state", json!({})).unwrap();
+        assert_eq!(d["expectedCents"].as_i64(), Some(5000 + 690 - 400));
+        let seen = dispatch(&st, "book.list", json!({ "from": today, "to": today, "deleted": true })).unwrap();
+        assert!(seen["rows"].as_array().unwrap().iter().any(|r| r["id"] == recarga && r["gone"] == true && r["source"] == "sale"));
+        let path = dispatch(&st, "book.export", json!({ "from": today, "to": today })).unwrap()["path"].as_str().unwrap().to_string();
+        let csv = std::fs::read_to_string(path).unwrap();
+        assert!(csv.contains("Funda") && csv.contains("Café") && !csv.contains("Recarga") && csv.contains("Venta con ticket"));
     }
 }

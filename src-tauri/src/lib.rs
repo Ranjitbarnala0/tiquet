@@ -2,6 +2,7 @@ pub mod aeat;
 pub mod api;
 pub mod auth;
 pub mod backup;
+pub mod book;
 pub mod cash;
 pub mod codepage;
 pub mod db;

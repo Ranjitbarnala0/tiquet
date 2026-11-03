@@ -28,6 +28,7 @@ import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
 import { customerNif } from './nif';
 import { Paper } from './Paper';
+import { QuickSaleModal } from './Book';
 import { ShareDialog } from './Share';
 import { useToast } from './toast';
 import type { CartLine, CashDrawer, CashSession, Customer, Finalized, Logo, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
@@ -274,6 +275,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [busy, setBusy] = useState(false);
   const [last, setLast] = useState<TicketRecord | null>(null);
   const [sharing, setSharing] = useState<TicketRecord | null>(null);
+  // F8: a sale without a ticket, or an expense, into the book
+  const [quickBook, setQuickBook] = useState(false);
   // the add/change dialog: 'add', or the key of the line being changed
   const [item, setItem] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>(storedTab);
@@ -802,6 +805,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         setItem('add');
         return;
       }
+      if (e.key === 'F8') {
+        e.preventDefault();
+        setQuickBook(true);
+        return;
+      }
       if (e.key === 'F2') {
         e.preventDefault();
         searchRef.current?.focus();
@@ -906,6 +914,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
             <Plus size={20} />
             <span>{tr('Artículo', 'Item')}</span>
             <kbd>F4</kbd>
+          </button>
+          <button className="btn-nt" onMouseDown={keep} onClick={() => setQuickBook(true)} title={tr('Apuntar en el Libro una venta sin ticket o un gasto', 'Put a sale without a ticket, or an expense, in the Book')}>
+            <span>{tr('Sin ticket', 'No ticket')}</span>
+            <kbd>F8</kbd>
           </button>
         </div>
 
@@ -1301,6 +1313,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         </div>
       </aside>
       {sharing && <ShareDialog ticketId={sharing.id} number={sharing.number} onClose={() => setSharing(null)} />}
+      {quickBook && <QuickSaleModal settings={settings} onClose={() => setQuickBook(false)} />}
       {clock && (
         <ClockModal
           last={clock.last}

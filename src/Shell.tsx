@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { BadgeCheck, ChartColumn, FlaskConical, Lock, Maximize2, Minimize2, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet, Wrench } from 'lucide-react';
+import { BadgeCheck, BookOpen, ChartColumn, FlaskConical, Lock, Maximize2, Minimize2, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet, Wrench } from 'lucide-react';
 import { call, native } from './api';
+import { Book } from './Book';
 import { Cash } from './Cash';
 import { initials } from './format';
 import { errorText, tr, type Lang } from './i18n';
@@ -19,7 +20,7 @@ import { UpdateBar, useUpdate } from './Update';
 import { Users } from './Users';
 import { sendError, stuck } from './Verifactu';
 
-type Screen = 'sale' | 'tickets' | 'repairs' | 'cash' | 'products' | 'reports' | 'users' | 'settings';
+type Screen = 'sale' | 'tickets' | 'repairs' | 'cash' | 'book' | 'products' | 'reports' | 'users' | 'settings';
 export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'mail' | 'data' | 'verifactu';
 
 interface Props {
@@ -117,7 +118,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   }, []);
 
   useEffect(() => {
-    if (!admin && !['sale', 'tickets', 'repairs', 'cash'].includes(screen)) setScreen('sale');
+    if (!admin && !['sale', 'tickets', 'repairs', 'cash', 'book'].includes(screen)) setScreen('sale');
   }, [admin, screen]);
 
   // the core opened the window full screen if Ajustes says so; only the
@@ -265,6 +266,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
     { id: 'tickets', label: tr('Tickets', 'Tickets'), icon: ReceiptText },
     { id: 'repairs', label: tr('Reparaciones', 'Repairs'), icon: Wrench },
     { id: 'cash', label: tr('Caja', 'Till'), icon: Wallet },
+    { id: 'book', label: tr('Libro', 'Book'), icon: BookOpen },
   ];
   if (admin) {
     nav.push(
@@ -395,6 +397,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
           />
         )}
         {screen === 'cash' && <Cash user={user} />}
+        {screen === 'book' && <Book user={user} settings={settings} />}
         {screen === 'products' && admin && <Products settings={settings} onChanged={loadProducts} />}
         {screen === 'reports' && admin && <Reports />}
         {screen === 'users' && admin && <Users me={user} onMe={setUser} />}

@@ -752,6 +752,12 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 </Field>
               </div>
               <Toggle
+                checked={d.bookStaffDelete}
+                onChange={(v) => set('bookStaffDelete', v)}
+                label={tr('Los cajeros pueden borrar lo que apuntaron hoy en el Libro', 'Cashiers can delete what they put in the Book today')}
+                hint={tr('El administrador siempre puede borrar y ver lo borrado.', 'The administrator can always delete, and see what was deleted.')}
+              />
+              <Toggle
                 checked={d.autostart}
                 onChange={(v) => set('autostart', v)}
                 label={tr('Abrir Tiquet al encender el ordenador', 'Open Tiquet when the computer starts')}

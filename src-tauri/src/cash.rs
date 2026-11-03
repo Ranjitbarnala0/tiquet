@@ -38,6 +38,8 @@ pub struct Drawer {
     pub moves: Vec<Move>,
     // cash tickets since it was opened, returns included (negative)
     pub cash_cents: i64,
+    // cash sales typed in the book less expenses paid from the drawer
+    pub book_cents: i64,
     pub moves_cents: i64,
     pub expected_cents: i64,
 }
@@ -127,13 +129,14 @@ fn figures(conn: &Connection, s: &Session, until: &str) -> Result<(Vec<Move>, i6
 
 pub fn drawer(conn: &Connection, s: Option<Session>) -> Result<Drawer> {
     let Some(s) = s else {
-        return Ok(Drawer { session: None, moves: Vec::new(), cash_cents: 0, moves_cents: 0, expected_cents: 0 });
+        return Ok(Drawer { session: None, moves: Vec::new(), cash_cents: 0, book_cents: 0, moves_cents: 0, expected_cents: 0 });
     };
     let until = s.closed_at.clone().unwrap_or_else(now);
     let (moves, cash) = figures(conn, &s, &until)?;
+    let book = crate::book::cash_between(conn, &s.opened_at, &until)?;
     let moves_cents = moves.iter().map(|m| m.cents).sum::<i64>();
-    let expected = s.expected_cents.unwrap_or(s.float_cents + cash + moves_cents);
-    Ok(Drawer { session: Some(s), moves, cash_cents: cash, moves_cents, expected_cents: expected })
+    let expected = s.expected_cents.unwrap_or(s.float_cents + cash + book + moves_cents);
+    Ok(Drawer { session: Some(s), moves, cash_cents: cash, book_cents: book, moves_cents, expected_cents: expected })
 }
 
 pub fn close(conn: &mut Connection, by: &str, counted_cents: i64, note: &str) -> Result<Session> {

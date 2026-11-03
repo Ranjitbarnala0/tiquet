@@ -4157,3 +4157,96 @@ button.cart-name:hover > span:first-child {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* Venta: the book's quick entry, beside "+ Artículo" */
+.btn-nt {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  border: 1px solid var(--line-2);
+  border-radius: 16px;
+  background: var(--panel);
+  color: var(--ink);
+  font: 600 14px var(--display);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-nt:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* Libro */
+.quick-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.quick-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quick-input {
+  height: 44px;
+  min-width: 220px;
+  font-size: 16px;
+}
+
+.quick-input.expense {
+  border-color: #f0b5af;
+}
+
+.quick-more {
+  align-items: start;
+}
+
+.more-link {
+  align-self: flex-start;
+  font-size: 13px;
+}
+
+.book .neg,
+.book-table .neg {
+  color: var(--danger);
+}
+
+.book-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.book-table td.grow {
+  width: 100%;
+}
+
+.book-table .nowrap {
+  white-space: nowrap;
+}
+
+.book-table .concept {
+  font-weight: 560;
+}
+
+.book-table tr.gone td {
+  color: var(--faint);
+}
+
+.book-table tr.gone .concept,
+.book-table tr.gone td.num {
+  text-decoration: line-through;
+}
+
+.cat-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}

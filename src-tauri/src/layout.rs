@@ -705,6 +705,9 @@ pub fn cash_close(s: &Settings, session: &Session, drawer: &Drawer, sum: &Summar
     d.center("EFECTIVO", true, Size::Normal);
     d.pair("Fondo inicial", &fmt(session.float_cents), false, Size::Normal);
     d.pair("Ventas en efectivo", &fmt(drawer.cash_cents), false, Size::Normal);
+    if drawer.book_cents != 0 {
+        d.pair("Libro: sin ticket y gastos", &fmt(drawer.book_cents), false, Size::Normal);
+    }
     for m in &drawer.moves {
         d.pair(&m.reason, &fmt(m.cents), false, Size::Normal);
     }

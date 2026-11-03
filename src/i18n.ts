@@ -179,6 +179,8 @@ const fields: Record<string, [string, string]> = {
   requestId: ['identificador del formulario', 'form identifier'],
   ticketPrefix: ['prefijo de numeración (RE y REP son de las reparaciones)', 'numbering prefix (RE and REP belong to repairs)'],
   phone: ['teléfono (con prefijo si no es de España)', 'phone (with the country code if not Spanish)'],
+  kind: ['venta o gasto', 'sale or expense'],
+  date: ['fecha (no puede ser futura)', 'date (it cannot be in the future)'],
   email: ['email', 'email'],
   mailHost: ['servidor de correo', 'mail server'],
   mailFrom: ['dirección del remitente', 'sender address'],

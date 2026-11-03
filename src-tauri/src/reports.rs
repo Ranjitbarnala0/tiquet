@@ -19,7 +19,7 @@ pub struct Range {
 }
 
 impl Range {
-    fn bounds(&self) -> Result<(String, String)> {
+    pub(crate) fn bounds(&self) -> Result<(String, String)> {
         let ok = |d: &str| NaiveDate::parse_from_str(d, "%Y-%m-%d").is_ok();
         if !ok(&self.from) || !ok(&self.to) || self.from > self.to {
             return fail("E_INVALID:range");
@@ -246,12 +246,12 @@ fn collect(conn: &Connection, from: &str, to: &str, fill: Option<(NaiveDate, Nai
     Ok(s)
 }
 
-fn plain(cents: i64) -> String {
+pub(crate) fn plain(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
     format!("{sign}{},{:02}", cents.unsigned_abs() / 100, cents.unsigned_abs() % 100)
 }
 
-fn cell(s: &str) -> String {
+pub(crate) fn cell(s: &str) -> String {
     // a product typed as =HYPERLINK(...) must open as text, not run
     let s = if s.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{s}") } else { s.to_string() };
     if s.contains([';', '"', '\n', '\r']) {

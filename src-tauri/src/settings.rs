@@ -49,6 +49,9 @@ pub struct Settings {
     pub auto_lock_min: u32,
     // the user signed in when Tiquet opens, with no password asked; 0 asks
     pub auto_login: i64,
+    // cashiers may delete what they typed in the book today; the owner may
+    // delete anything
+    pub book_staff_delete: bool,
     // practice mode: sales get their own series, print as not valid and
     // never count anywhere
     pub training: bool,
@@ -99,6 +102,7 @@ impl Default for Settings {
             lang: "es".into(),
             auto_lock_min: 0,
             auto_login: 0,
+            book_staff_delete: true,
             training: false,
             verifactu: "off".into(),
             cert: String::new(),

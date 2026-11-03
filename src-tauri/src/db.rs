@@ -398,6 +398,57 @@ CREATE TRIGGER repair_events_no_delete BEFORE DELETE ON repair_events
 BEGIN SELECT RAISE(ABORT, 'repair history cannot change'); END;
 "#;
 
+// The book: sales made without a ticket and expenses, typed in one line. An
+// entry never changes and is never removed; a deletion is a mark with who
+// made it, and every addition, deletion and undo is kept in book_events.
+// Practice entries (training) are the only ones that can be wiped.
+const SCHEMA_V9: &str = r#"
+CREATE TABLE book (
+  id            INTEGER PRIMARY KEY,
+  kind          TEXT NOT NULL CHECK (kind IN ('sale', 'expense')),
+  at            TEXT NOT NULL,
+  concept       TEXT NOT NULL,
+  cents         INTEGER NOT NULL CHECK (cents > 0),
+  method        TEXT NOT NULL CHECK (method IN ('cash', 'card', 'bizum', 'transfer')),
+  vat_bp        INTEGER NOT NULL CHECK (vat_bp BETWEEN 0 AND 10000),
+  category      TEXT NOT NULL,
+  supplier      TEXT NOT NULL,
+  supplier_nif  TEXT NOT NULL,
+  invoice_ref   TEXT NOT NULL,
+  by_name       TEXT NOT NULL,
+  training      INTEGER NOT NULL DEFAULT 0,
+  client_id     TEXT,
+  deleted_at    TEXT,
+  deleted_by    TEXT,
+  delete_reason TEXT
+);
+CREATE INDEX book_at ON book (at);
+CREATE UNIQUE INDEX book_client ON book (client_id) WHERE client_id IS NOT NULL;
+
+CREATE TABLE book_events (
+  id       INTEGER PRIMARY KEY,
+  entry_id INTEGER NOT NULL REFERENCES book (id),
+  at       TEXT NOT NULL,
+  by_name  TEXT NOT NULL,
+  kind     TEXT NOT NULL CHECK (kind IN ('added', 'deleted', 'restored')),
+  detail   TEXT
+);
+CREATE INDEX book_events_entry ON book_events (entry_id);
+
+CREATE TRIGGER book_no_delete BEFORE DELETE ON book WHEN OLD.training = 0
+BEGIN SELECT RAISE(ABORT, 'book entries are kept'); END;
+
+CREATE TRIGGER book_fixed BEFORE UPDATE OF id, kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif,
+  invoice_ref, by_name, training, client_id ON book
+BEGIN SELECT RAISE(ABORT, 'a book entry does not change'); END;
+
+CREATE TRIGGER book_events_frozen BEFORE UPDATE ON book_events
+BEGIN SELECT RAISE(ABORT, 'book history cannot change'); END;
+CREATE TRIGGER book_events_no_delete BEFORE DELETE ON book_events
+WHEN (SELECT training FROM book WHERE id = OLD.entry_id) = 0
+BEGIN SELECT RAISE(ABORT, 'book history cannot change'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -413,6 +464,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V6)],
     &[Step::Sql(SCHEMA_V7)],
     &[Step::Sql(SCHEMA_V8)],
+    &[Step::Sql(SCHEMA_V9)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

@@ -58,6 +58,7 @@ export interface Settings {
   lang: Lang;
   autoLockMin: number;
   autoLogin: number;
+  bookStaffDelete: boolean;
   training: boolean;
   verifactu: 'off' | 'test' | 'prod';
   cert: string;
@@ -88,6 +89,8 @@ export interface CashDrawer {
   session: CashSession | null;
   moves: { at: string; byName: string; cents: number; reason: string }[];
   cashCents: number;
+  // sales typed in the book less expenses, in cash
+  bookCents: number;
   movesCents: number;
   expectedCents: number;
 }
