@@ -1,10 +1,10 @@
-Download `Tiquet_1.8.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.8.1_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading from 1.3 or later:** Tiquet offers this version by itself; press **Actualizar ahora**. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.8: **everything on one page, and a new look.**
+New in 1.8: **everything on one page, and a new look.** (1.8.1 is 1.8.0 built again: Windows Defender mistook the 1.8.0 installer for a threat.)
 
 - **One main page.** Every sale is made in **Venta**. With a ticket or without one is now just a switch: **Imprimir ticket** on or off (F6). A sale that does not print is a normal numbered sale, and can still be printed later.
 - **The box is always ready.** Start typing or scanning anywhere and it lands in the box, with no click. `funda 10` adds an item, `-pantalla 45` saves an expense, `recarga 10` saves a recharge, `-10%` takes 10% off.

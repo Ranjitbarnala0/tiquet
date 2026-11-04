@@ -89,7 +89,12 @@ jobs:
           if (-not $p.signature) { throw 'latest.json carries no signature' }
           if (-not $p.url.Contains("/download/$env:GITHUB_REF_NAME/")) { throw "latest.json points at $($p.url)" }
 
-      - name: Publish
+      # A draft: nobody is offered it yet. Windows Defender's cloud can take
+      # minutes to judge a new unsigned installer and some builds come back
+      # as a false positive, so the release is made public by hand, once
+      # fresh copies of this exact file have stayed clean for a while:
+      #   gh release edit <tag> --draft=false --latest
+      - name: Publish as a draft
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -100,19 +105,4 @@ jobs:
           "$hash  $($setup.Name)" | Set-Content -Encoding ascii $sum
           $notes = (Get-Content .github/release-notes.md -Raw) + "`n`nSHA-256 of ``$($setup.Name)``: ``$hash``"
           Set-Content -Encoding utf8 notes.md $notes
-          gh release create $env:GITHUB_REF_NAME $setup.FullName $sum latest.json --title "Tiquet $($env:GITHUB_REF_NAME.TrimStart('v'))" --notes-file notes.md
-
-      # installed copies ask this address, so it has to offer this version now
-      - name: Installed copies are offered this version
-        shell: pwsh
-        run: |
-          $url = "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download/latest.json"
-          foreach ($i in 1..10) {
-            try {
-              Invoke-WebRequest $url -OutFile served.json
-              $m = Get-Content served.json -Raw | ConvertFrom-Json
-              if ("v$($m.version)" -eq $env:GITHUB_REF_NAME) { "$url offers $($m.version)"; exit 0 }
-            } catch { $_.Exception.Message }
-            Start-Sleep -Seconds 15
-          }
-          throw "$url does not offer $env:GITHUB_REF_NAME"
+          gh release create $env:GITHUB_REF_NAME $setup.FullName $sum latest.json --draft --title "Tiquet $($env:GITHUB_REF_NAME.TrimStart('v'))" --notes-file notes.md
