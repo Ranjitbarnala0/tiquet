@@ -18,6 +18,9 @@ use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, Ti
 use crate::verifactu::{self, Env};
 use crate::{aeat, auth, backup, book, cash, diag, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
 
+// the screen shows the newest of a long period; the totals count them all
+const DAY_ROWS: usize = 1500;
+
 // key of the recovery code's own attempt counter (no user has id 0)
 const RECOVERY: i64 = 0;
 
@@ -302,13 +305,29 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 Err(e) => Err(e),
             }
         }
+        // Deleting a sale voids it: it stays on record with who and when, and
+        // leaves every list and total. A cashier deletes what they sold today,
+        // when Ajustes allows it; the owner any sale, or today's alone once
+        // VERI*FACTU is on.
         "tickets.void" => {
-            let me = st.admin()?;
-            let reason = a.get("reason").and_then(Value::as_str).unwrap_or_default();
-            tickets::void(&mut st.conn(), id(&a)?, &me.name, reason)?;
+            let me = st.user()?;
+            let t = id(&a)?;
+            let reason = match a.get("reason").and_then(Value::as_str).map(str::trim) {
+                Some(r) if !r.is_empty() => r.to_string(),
+                _ => format!("Borrado por {}", me.name),
+            };
+            {
+                let mut conn = st.conn();
+                let s = settings::load(&conn)?;
+                let admin = me.role == "admin";
+                if !admin && (!s.book_staff_delete || tickets::load(&conn, t)?.user_name != me.name) {
+                    return fail("E_FORBIDDEN");
+                }
+                tickets::void_on(&mut conn, t, &me.name, &reason, admin && verifactu::Env::of(&s).is_none())?;
+            }
             aeat::kick();
-            log::info(format!("ticket {} voided by {}: {reason}", id(&a)?, me.name));
-            ticket_get(st, id(&a)?)
+            log::info(format!("ticket {t} voided by {}: {reason}", me.name));
+            ticket_get(st, t)
         }
         "tickets.refund" => {
             let me = st.admin()?;
@@ -439,7 +458,11 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
 
         "reports.summary" => {
             st.admin()?;
-            to(reports::summary(&st.conn(), &parse(a)?)?)
+            let r: reports::Range = parse(a)?;
+            let conn = st.conn();
+            let mut out = to(reports::summary(&conn, &r)?)?;
+            out["day"] = to(book::summary(&book::rows(&conn, &r, false, false)?))?;
+            Ok(out)
         }
         "reports.print" => {
             let me = st.admin()?;
@@ -448,7 +471,8 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let conn = st.conn();
                 let s = settings::load(&conn)?;
                 let sum = reports::summary(&conn, &r)?;
-                (layout::summary(&sum, &r.from, &r.to, &s, &me.name), s)
+                let day = book::summary(&book::rows(&conn, &r, false, false)?);
+                (layout::summary(&sum, &day, &r.from, &r.to, &s, &me.name), s)
             };
             let job = Job::doc(&lines, None, &Opts::new(&s, false));
             let warning = printer::send_job(&st.sink, &s, "resumen", &job)?;
@@ -481,19 +505,38 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             to(row)
         }
 
-        // the book: sales without a ticket and expenses, one line each, with
-        // the tickets beside them; a cashier sees today, the owner any day
+        // recharges and expenses, one line each. Either way money moves, so the
+        // drawer opens like it does for a sale.
         "book.add" => {
             let me = st.user()?;
-            let conn = st.conn();
-            let s = settings::load(&conn)?;
-            let (entry, duplicate) = book::add(&conn, &me, &s, parse(a)?)?;
+            let (entry, duplicate, s) = {
+                let conn = st.conn();
+                let s = settings::load(&conn)?;
+                let (entry, duplicate) = book::add(&conn, &me, &s, parse(a)?)?;
+                (entry, duplicate, s)
+            };
             if !duplicate {
                 log::info(format!("book: {} {} {} by {}", entry.kind, entry.concept, money::fmt(entry.cents), me.name));
+                if drawer_opens(&s, &entry.method) {
+                    printer::send_detached(&st.sink, &s, "cajon", &escpos::kick(&s));
+                }
             }
             Ok(json!({ "entry": entry, "duplicate": duplicate }))
         }
-        "book.list" => {
+        // a receipt for a recharge, when the customer asks for one
+        "book.print" => {
+            st.user()?;
+            let (lines, s) = {
+                let conn = st.conn();
+                let s = settings::load(&conn)?;
+                (layout::recharge_slip(&book::get(&conn, id(&a)?)?, &s), s)
+            };
+            let warning = printer::send_job(&st.sink, &s, "recarga", &Job::doc(&lines, None, &Opts::new(&s, false)))?;
+            Ok(json!({ "warning": warning }))
+        }
+        // the day: sales, recharges and expenses with their totals. A cashier
+        // sees today, the owner any period and what was deleted.
+        "day.list" => {
             let me = st.user()?;
             let admin = me.role == "admin";
             let mut range: reports::Range = parse(a.clone())?;
@@ -503,9 +546,56 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             }
             let conn = st.conn();
             let s = settings::load(&conn)?;
-            let rows = book::rows(&conn, &range, s.training, admin && flag(&a, "deleted", false))?;
+            let mut rows = book::rows(&conn, &range, s.training, admin && flag(&a, "deleted", false))?;
             let summary = book::summary(&rows);
-            Ok(json!({ "rows": rows, "summary": summary, "from": range.from, "to": range.to, "staffDelete": s.book_staff_delete }))
+            let hidden = !admin && !s.staff_totals;
+            let capped = rows.len() > DAY_ROWS;
+            rows.truncate(DAY_ROWS);
+            Ok(json!({
+                "rows": rows,
+                "summary": if hidden { Value::Null } else { to(summary)? },
+                "from": range.from,
+                "to": range.to,
+                "capped": capped,
+                "staffDelete": s.book_staff_delete,
+                "anyDay": admin && verifactu::Env::of(&s).is_none(),
+            }))
+        }
+        // the figures under the main page, after every sale
+        "day.totals" => {
+            let me = st.user()?;
+            let conn = st.conn();
+            let s = settings::load(&conn)?;
+            if me.role != "admin" && !s.staff_totals {
+                return Ok(Value::Null);
+            }
+            let today = tickets::now()[..10].to_string();
+            let range = reports::Range { from: today.clone(), to: today };
+            to(book::summary(&book::rows(&conn, &range, s.training, false)?))
+        }
+        // A whole day, or only its sales, recharges or expenses, out of every
+        // list and total, for the owner. Nothing is erased: each ticket is
+        // voided and each entry marked, with who and why.
+        "day.delete" => {
+            let me = st.admin()?;
+            let date = a.get("date").and_then(Value::as_str).unwrap_or_default().to_string();
+            reports::Range { from: date.clone(), to: date.clone() }.bounds()?;
+            let what = a.get("what").and_then(Value::as_str).unwrap_or("all").to_string();
+            if !["all", "sales", "recharges", "expenses"].contains(&what.as_str()) {
+                return fail("E_INVALID:kind");
+            }
+            let reason = match a.get("reason").and_then(Value::as_str).map(str::trim) {
+                Some(r) if !r.is_empty() => r.to_string(),
+                _ => format!("Día borrado por {}", me.name),
+            };
+            let gone = {
+                let mut conn = st.conn();
+                let s = settings::load(&conn)?;
+                tickets::void_day(&mut conn, &me.name, &date, s.training, &reason, verifactu::Env::of(&s).is_none(), &what)?
+            };
+            aeat::kick();
+            log::warn(format!("day {date} ({what}) deleted by {}: {} tickets, {} entries, {reason}", me.name, gone.tickets, gone.entries));
+            to(gone)
         }
         "book.delete" => {
             let me = st.user()?;
@@ -1370,7 +1460,7 @@ mod tests {
         dispatch(&st, "login", json!({ "userId": jordi["id"], "password": "4321" })).unwrap();
         assert_eq!(st.data_dir.join("backups").read_dir().unwrap().count(), 1);
 
-        for cmd in ["users.list", "settings.save", "products.save", "reports.summary", "tickets.void", "backup.now", "printers.test"] {
+        for cmd in ["users.list", "settings.save", "products.save", "reports.summary", "day.delete", "backup.now", "printers.test"] {
             assert_eq!(dispatch(&st, cmd, json!({})).unwrap_err(), "E_FORBIDDEN", "{cmd}");
         }
         let preview = json!({ "sample": true, "settings": { "shopName": "X" } });
@@ -1987,31 +2077,92 @@ mod tests {
         assert!(text.iter().any(|l| l.contains("JUSTIFICANTE DE ENTREGA")) && text.iter().any(|l| l.contains("iPhone 13")), "{text:?}");
     }
     #[test]
-    fn the_book_counts_in_the_cash_drawer_and_the_owner_sees_deletions() {
+    fn sales_recharges_and_expenses_add_up_and_a_sale_need_not_print() {
         let st = state(|d| PrintSink::Dir(d.join("prints")));
         setup(&st);
         dispatch(&st, "cash.open", json!({ "floatCents": 5000 })).unwrap();
-        dispatch(&st, "sale.finalize", sale()).unwrap();
+        let charge = |method: &str, print: bool| {
+            let args = json!({ "lines": sale()["lines"], "payment": { "method": method }, "print": print });
+            dispatch(&st, "sale.finalize", args).unwrap()
+        };
+        charge("cash", true);
+        // not printing is the only difference: it is a numbered sale like any other
+        let quiet = charge("card", false);
+        assert_eq!(quiet["printed"], false);
+        assert!(quiet["ticket"]["number"].as_str().unwrap().starts_with('T'));
         let add = |kind: &str, concept: &str, cents: i64, method: &str| {
             dispatch(&st, "book.add", json!({ "kind": kind, "concept": concept, "cents": cents, "method": method })).unwrap()["entry"]["id"].as_i64().unwrap()
         };
-        let recarga = add("sale", "Recarga", 1000, "cash");
-        add("sale", "Funda", 1500, "card");
-        add("expense", "Café", 400, "cash");
+        let recarga = add("recharge", "", 1000, "cash");
+        add("expense", "Pantalla", 400, "cash");
         let d = dispatch(&st, "cash.state", json!({})).unwrap();
-        assert_eq!((d["bookCents"].as_i64(), d["expectedCents"].as_i64()), (Some(600), Some(5000 + 690 + 600)));
+        assert_eq!((d["rechargeCents"].as_i64(), d["expenseCents"].as_i64()), (Some(1000), Some(400)));
+        assert_eq!(d["expectedCents"].as_i64(), Some(5000 + 690 + 1000 - 400));
         let today = tickets::now()[..10].to_string();
-        let list = dispatch(&st, "book.list", json!({ "from": today, "to": today })).unwrap();
+        let list = dispatch(&st, "day.list", json!({ "from": today, "to": today })).unwrap();
         let sum = &list["summary"];
-        assert_eq!((sum["ticketCents"].as_i64(), sum["saleCents"].as_i64(), sum["expenseCents"].as_i64()), (Some(690), Some(2500), Some(400)));
-        assert_eq!(sum["resultCents"].as_i64(), Some(690 + 2500 - 400));
+        assert_eq!((sum["cashCents"].as_i64(), sum["cardCents"].as_i64(), sum["rechargeCents"].as_i64()), (Some(690), Some(690), Some(1000)));
+        assert_eq!((sum["totalCents"].as_i64(), sum["expenseCents"].as_i64()), (Some(2380), Some(1400)));
+        assert_eq!(sum["netCents"].as_i64(), Some(980));
+        assert_eq!(dispatch(&st, "day.totals", json!({})).unwrap()["totalCents"], 2380);
+        let rows = list["rows"].as_array().unwrap();
+        let printed: Vec<&str> = rows.iter().filter(|r| r["source"] == "ticket").map(|r| r["printed"].as_str().unwrap()).collect();
+        assert_eq!(printed, ["none", "printed"]);
+        dispatch(&st, "book.print", json!({ "id": recarga })).unwrap();
         dispatch(&st, "book.delete", json!({ "id": recarga })).unwrap();
         let d = dispatch(&st, "cash.state", json!({})).unwrap();
         assert_eq!(d["expectedCents"].as_i64(), Some(5000 + 690 - 400));
-        let seen = dispatch(&st, "book.list", json!({ "from": today, "to": today, "deleted": true })).unwrap();
-        assert!(seen["rows"].as_array().unwrap().iter().any(|r| r["id"] == recarga && r["gone"] == true && r["source"] == "sale"));
+        let seen = dispatch(&st, "day.list", json!({ "from": today, "to": today, "deleted": true })).unwrap();
+        assert!(seen["rows"].as_array().unwrap().iter().any(|r| r["id"] == recarga && r["gone"] == true && r["source"] == "recharge"));
         let path = dispatch(&st, "book.export", json!({ "from": today, "to": today })).unwrap()["path"].as_str().unwrap().to_string();
         let csv = std::fs::read_to_string(path).unwrap();
-        assert!(csv.contains("Funda") && csv.contains("Café") && !csv.contains("Recarga") && csv.contains("Venta con ticket"));
+        assert!(csv.contains("Pantalla") && !csv.contains("Recarga;") && csv.contains(";Venta;"));
+    }
+
+    #[test]
+    fn a_whole_day_goes_from_every_total_and_stays_on_record() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let first = dispatch(&st, "sale.finalize", sale()).unwrap()["ticket"]["id"].as_i64().unwrap();
+        dispatch(&st, "sale.finalize", sale()).unwrap();
+        dispatch(&st, "book.add", json!({ "kind": "expense", "concept": "Pantalla", "cents": 400 })).unwrap();
+        dispatch(&st, "book.add", json!({ "kind": "recharge", "cents": 1000 })).unwrap();
+        let today = tickets::now()[..10].to_string();
+        // only the expenses first: the sales and the recharge stay
+        let gone = dispatch(&st, "day.delete", json!({ "date": today, "what": "expenses" })).unwrap();
+        assert_eq!((gone["tickets"].as_i64(), gone["entries"].as_i64()), (Some(0), Some(1)));
+        assert_eq!(dispatch(&st, "day.totals", json!({})).unwrap()["totalCents"], 690 * 2 + 1000);
+        let gone = dispatch(&st, "day.delete", json!({ "date": today })).unwrap();
+        assert_eq!((gone["tickets"].as_i64(), gone["entries"].as_i64(), gone["kept"].as_i64()), (Some(2), Some(1), Some(0)));
+        let sum = dispatch(&st, "day.totals", json!({})).unwrap();
+        assert_eq!((sum["totalCents"].as_i64(), sum["expenseCents"].as_i64()), (Some(0), Some(0)));
+        // everything is still there for the owner, with who deleted it
+        let seen = dispatch(&st, "day.list", json!({ "from": today, "to": today, "deleted": true })).unwrap();
+        let rows = seen["rows"].as_array().unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|r| r["gone"] == true && r["deletedBy"] == "Ana"));
+        assert_eq!(dispatch(&st, "day.list", json!({ "from": today, "to": today })).unwrap()["rows"].as_array().unwrap().len(), 0);
+        // and the numbers were never freed: the next sale carries on after them
+        let next = dispatch(&st, "sale.finalize", sale()).unwrap()["ticket"]["id"].as_i64().unwrap();
+        assert!(next > first + 1);
+        assert_eq!(dispatch(&st, "tickets.void", json!({ "id": next })).unwrap()["ticket"]["voidReason"], "Borrado por Ana");
+        assert_eq!(dispatch(&st, "day.delete", json!({ "date": "no es una fecha" })).unwrap_err(), "E_INVALID:range");
+    }
+
+    #[test]
+    fn a_cashier_deletes_only_what_they_sold_today_and_never_a_day() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let admins = dispatch(&st, "sale.finalize", sale()).unwrap()["ticket"]["id"].as_i64().unwrap();
+        dispatch(&st, "users.save", json!({ "name": "Eva", "role": "cashier", "password": "1234", "active": true })).unwrap();
+        dispatch(&st, "logout", json!({})).unwrap();
+        let users = dispatch(&st, "bootstrap", json!({})).unwrap()["users"].clone();
+        let eva = users.as_array().unwrap().iter().find(|u| u["name"] == "Eva").unwrap()["id"].as_i64().unwrap();
+        dispatch(&st, "login", json!({ "userId": eva, "password": "1234" })).unwrap();
+        let hers = dispatch(&st, "sale.finalize", sale()).unwrap()["ticket"]["id"].as_i64().unwrap();
+        assert_eq!(dispatch(&st, "tickets.void", json!({ "id": admins })).unwrap_err(), "E_FORBIDDEN");
+        assert_eq!(dispatch(&st, "tickets.void", json!({ "id": hers })).unwrap()["ticket"]["voidedBy"], "Eva");
+        let today = tickets::now()[..10].to_string();
+        assert_eq!(dispatch(&st, "day.delete", json!({ "date": today })).unwrap_err(), "E_FORBIDDEN");
     }
 }

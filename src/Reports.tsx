@@ -3,7 +3,7 @@ import { ChartColumn, FileSpreadsheet, Printer } from 'lucide-react';
 import { call } from './api';
 import { addDays, dateTime, eur, fmt, isoDate, rate, shortDate } from './format';
 import { errorText, getLang, tr, warningText } from './i18n';
-import { MethodIcon, methodName } from './Tickets';
+import { MethodIcon, methodName } from './Day';
 import { useToast } from './toast';
 import type { Summary } from './types';
 import { Empty } from './ui';
@@ -251,6 +251,21 @@ export function Reports() {
             <div className="stat">
               <span>{tr('Unidades vendidas', 'Units sold')}</span>
               <b>{sum.items}</b>
+            </div>
+            {sum.day.rechargeCount > 0 && (
+              <div className="stat">
+                <span>{tr('Recargas', 'Recharges')}</span>
+                <b>{eur(sum.day.rechargeCents)}</b>
+                <small>{sum.day.rechargeCount}</small>
+              </div>
+            )}
+            <div className="stat">
+              <span>{tr('Gastos', 'Expenses')}</span>
+              <b>{eur(-sum.day.expenseCents)}</b>
+            </div>
+            <div className="stat">
+              <span>{tr('Queda', 'Left')}</span>
+              <b>{eur(sum.day.netCents)}</b>
             </div>
           </div>
 

@@ -967,12 +967,62 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<TicketSummary>> {
 // For a ticket issued by mistake, for a sale that never happened: a real
 // sale is corrected with a return. With VERI*FACTU it leaves an anulación.
 pub fn void(conn: &mut Connection, id: i64, by: &str, reason: &str) -> Result<()> {
+    void_on(conn, id, by, reason, false)
+}
+
+// `any_day`: an earlier day too, for the owner while nothing goes to the AEAT
+pub fn void_on(conn: &mut Connection, id: i64, by: &str, reason: &str, any_day: bool) -> Result<()> {
+    // IMMEDIATE: the anulación reads the end of the chain it joins
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    void_in(&tx, id, by, reason, any_day)?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[derive(Serialize, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DayGone {
+    pub tickets: i64,
+    pub entries: i64,
+    // sales with a return made another day stay, or that return would point
+    // at nothing
+    pub kept: i64,
+}
+
+// A day, or `what` of it (all | sales | recharges | expenses), taken out of
+// every list and total: each ticket voided and each typed entry marked, all
+// or nothing, newest first so a return goes before the sale it returns.
+// Nothing is erased: who, when and why stay on record.
+pub fn void_day(conn: &mut Connection, by: &str, date: &str, training: bool, reason: &str, any_day: bool, what: &str) -> Result<DayGone> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut gone = DayGone::default();
+    if matches!(what, "all" | "sales") {
+        if !any_day && date != &now()[..10] {
+            return fail("E_VOID_OLD");
+        }
+        let mut stmt = tx.prepare(
+            "SELECT id FROM tickets WHERE issued_at >= ?1 AND issued_at <= ?1 || 'T99' AND training = ?2 AND voided_at IS NULL ORDER BY id DESC",
+        )?;
+        let ids = stmt.query_map(params![date, training], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        for id in ids {
+            match void_in(&tx, id, by, reason, any_day) {
+                Ok(()) => gone.tickets += 1,
+                Err(e) if e.0 == "E_HAS_REFUNDS" => gone.kept += 1,
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    gone.entries = crate::book::delete_day(&tx, by, date, training, reason, what)?;
+    tx.commit()?;
+    Ok(gone)
+}
+
+fn void_in(tx: &Connection, id: i64, by: &str, reason: &str, any_day: bool) -> Result<()> {
     let reason: String = reason.trim().chars().take(200).collect();
     if reason.is_empty() {
         return fail("E_REASON");
     }
-    // IMMEDIATE: the anulación reads the end of the chain it joins
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let issued: Option<String> = tx
         .query_row("SELECT issued_at FROM tickets WHERE id = ?1 AND voided_at IS NULL", [id], |r| r.get(0))
         .optional()?;
@@ -980,7 +1030,7 @@ pub fn void(conn: &mut Connection, id: i64, by: &str, reason: &str) -> Result<()
         return fail("E_NOT_FOUND");
     };
     // an earlier day may already be declared; it is corrected with a return
-    if issued.get(..10) != now().get(..10) {
+    if !any_day && issued.get(..10) != now().get(..10) {
         return fail("E_VOID_OLD");
     }
     // a sale with live returns would leave those returns pointing at nothing
@@ -999,16 +1049,15 @@ pub fn void(conn: &mut Connection, id: i64, by: &str, reason: &str) -> Result<()
     if n == 0 {
         return fail("E_NOT_FOUND");
     }
-    verifactu::anulacion(&tx, id, &settings::load(&tx)?, &Local::now())?;
+    verifactu::anulacion(tx, id, &settings::load(tx)?, &Local::now())?;
     // a phone this ticket handed back is waiting in the shop again
-    repairs::undelivered(&tx, id, by)?;
+    repairs::undelivered(tx, id, by)?;
     tx.execute(
         "UPDATE products SET sold_qty = MAX(0, sold_qty - (
              SELECT COALESCE(SUM(qty), 0) FROM ticket_lines WHERE ticket_id = ?1 AND product_id = products.id))
          WHERE id IN (SELECT product_id FROM ticket_lines WHERE ticket_id = ?1)",
         [id],
     )?;
-    tx.commit()?;
     Ok(())
 }
 

@@ -3,6 +3,7 @@
 
 use serde::Serialize;
 
+use crate::book;
 use crate::cash::{Drawer, Session};
 use crate::codepage::{printable, CodePage};
 use crate::money::{div_round, fmt, fmt_rate};
@@ -613,7 +614,7 @@ pub fn repair_slip(r: &Repair, s: &Settings) -> Vec<Line> {
     d.lines
 }
 
-pub fn summary(sum: &Summary, from: &str, to: &str, s: &Settings, user: &str) -> Vec<Line> {
+pub fn summary(sum: &Summary, day: &book::Summary, from: &str, to: &str, s: &Settings, user: &str) -> Vec<Line> {
     let mut d = Doc::new(s);
     if !s.shop_name.trim().is_empty() {
         d.center(s.shop_name.trim(), true, Size::Tall);
@@ -663,8 +664,36 @@ pub fn summary(sum: &Summary, from: &str, to: &str, s: &Settings, user: &str) ->
             &Totals { total_cents: sum.total_cents, item_count: sum.items, vat: sum.vat.clone() },
         );
     }
+    if day.recharge_count > 0 || day.expense_cents != 0 {
+        d.rule('-');
+        if day.recharge_count > 0 {
+            d.pair(&format!("Recargas ({})", day.recharge_count), &fmt(day.recharge_cents), false, Size::Normal);
+        }
+        d.pair("Gastos", &fmt(-day.expense_cents), false, Size::Normal);
+        d.pair("Queda", &fmt(day.net_cents), true, Size::Normal);
+    }
     d.rule('-');
     d.left(&format!("Impreso: {} · {}", datetime(&now()), user), false, Size::Normal);
+    d.lines
+}
+
+// a recharge is the operator's sale, not the shop's: a receipt, not an invoice
+pub fn recharge_slip(e: &book::Entry, s: &Settings) -> Vec<Line> {
+    let mut d = Doc::new(s);
+    if !s.shop_name.trim().is_empty() {
+        d.center(s.shop_name.trim(), true, Size::Tall);
+    }
+    d.center("JUSTIFICANTE DE RECARGA", true, Size::Normal);
+    d.rule('-');
+    d.left(&datetime(&e.at), false, Size::Normal);
+    if !e.supplier.is_empty() {
+        d.pair("Operador", &e.supplier, false, Size::Normal);
+    }
+    d.pair("Pago", method_label(&e.method), false, Size::Normal);
+    d.rule('-');
+    d.pair("TOTAL", &format!("{} €", fmt(e.cents)), true, Size::Big);
+    d.rule('-');
+    d.center("No es una factura", false, Size::Normal);
     d.lines
 }
 
@@ -705,8 +734,11 @@ pub fn cash_close(s: &Settings, session: &Session, drawer: &Drawer, sum: &Summar
     d.center("EFECTIVO", true, Size::Normal);
     d.pair("Fondo inicial", &fmt(session.float_cents), false, Size::Normal);
     d.pair("Ventas en efectivo", &fmt(drawer.cash_cents), false, Size::Normal);
-    if drawer.book_cents != 0 {
-        d.pair("Libro: sin ticket y gastos", &fmt(drawer.book_cents), false, Size::Normal);
+    if drawer.recharge_cents != 0 {
+        d.pair("Recargas en efectivo", &fmt(drawer.recharge_cents), false, Size::Normal);
+    }
+    if drawer.expense_cents != 0 {
+        d.pair("Gastos en efectivo", &fmt(-drawer.expense_cents), false, Size::Normal);
     }
     for m in &drawer.moves {
         d.pair(&m.reason, &fmt(m.cents), false, Size::Normal);

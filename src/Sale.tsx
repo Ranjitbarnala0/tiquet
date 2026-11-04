@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKey, type MouseEvent as ReactMouse } from 'react';
 import {
   Banknote,
+  Check,
   CornerDownLeft,
   CreditCard,
+  Eye,
   History,
   LayoutGrid,
   Minus,
@@ -14,7 +16,9 @@ import {
   ScanBarcode,
   Search,
   Send,
+  ShoppingCart,
   Smartphone,
+  SmartphoneCharging,
   Star,
   Trash2,
   Undo2,
@@ -22,24 +26,26 @@ import {
   X,
 } from 'lucide-react';
 import { ApiError, call, toError } from './api';
-import { eur, fmt, isoDate, norm, parseMoney, rate } from './format';
+import { eur, fmt, norm, parseMoney, rate } from './format';
 import { errorText, isPrinterSetup, isTransient, printerStateText, tr, warningText } from './i18n';
 import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
 import { customerNif } from './nif';
 import { Paper } from './Paper';
-import { QuickSaleModal } from './Book';
+import { BIG, ExpenseModal, RechargeModal, useEntrySave } from './Quick';
 import { ShareDialog } from './Share';
 import { useToast } from './toast';
-import type { CartLine, CashDrawer, CashSession, Customer, Finalized, Logo, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
+import type { CartLine, CashDrawer, CashSession, Customer, DaySummary, Finalized, Logo, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
 
 type Shown = Preview & { forLines: string };
 import { printerLabel, usePrinterStatus } from './usePrinter';
-import { Field, useTrap } from './ui';
+import { Field, Modal, useTrap } from './ui';
 
 type Option =
   | { kind: 'product'; product: Product; qty: number }
-  | { kind: 'custom'; name: string; cents: number; qty: number };
+  | { kind: 'custom'; name: string; cents: number; qty: number }
+  | { kind: 'expense'; concept: string; cents: number }
+  | { kind: 'recharge'; cents: number };
 
 let seq = 0;
 const uid = () => `l${Date.now().toString(36)}${(seq++).toString(36)}`;
@@ -80,6 +86,23 @@ function parseCustom(text: string): { name: string; cents: number } | null {
   return c === null ? null : { name: m[1].slice(0, 120), cents: c };
 }
 
+// "-pantalla 45" is something bought and "recarga 10" a recharge: both are
+// saved at once from the same box, without leaving the sale
+function parseEntry(text: string): Option | null {
+  const t = text.trim();
+  const bought = t.match(/^-\s*(\S.*?)\s+([\d.,]+)\s*€?$/);
+  if (bought) {
+    const cents = parseMoney(bought[2]);
+    return cents && cents > 0 ? { kind: 'expense', concept: bought[1].slice(0, 120), cents } : null;
+  }
+  const topUp = t.match(/^rec(?:arga)?\.?\s+([\d.,]+)\s*€?$/i);
+  if (topUp) {
+    const cents = parseMoney(topUp[1]);
+    return cents && cents > 0 ? { kind: 'recharge', cents } : null;
+  }
+  return null;
+}
+
 type Indexed = { p: Product; name: string; words: string[] };
 
 function index(products: Product[]): Indexed[] {
@@ -95,6 +118,8 @@ function byCode(items: Indexed[], code: string): Product | undefined {
 
 function search(items: Indexed[], q: string): Option[] {
   const raw = q.trim();
+  const entry = parseEntry(raw);
+  if (entry?.kind === 'expense') return [entry];
   // a scanned code is matched exactly as read, before "10x..." is taken as
   // a quantity
   const whole = raw ? byCode(items, raw) : undefined;
@@ -124,16 +149,16 @@ function search(items: Indexed[], q: string): Option[] {
   }
   const custom = parseCustom(t);
   if (custom) out.push({ kind: 'custom', qty, ...custom });
-  return out;
+  return entry ? [entry, ...out] : out;
 }
 
-function quick(total: number): number[] {
+function quick(total: number, most = 4): number[] {
   const out = new Set<number>();
   for (const step of [100, 500, 1000, 2000, 5000, 10000]) {
     const v = Math.ceil(total / step) * step;
     if (v > total) out.add(v);
   }
-  return [...out].sort((a, b) => a - b).slice(0, 4);
+  return [...out].sort((a, b) => a - b).slice(0, most);
 }
 
 // A barcode scanner types the whole code in a few milliseconds and ends it
@@ -216,6 +241,16 @@ function QtyInput({ qty, onChange, onExit, disabled }: { qty: number; onChange: 
 
 type Tab = 'recent' | 'fav' | 'all';
 const TAB_KEY = 'tiquet.saleTab';
+// printing is a switch by the pay buttons, remembered on this PC
+const PRINT_KEY = 'tiquet.print';
+
+function storedPrint(): boolean {
+  try {
+    return localStorage.getItem(PRINT_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
 // a long catalogue is found with the search box; the grid shows this many
 const ALL_SHOWN = 200;
 
@@ -242,22 +277,45 @@ interface Props {
   onSetupPrinter?: () => void;
   // whether a ticket is on the screen or being charged
   onBusy: (busy: boolean) => void;
-  onCash: () => void;
+  onDay: () => void;
 }
 
-// "9:00", or "17/10 21:05" when it was opened another day
-function since(s: CashSession): string {
-  const at = s.openedAt;
-  const time = at.slice(11, 16).replace(/^0/, '');
-  return at.slice(0, 10) === isoDate(new Date()) ? time : `${at.slice(8, 10)}/${at.slice(5, 7)} ${time}`;
+type Charge = { method: Method; tendered: number | null; print: boolean; invoice: boolean };
+
+function Cell({ label, cents, dot, strong, minus }: { label: string; cents: number; dot?: 'cash' | 'card' | 'bizum' | 'recharge' | 'expense'; strong?: boolean; minus?: boolean }) {
+  return (
+    <span className={`strip-cell${strong ? ' strong' : ''}`}>
+      <small>
+        {dot && <i className={`dot dot-${dot}`} aria-hidden="true" />}
+        {label}
+      </small>
+      <b>{eur(minus ? -cents : cents)}</b>
+    </span>
+  );
 }
 
-export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, logo, products, onSold, onSetupPrinter, onBusy, onCash }: Props) {
+// The day at a glance, under the products: each way of paying apart, the
+// total of all, what went out and what is left. A tap opens the whole day.
+function DayStrip({ s, onOpen }: { s: DaySummary; onOpen: () => void }) {
+  return (
+    <button className="strip" onMouseDown={keep} onClick={onOpen} title={tr('Ver las ventas y gastos de hoy', 'See today’s sales and expenses')}>
+      <Cell label={tr('Efectivo', 'Cash')} cents={s.cashCents} dot="cash" />
+      <Cell label={tr('Tarjeta', 'Card')} cents={s.cardCents} dot="card" />
+      {s.bizumCents !== 0 && <Cell label="Bizum" cents={s.bizumCents} dot="bizum" />}
+      <Cell label={tr('Recargas', 'Recharges')} cents={s.rechargeCents} dot="recharge" />
+      <Cell label={tr('Total', 'Total')} cents={s.totalCents} strong />
+      <Cell label={tr('Gastos', 'Expenses')} cents={s.expenseCents} dot="expense" minus />
+      <Cell label={tr('Queda', 'Left')} cents={s.netCents} strong />
+    </button>
+  );
+}
+
+export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, logo, products, onSold, onSetupPrinter, onBusy, onDay }: Props) {
   const toast = useToast();
   const [restored] = useState(() => storedCart(cartKey));
   const [lines, setLines] = useState<CartLine[]>(restored.lines);
   const saleId = useRef(restored.saleId);
-  const [clock, setClock] = useState<{ last: string; print: boolean } | null>(null);
+  const [clock, setClock] = useState<{ last: string; charge: Charge } | null>(null);
   const history = useRef<CartLine[][]>([]);
   const [query, setQuery] = useState('');
   const [hi, setHi] = useState(0);
@@ -273,18 +331,23 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [preview, setPreview] = useState<Shown | null>(null);
   const [previewErr, setPreviewErr] = useState('');
   const [busy, setBusy] = useState(false);
-  const [last, setLast] = useState<TicketRecord | null>(null);
+  // the last sale, shown until the next one starts
+  const [last, setLast] = useState<{ ticket: TicketRecord; printed: boolean } | null>(null);
   const [sharing, setSharing] = useState<TicketRecord | null>(null);
-  // F8: a sale without a ticket, or an expense, into the book
-  const [quickBook, setQuickBook] = useState(false);
+  const [printOn, setPrintOn] = useState(storedPrint);
+  const [day, setDay] = useState<DaySummary | null>(null);
+  const [recharge, setRecharge] = useState<{ cents: number; fromCart: boolean } | null>(null);
+  const [expense, setExpense] = useState<string | null>(null);
+  const [seeTicket, setSeeTicket] = useState(false);
   // the add/change dialog: 'add', or the key of the line being changed
   const [item, setItem] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>(storedTab);
   const [recent, setRecent] = useState<Recent[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const givenRef = useRef<HTMLInputElement>(null);
-  const paperRef = useRef<HTMLDivElement>(null);
+  const linesRef = useRef<HTMLDivElement>(null);
   const payRef = useRef<HTMLDivElement>(null);
+  const sureBig = useRef('');
   const reqSeq = useRef(0);
   const openedAt = useRef(0);
   const burst = useRef({ text: '', last: 0, fast: 0, given: '' });
@@ -296,6 +359,21 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [till, setTill] = useState<CashSession | null | undefined>(undefined);
   const [float, setFloat] = useState('');
   const [opening, setOpening] = useState(false);
+
+  const loadDay = useCallback(() => {
+    call<DaySummary | null>('day.totals')
+      .then(setDay)
+      .catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    loadDay();
+    const t = setInterval(loadDay, 30_000);
+    return () => clearInterval(t);
+  }, [active, loadDay]);
+
+  const saveEntry = useEntrySave(loadDay);
 
   // survives a crash or a power cut mid-sale
   useEffect(() => {
@@ -349,13 +427,23 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   useEffect(() => {
     try {
       localStorage.setItem(TAB_KEY, tab);
+      localStorage.setItem(PRINT_KEY, printOn ? '1' : '0');
     } catch {
-      // the tab just will not be remembered
+      // the choice just will not be remembered
     }
-  }, [tab]);
+  }, [tab, printOn]);
 
   const catalogue = useMemo(() => index(products), [products]);
-  const options = useMemo(() => search(catalogue, query), [catalogue, query]);
+  const options = useMemo(() => {
+    // "-10%": that much off what is on the ticket
+    const pct = query.trim().match(/^-\s*(\d{1,2}(?:[.,]\d)?)\s*%$/);
+    const sum = lines.reduce((s, l) => s + l.qty * l.unitCents, 0);
+    if (pct && sum > 0) {
+      const off = Math.round((sum * Number(pct[1].replace(',', '.'))) / 100);
+      return off > 0 ? [{ kind: 'custom' as const, name: `Descuento ${pct[1]}%`, cents: -off, qty: 1 }] : [];
+    }
+    return search(catalogue, query);
+  }, [catalogue, query, lines]);
   useEffect(() => setHi(0), [query]);
 
   const tendered = method === 'cash' ? parseMoney(given, 999_999_999) : null;
@@ -384,9 +472,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   }, [previewArgs, settings, logo]);
 
   useEffect(() => {
-    const el = paperRef.current;
+    const el = linesRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [preview?.lines.length, paying]);
+  }, [lines.length]);
 
   useEffect(() => {
     if (!active) setPaying(false);
@@ -398,12 +486,33 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     if (active && !paying) searchRef.current?.focus();
   }, [active, paying]);
 
+  // The box is always ready for the next key: a click anywhere on the page,
+  // coming back to the window or a window closing hands the focus back.
+  useEffect(() => {
+    if (!active || paying) return;
+    const back = () =>
+      requestAnimationFrame(() => {
+        if (document.querySelector('.modal-back')) return;
+        const el = document.activeElement;
+        if (!el || el === document.body || el.tagName === 'BUTTON') searchRef.current?.focus();
+      });
+    window.addEventListener('focus', back);
+    document.addEventListener('mouseup', back);
+    document.addEventListener('focusout', back);
+    return () => {
+      window.removeEventListener('focus', back);
+      document.removeEventListener('mouseup', back);
+      document.removeEventListener('focusout', back);
+    };
+  }, [active, paying]);
+
   // the queue can look ready while the last ticket did not come out
   const lastFailed = !!printer && printer.state === 'ready' && (printer.last?.status === 'failed' || printer.last?.status === 'unknown');
-  const total = preview?.totals.totalCents ?? 0;
-  const count = preview?.totals.itemCount ?? 0;
-  // the total on screen belongs to the cart on screen
+  // the total on screen belongs to the cart on screen; until the core answers
+  // it is worked out here, so the buttons never wait for it
   const fresh = !!preview && preview.forLines === linesKey;
+  const total = fresh ? preview.totals.totalCents : lines.reduce((sum, l) => sum + l.qty * l.unitCents, 0);
+  const count = fresh ? preview.totals.itemCount : lines.reduce((sum, l) => sum + (l.unitCents >= 0 ? l.qty : 0), 0);
   const short = method === 'cash' && tendered !== null && tendered < total;
   const badAmount = method === 'cash' && given.trim() !== '' && tendered === null;
   const tooMuch = method === 'cash' && !short && preview?.paymentError === 'E_TENDERED_HIGH';
@@ -413,7 +522,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const service = lines.some((l) => l.repairId);
   const limit = service ? 40_000 : 300_000;
   const overLimit = total > limit;
-  const blocked = short || badAmount || tooMuch || negative || !fresh || !customerOk || (overLimit && !invoice);
+  const blocked = short || badAmount || tooMuch || negative || !customerOk || (overLimit && !invoice);
 
   const commit = (next: CartLine[]) => {
     history.current.push(lines);
@@ -518,8 +627,21 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   };
 
   const pick = (o: Option) => {
-    if (o.kind === 'product') addProduct(o.product, o.qty);
-    else addCustom(o.name, o.cents, o.qty);
+    if (o.kind === 'expense' || o.kind === 'recharge') {
+      // a typo of 1000 for 10,00 is easy: a big amount takes a second Enter
+      const key = `${o.kind}${o.cents}`;
+      if (o.cents >= BIG && sureBig.current !== key) {
+        sureBig.current = key;
+        toast.info(`${tr('Importe alto', 'Large amount')}: ${eur(o.cents)}. ${tr('Pulsa Enter otra vez para apuntarlo.', 'Press Enter again to save it.')}`);
+        return;
+      }
+      sureBig.current = '';
+      saveEntry(o.kind === 'expense' ? { kind: 'expense', concept: o.concept, cents: o.cents, method: 'cash' } : { kind: 'recharge', cents: o.cents, method: 'cash' });
+    } else if (o.kind === 'product') {
+      addProduct(o.product, o.qty);
+    } else {
+      addCustom(o.name, o.cents, o.qty);
+    }
     setQuery('');
   };
 
@@ -581,19 +703,24 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     setSel(lines[j].key);
   };
 
-  const openPay = () => {
-    if (!lines.length || busy) return;
+  const ready = () => {
+    if (!lines.length || busy) return false;
     if (negative) {
       toast.error(errorText(new ApiError('E_NEGATIVE', '')));
-      return;
+      return false;
     }
     const unpriced = lines.find((l) => l.unitCents === 0);
     if (unpriced) {
       toast.error(`${tr('Falta el precio de', 'Missing price for')} «${unpriced.name}»`);
       setSel(unpriced.key);
       setPriceEdit(unpriced.key);
-      return;
+      return false;
     }
+    return true;
+  };
+
+  const openPay = () => {
+    if (!ready()) return;
     searchRef.current?.blur();
     setQuery('');
     setMethod('cash');
@@ -603,6 +730,28 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     setInvoice(total > limit);
     setCustomer({ name: '', nif: '', address: '' });
     setPaying(true);
+  };
+
+  // one tap, one sale: printing is the only thing that differs, and that is
+  // the switch above the buttons. Past the simplified invoice limit it takes
+  // the customer's details, so the window opens.
+  const payNow = (m: Method, tenderedCents?: number) => {
+    if (!ready()) return;
+    if (overLimit) openPay();
+    else finish({ method: m, tendered: tenderedCents ?? null, print: printOn && !noPrinter, invoice: false });
+  };
+
+  const openRecharge = () => {
+    const typed = parseMoney(query.trim());
+    // an amount typed on the ticket is what the recharge is for
+    const fromCart = !typed && lines.length > 0 && lines.every((l) => !l.productId && !l.repairId && l.unitCents > 0);
+    setQuery('');
+    setRecharge({ cents: typed && typed > 0 ? typed : fromCart ? total : 0, fromCart });
+  };
+
+  const openExpense = () => {
+    setExpense(query.trim().replace(/^-\s*/, ''));
+    setQuery('');
   };
 
   // a printer that is not set up gets a way to set it up; a print that
@@ -650,18 +799,18 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     }
   };
 
-  const finish = async (print: boolean, clockOk = false) => {
-    if (busy || !lines.length || blocked) return;
+  const finish = async (c: Charge, clockOk = false) => {
+    if (busy || !lines.length) return;
     setBusy(true);
     try {
       const r = await call<Finalized>('sale.finalize', {
         lines: payload,
-        payment: { method, tenderedCents: tendered ?? undefined },
-        print: print && !noPrinter,
+        payment: { method: c.method, tenderedCents: c.tendered ?? undefined },
+        print: c.print && !noPrinter,
         saleId: saleId.current,
         clockOk,
         expectedCents: total,
-        customer: invoice ? customer : undefined,
+        customer: c.invoice ? customer : undefined,
       });
       history.current = [];
       saleId.current = newSaleId();
@@ -670,9 +819,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       setSel(next[next.length - 1]?.key ?? null);
       setPaying(false);
       setGiven('');
-      setLast(r.ticket);
-      const p = r.ticket.payment;
-      const change = p.method === 'cash' && p.changeCents > 0 ? ` · ${tr('Cambio', 'Change')} ${eur(p.changeCents)}` : '';
+      setLast({ ticket: r.ticket, printed: r.printed });
       if (r.duplicate) {
         toast.info(`${tr('Esta venta ya estaba cobrada', 'This sale had already been charged')}: ${r.ticket.number}`, { sticky: true });
       } else if (r.printError) {
@@ -680,15 +827,15 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           reprint(r.ticket.id, false),
         );
       } else {
-        const handed = payload.some((l) => l.repairId) ? ` · ${tr('reparación entregada', 'repair handed back')}` : '';
-        toast.ok(`${tr('Ticket', 'Ticket')} ${r.ticket.number}${change}${handed}`);
+        if (payload.some((l) => l.repairId)) toast.ok(`${r.ticket.number} · ${tr('reparación entregada', 'repair handed back')}`);
         if (r.printWarning) toast.info(warningText(r.printWarning));
         if (r.printed) refreshPrinter();
       }
       onSold();
       loadRecent();
+      loadDay();
     } catch (e) {
-      if (e instanceof ApiError && e.code === 'E_CLOCK') setClock({ last: e.detail, print });
+      if (e instanceof ApiError && e.code === 'E_CLOCK') setClock({ last: e.detail, charge: c });
       else {
         if (e instanceof ApiError && (e.code === 'E_OVER_LIMIT' || e.code === 'E_OVER_LIMIT_SERVICE')) setInvoice(true);
         toast.error(errorText(e));
@@ -696,6 +843,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     } finally {
       setBusy(false);
     }
+  };
+
+  // the window's Enter and its buttons, once everything in it adds up
+  const confirmPay = (print: boolean) => {
+    if (!blocked) finish({ method, tendered, print, invoice });
   };
 
   const onSearchKey = (e: ReactKey<HTMLInputElement>) => {
@@ -777,7 +929,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           }
           // the Enter that opened the dialog, or a scanner's trailing one
           if (e.repeat || busy || now - openedAt.current < 400) return;
-          finish(!e.shiftKey);
+          confirmPay(e.shiftKey ? !printOn : printOn);
           return;
         }
         if (busy) {
@@ -805,9 +957,24 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         setItem('add');
         return;
       }
+      if (e.key === 'F6') {
+        e.preventDefault();
+        setPrintOn((on) => !on);
+        return;
+      }
+      if (e.key === 'F7') {
+        e.preventDefault();
+        openRecharge();
+        return;
+      }
       if (e.key === 'F8') {
         e.preventDefault();
-        setQuickBook(true);
+        openExpense();
+        return;
+      }
+      if (e.key === 'F9' || e.key === 'F10') {
+        e.preventDefault();
+        payNow(e.key === 'F9' ? 'cash' : 'card');
         return;
       }
       if (e.key === 'F2') {
@@ -838,191 +1005,111 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   ];
   const editing = item && item !== 'add' ? lines.find((l) => l.key === item) : undefined;
 
+  const paid = last?.ticket;
+  const change = paid && paid.payment.method === 'cash' ? paid.payment.changeCents : 0;
+  const printerTrouble = !!printer && printer.state !== 'ready' && printer.state !== 'none';
+
   return (
     <div className="sale" hidden={!active}>
       <section className="sale-main">
-        <div className="search-row">
-        <div className="search">
-          <div className="search-box">
-            <Search size={20} />
-            <input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={onSearchKey}
-              role="combobox"
-              aria-expanded={!!query.trim()}
-              aria-controls="search-options"
-              aria-activedescendant={query.trim() && options[hi] ? `opt-${hi}` : undefined}
-              aria-autocomplete="list"
-              placeholder={tr('Busca, escanea o escribe «funda 12,50»', 'Search, scan or type "case 12.50"')}
-              spellCheck={false}
-              autoComplete="off"
-              aria-label={tr('Buscar producto', 'Search product')}
-            />
-            <kbd>F2</kbd>
-          </div>
-          {query.trim() && (
-            <div className="dropdown" role="listbox" id="search-options">
-              {options.length === 0 && (
-                <div className="opt-empty">
-                  {/^\d{6,}$/.test(query.trim())
-                    ? tr('Ningún producto con ese código', 'No product with that code')
-                    : tr('Sin resultados. Añade un precio para venderlo como artículo libre.', 'No results. Add a price to sell it as a custom item.')}
-                </div>
+        <div className="bar-row">
+          <div className="bar">
+            <div className="bar-box">
+              <Search size={22} />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                onKeyDown={onSearchKey}
+                role="combobox"
+                aria-expanded={!!query.trim()}
+                aria-controls="search-options"
+                aria-activedescendant={query.trim() && options[hi] ? `opt-${hi}` : undefined}
+                aria-autocomplete="list"
+                placeholder={tr('Escribe o escanea:  funda 10  ·  -pantalla 45  ·  recarga 10', 'Type or scan:  case 10  ·  -screen 45  ·  recarga 10')}
+                spellCheck={false}
+                autoComplete="off"
+                aria-label={tr('Buscar producto', 'Search product')}
+              />
+              {query && (
+                <button className="icon-btn" onMouseDown={keep} onClick={() => setQuery('')} aria-label={tr('Borrar', 'Clear')}>
+                  <X size={18} />
+                </button>
               )}
-              {options.map((o, i) => (
-                <div
-                  key={o.kind === 'product' ? `p${o.product.id}` : 'custom'}
-                  id={`opt-${i}`}
-                  role="option"
-                  aria-selected={i === hi}
-                  className={`opt${i === hi ? ' hi' : ''}`}
-                  onMouseDown={(e) => {
-                    e.preventDefault();
-                    pick(o);
-                  }}
-                  onMouseEnter={() => setHi(i)}
-                >
-                  {o.kind === 'product' ? (
-                    <>
-                      {o.qty > 1 && <span className="opt-qty">{o.qty}×</span>}
-                      <span className="opt-name">{o.product.name}</span>
-                      {o.product.favorite && <Star size={13} className="star" />}
-                      {o.product.barcode && <span className="opt-meta mono">{o.product.barcode}</span>}
-                      <span className="opt-price">{o.product.priceCents ? eur(o.product.priceCents) : tr('Precio libre', 'Open price')}</span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="opt-plus">
-                        <Plus size={14} />
-                      </span>
-                      <span className="opt-name">
-                        {tr('Añadir', 'Add')} «{o.name}»{o.qty > 1 ? ` ×${o.qty}` : ''}
-                      </span>
-                      <span className="opt-meta">{tr('artículo libre', 'custom item')}</span>
-                      <span className="opt-price">{eur(o.cents)}</span>
-                    </>
-                  )}
-                  <CornerDownLeft size={14} className="opt-enter" />
-                </div>
-              ))}
             </div>
-          )}
-        </div>
+            {query.trim() && (
+              <div className="dropdown" role="listbox" id="search-options">
+                {options.length === 0 && (
+                  <div className="opt-empty">
+                    {/^\d{6,}$/.test(query.trim())
+                      ? tr('Ningún producto con ese código', 'No product with that code')
+                      : tr('Sin resultados. Añade un precio para venderlo: «funda 10»', 'No results. Add a price to sell it: "case 10"')}
+                  </div>
+                )}
+                {options.map((o, i) => (
+                  <div
+                    key={o.kind === 'product' ? `p${o.product.id}` : o.kind}
+                    id={`opt-${i}`}
+                    role="option"
+                    aria-selected={i === hi}
+                    className={`opt${i === hi ? ' hi' : ''}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      pick(o);
+                    }}
+                    onMouseEnter={() => setHi(i)}
+                  >
+                    {o.kind === 'product' && (
+                      <>
+                        {o.qty > 1 && <span className="opt-qty">{o.qty}×</span>}
+                        <span className="opt-name">{o.product.name}</span>
+                        {o.product.favorite && <Star size={13} className="star" />}
+                        {o.product.barcode && <span className="opt-meta mono">{o.product.barcode}</span>}
+                        <span className="opt-price">{o.product.priceCents ? eur(o.product.priceCents) : tr('Precio libre', 'Open price')}</span>
+                      </>
+                    )}
+                    {o.kind === 'custom' && (
+                      <>
+                        <span className="opt-plus">
+                          <Plus size={14} />
+                        </span>
+                        <span className="opt-name">
+                          {tr('Añadir', 'Add')} «{o.name}»{o.qty > 1 ? ` ×${o.qty}` : ''}
+                        </span>
+                        <span className="opt-price">{eur(o.cents)}</span>
+                      </>
+                    )}
+                    {o.kind === 'expense' && (
+                      <>
+                        <span className="opt-plus expense">
+                          <ShoppingCart size={14} />
+                        </span>
+                        <span className="opt-name">
+                          {tr('Gasto', 'Expense')}: {o.concept}
+                        </span>
+                        <span className="opt-price">{eur(-o.cents)}</span>
+                      </>
+                    )}
+                    {o.kind === 'recharge' && (
+                      <>
+                        <span className="opt-plus recharge">
+                          <SmartphoneCharging size={14} />
+                        </span>
+                        <span className="opt-name">{tr('Recarga en efectivo', 'Recharge in cash')}</span>
+                        <span className="opt-price">{eur(o.cents)}</span>
+                      </>
+                    )}
+                    <CornerDownLeft size={14} className="opt-enter" />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
           <button className="btn-add" onMouseDown={keep} onClick={() => setItem('add')} title={tr('Añadir un artículo a mano', 'Add an item by hand')}>
             <Plus size={20} />
             <span>{tr('Artículo', 'Item')}</span>
             <kbd>F4</kbd>
           </button>
-          <button className="btn-nt" onMouseDown={keep} onClick={() => setQuickBook(true)} title={tr('Apuntar en el Libro una venta sin ticket o un gasto', 'Put a sale without a ticket, or an expense, in the Book')}>
-            <span>{tr('Sin ticket', 'No ticket')}</span>
-            <kbd>F8</kbd>
-          </button>
-        </div>
-
-        <div className="cart-bar">
-          <span className="muted">
-            {lines.length
-              ? `${lines.length} ${lines.length === 1 ? tr('línea', 'line') : tr('líneas', 'lines')}`
-              : tr('Ticket nuevo', 'New ticket')}
-          </span>
-          <div className="cart-actions">
-            <button className="btn btn-ghost sm" onMouseDown={keep} onClick={undo} disabled={!history.current.length} title="Ctrl+Z">
-              <Undo2 size={15} />
-              {tr('Deshacer', 'Undo')}
-            </button>
-            <button className="btn btn-ghost sm" onMouseDown={keep} onClick={clear} disabled={!lines.length}>
-              <Trash2 size={15} />
-              {tr('Vaciar', 'Clear')}
-            </button>
-          </div>
-        </div>
-
-        <div className="cart">
-          {lines.length === 0 ? (
-            <div className="cart-empty">
-              <button className="add-tile" onMouseDown={keep} onClick={() => setItem('add')}>
-                <span className="add-plus">
-                  <Plus size={34} strokeWidth={2.2} />
-                </span>
-                <b>{tr('Añadir artículo', 'Add an item')}</b>
-                <span>{tr('Escribe nombre y precio. Si quieres, se guarda como producto.', 'Type a name and a price. It can be saved as a product.')}</span>
-              </button>
-              <p className="cart-empty-hint">
-                <ScanBarcode size={16} />
-                {tr('O escanea un código, busca arriba o toca un producto de abajo.', 'Or scan a barcode, search above or tap a product below.')}
-              </p>
-            </div>
-          ) : (
-            <>
-              <div className="cart-head">
-                <span>{tr('Artículo', 'Item')}</span>
-                <span className="center">{tr('Cantidad', 'Qty')}</span>
-                <span className="num">{tr('Precio', 'Price')}</span>
-                <span className="num">{tr('Importe', 'Amount')}</span>
-                <span />
-              </div>
-              {lines.map((l) => (
-                <div key={l.key} className={`cart-row${sel === l.key ? ' sel' : ''}`} onMouseDown={() => setSel(l.key)}>
-                  {flash?.key === l.key && <i className="row-flash" key={flash.n} />}
-                  <button
-                    className="cart-name"
-                    onMouseDown={keep}
-                    onClick={() => (l.repairId ? setPriceEdit(l.key) : setItem(l.key))}
-                    title={l.repairId ? tr('Cambiar precio', 'Change price') : tr('Cambiar nombre, precio o IVA', 'Change name, price or VAT')}
-                  >
-                    <span>
-                      {l.name}
-                      <Pencil size={13} className="cart-edit" aria-hidden="true" />
-                    </span>
-                    {(!l.productId || l.vatBp !== settings.defaultVatBp) && (
-                      <small>
-                        {!l.productId && (l.repairId ? tr('Reparación', 'Repair') : tr('Artículo libre', 'Custom item'))}
-                        {!l.productId && l.vatBp !== settings.defaultVatBp && ' · '}
-                        {l.vatBp !== settings.defaultVatBp && `IVA ${rate(l.vatBp)}`}
-                      </small>
-                    )}
-                  </button>
-                  <div className="stepper">
-                    <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty - 1)} disabled={l.qty <= 1 || !!l.repairId} aria-label={tr('Uno menos', 'One less')}>
-                      <Minus size={15} />
-                    </button>
-                    <QtyInput qty={l.qty} onChange={(n) => setQty(l.key, n)} onExit={() => searchRef.current?.focus()} disabled={!!l.repairId} />
-                    <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty + 1)} disabled={l.qty >= 999 || !!l.repairId} aria-label={tr('Uno más', 'One more')}>
-                      <Plus size={15} />
-                    </button>
-                  </div>
-                  <div className="num">
-                    {priceEdit === l.key ? (
-                      <PriceInput
-                        cents={l.unitCents}
-                        onDone={(c) => {
-                          setPriceEdit(null);
-                          if (c !== null && c !== l.unitCents) setPrice(l.key, c);
-                          searchRef.current?.focus();
-                        }}
-                      />
-                    ) : (
-                      <button className={`price-btn${l.unitCents === 0 ? ' zero' : ''}`} onClick={() => setPriceEdit(l.key)} title={tr('Toca para cambiar el precio', 'Tap to change the price')}>
-                        {fmt(l.unitCents)}
-                        <Pencil size={12} className="price-edit" aria-hidden="true" />
-                      </button>
-                    )}
-                  </div>
-                  <div className="num strong">{fmt(l.qty * l.unitCents)}</div>
-                  <button className="icon-btn" onMouseDown={keep} onClick={() => remove(l.key)} aria-label={tr('Quitar', 'Remove')}>
-                    <X size={16} />
-                  </button>
-                </div>
-              ))}
-              <button className="add-row" onMouseDown={keep} onClick={() => setItem('add')}>
-                <Plus size={16} />
-                {tr('Añadir artículo', 'Add an item')}
-                <kbd>F4</kbd>
-              </button>
-            </>
-          )}
         </div>
 
         <div className="browse">
@@ -1072,256 +1159,394 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           </div>
         </div>
 
-        {paying && (
-          <div className="pay-back" onMouseDown={() => !busy && setPaying(false)}>
-            <div className="pay" onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={tr('Cobrar', 'Charge')} ref={payRef}>
-              <div className="pay-head">
-                <h2>{tr('Cobrar', 'Charge')}</h2>
-                {method === 'cash' && till === null && (
-                  <div className="till-note">
-                    <Wallet size={17} />
-                    <span>{tr('Caja cerrada', 'Till closed')}</span>
-                    <div className="money-input">
-                      <input
-                        value={float}
-                        onChange={(e) => setFloat(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key !== 'Enter') return;
-                          e.preventDefault();
-                          e.stopPropagation();
-                          openTill();
-                        }}
-                        inputMode="decimal"
-                        placeholder={tr('Fondo', 'Float')}
-                        aria-label={tr('Fondo inicial', 'Starting float')}
-                      />
-                      <span>€</span>
-                    </div>
-                    <button className="btn sm" onMouseDown={keep} onClick={openTill} disabled={opening || floatCents === null || floatCents < 0}>
-                      {tr('Abrir caja', 'Open till')}
-                    </button>
-                  </div>
-                )}
-                <button className="icon-btn" onMouseDown={keep} onClick={() => setPaying(false)} disabled={busy} aria-label={tr('Cerrar', 'Close')}>
-                  <X size={18} />
+        {day && <DayStrip s={day} onOpen={onDay} />}
+      </section>
+
+      <aside className="till">
+        <div className="till-head">
+          <h2>{lines.length ? `${count} ${count === 1 ? tr('artículo', 'item') : tr('artículos', 'items')}` : tr('Venta', 'Sale')}</h2>
+          <div className="till-tools">
+            <button className="icon-btn" onMouseDown={keep} onClick={() => setSeeTicket(true)} disabled={!lines.length} title={tr('Ver el ticket', 'See the ticket')} aria-label={tr('Ver el ticket', 'See the ticket')}>
+              <Eye size={17} />
+            </button>
+            <button className="icon-btn" onMouseDown={keep} onClick={undo} disabled={!history.current.length} title={`${tr('Deshacer', 'Undo')} (Ctrl+Z)`} aria-label={tr('Deshacer', 'Undo')}>
+              <Undo2 size={17} />
+            </button>
+            <button className="icon-btn" onMouseDown={keep} onClick={clear} disabled={!lines.length} title={tr('Vaciar', 'Clear')} aria-label={tr('Vaciar', 'Clear')}>
+              <Trash2 size={17} />
+            </button>
+          </div>
+        </div>
+
+        <div className="till-lines" ref={linesRef}>
+          {lines.map((l) => (
+            <div key={l.key} className={`ln${sel === l.key ? ' sel' : ''}`} onMouseDown={() => setSel(l.key)}>
+              {flash?.key === l.key && <i className="row-flash" key={flash.n} />}
+              <button
+                className="ln-name"
+                onMouseDown={keep}
+                onClick={() => (l.repairId ? setPriceEdit(l.key) : setItem(l.key))}
+                title={l.repairId ? tr('Cambiar precio', 'Change price') : tr('Cambiar nombre, precio o IVA', 'Change name, price or VAT')}
+              >
+                <span>{l.name}</span>
+                <Pencil size={12} aria-hidden="true" />
+              </button>
+              <b className="ln-total">{fmt(l.qty * l.unitCents)}</b>
+              <button className="ln-x" onMouseDown={keep} onClick={() => remove(l.key)} aria-label={tr('Quitar', 'Remove')}>
+                <X size={15} />
+              </button>
+              <div className="stepper">
+                <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty - 1)} disabled={l.qty <= 1 || !!l.repairId} aria-label={tr('Uno menos', 'One less')}>
+                  <Minus size={15} />
+                </button>
+                <QtyInput qty={l.qty} onChange={(n) => setQty(l.key, n)} onExit={() => searchRef.current?.focus()} disabled={!!l.repairId} />
+                <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty + 1)} disabled={l.qty >= 999 || !!l.repairId} aria-label={tr('Uno más', 'One more')}>
+                  <Plus size={15} />
                 </button>
               </div>
-              <div className="pay-body">
-                <div className="pay-total">
-                  <span>{tr('Total a cobrar', 'Amount due')}</span>
-                  <strong>{fresh ? eur(total) : '…'}</strong>
-                </div>
-                <div className="methods">
-                  {METHODS.map((m) => (
-                    <button key={m.id} className={`method${method === m.id ? ' on' : ''}`} onMouseDown={keep} onClick={() => setMethod(m.id)}>
-                      <m.icon size={20} />
-                      <span>{m.label()}</span>
-                      <kbd>{m.key}</kbd>
-                    </button>
-                  ))}
-                </div>
-                {method === 'cash' ? (
-                  <div className="cash">
-                    <label className="field">
-                      <span className="field-label">{tr('Entregado por el cliente', 'Received from the customer')}</span>
-                      <div className="money-input big">
-                        <input ref={givenRef} autoFocus value={given} onChange={(e) => setGiven(e.target.value)} placeholder={fmt(total)} inputMode="decimal" />
-                        <span>€</span>
-                      </div>
-                    </label>
-                    <div className="quick">
-                      <button className={given === '' ? 'on' : ''} onMouseDown={keep} onClick={() => setGiven('')}>
-                        {tr('Exacto', 'Exact')}
-                      </button>
-                      {quick(total).map((c) => (
-                        <button key={c} className={tendered === c ? 'on' : ''} onMouseDown={keep} onClick={() => setGiven(fmt(c))}>
-                          {eur(c)}
-                        </button>
-                      ))}
-                    </div>
-                    {badAmount || tooMuch ? (
-                      <div className="change short">
-                        <span>{tooMuch ? tr('Importe demasiado alto', 'Amount too high') : tr('Importe no válido', 'Invalid amount')}</span>
-                        <strong>{given}</strong>
-                      </div>
-                    ) : (
-                      <div className={`change${short ? ' short' : ''}`}>
-                        <span>{short ? tr('Falta', 'Still due') : tr('Cambio', 'Change')}</span>
-                        <strong>{eur(short ? total - (tendered ?? 0) : preview?.payment?.changeCents ?? 0)}</strong>
-                      </div>
-                    )}
-                  </div>
+              <div className="ln-price">
+                {priceEdit === l.key ? (
+                  <PriceInput
+                    cents={l.unitCents}
+                    onDone={(c) => {
+                      setPriceEdit(null);
+                      if (c !== null && c !== l.unitCents) setPrice(l.key, c);
+                      searchRef.current?.focus();
+                    }}
+                  />
                 ) : (
-                  <p className="pay-note">
-                    {method === 'card'
-                      ? tr('Cobra en el datáfono y confirma aquí.', 'Take the payment on the card terminal, then confirm here.')
-                      : tr('Comprueba que el Bizum ha llegado y confirma.', 'Check that the Bizum payment has arrived, then confirm.')}
-                  </p>
-                )}
-                {invoice ? (
-                  <div className="customer">
-                    <div className="customer-head">
-                      <b>{tr('Factura con datos del cliente', 'Invoice with customer details')}</b>
-                      {!overLimit && (
-                        <button className="link" onMouseDown={keep} onClick={() => setInvoice(false)}>
-                          {tr('Quitar', 'Remove')}
-                        </button>
-                      )}
-                    </div>
-                    {overLimit && (
-                      <p className="pay-hint">
-                        {service
-                          ? tr('Con una reparación, más de 400 €: hace falta una factura con los datos del cliente.', 'With a repair, over 400 EUR: this needs an invoice with the customer details.')
-                          : tr('Más de 3.000 €: hace falta una factura con los datos del cliente.', 'Over 3,000 EUR: this needs an invoice with the customer details.')}
-                      </p>
-                    )}
-                    <div className="grid2">
-                      <Field label={tr('Nombre o razón social', 'Name or company')}>
-                        <input value={customer.name} onChange={(e) => setCustomer({ ...customer, name: e.target.value })} maxLength={120} />
-                      </Field>
-                      <Field label="NIF" error={customer.nif.trim() && !customerNif(customer.nif) ? tr('Revisa el NIF', 'Check the NIF') : undefined}>
-                        <input value={customer.nif} onChange={(e) => setCustomer({ ...customer, nif: e.target.value.toUpperCase() })} maxLength={20} />
-                      </Field>
-                    </div>
-                    <Field label={tr('Dirección', 'Address')}>
-                      <input value={customer.address} onChange={(e) => setCustomer({ ...customer, address: e.target.value })} maxLength={200} />
-                    </Field>
-                  </div>
-                ) : (
-                  <button className="link invoice-link" onMouseDown={keep} onClick={() => setInvoice(true)}>
-                    {tr('Factura con datos del cliente', 'Invoice with customer details')}
+                  <button className={`price-btn${l.unitCents === 0 ? ' zero' : ''}`} onClick={() => setPriceEdit(l.key)} title={tr('Toca para cambiar el precio', 'Tap to change the price')}>
+                    {fmt(l.unitCents)}
+                    <Pencil size={12} className="price-edit" aria-hidden="true" />
                   </button>
                 )}
               </div>
-              <div className="pay-actions">
-                {noPrinter ? (
-                  <>
-                    <button className="btn btn-primary btn-xl" disabled={busy || blocked} onMouseDown={keep} onClick={() => finish(false)}>
-                      <Save size={20} />
-                      {busy ? tr('Guardando…', 'Saving…') : tr('Guardar ticket', 'Save ticket')}
-                      <kbd className="on-dark">Enter</kbd>
-                    </button>
-                    <p className="pay-hint">
-                      {tr(
-                        'No hay impresora configurada: el ticket se guarda y se puede imprimir después desde Tickets.',
-                        'No printer is set up: the ticket is saved and can be printed later from Tickets.',
-                      )}
-                      {onSetupPrinter && (
-                        <>
-                          {' '}
-                          <button className="link" onMouseDown={keep} onClick={onSetupPrinter}>
-                            {tr('Configurar impresora', 'Set up printer')}
-                          </button>
-                        </>
-                      )}
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <button className="btn btn-primary btn-xl" disabled={busy || blocked} onMouseDown={keep} onClick={() => finish(true)}>
-                      <Printer size={20} />
-                      {busy ? tr('Imprimiendo…', 'Printing…') : tr('Imprimir ticket', 'Print ticket')}
-                      <kbd className="on-dark">Enter</kbd>
-                    </button>
-                    <button className="btn btn-ghost" disabled={busy || blocked} onMouseDown={keep} onClick={() => finish(false)}>
-                      {tr('Guardar sin imprimir', 'Save without printing')}
-                      <kbd>Shift+Enter</kbd>
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-      </section>
-
-      <aside className="side">
-        <div className="side-head">
-          <span>{paying ? tr('Así se imprimirá', 'This is what will print') : tr('Vista previa del ticket', 'Ticket preview')}</span>
-          {preview && <span className="mono">{preview.number}</span>}
-        </div>
-        <div className="side-pills">
-          {printer && (
-            <button
-              className={`printer-pill ${lastFailed ? 'paper' : printer.state}`}
-              onMouseDown={keep}
-              onClick={onSetupPrinter}
-              disabled={!onSetupPrinter}
-              title={printer.name || tr('Ajustes > Impresora', 'Settings > Printer')}
-            >
-              <i aria-hidden="true" />
-              <span>{lastFailed ? tr('Último ticket sin imprimir', 'Last ticket not printed') : printerStateText(printer.state)}</span>
-              {printer.name && <small>{printer.name}</small>}
-              {printer.jobs > 0 && (
-                <small>
-                  {printer.jobs} {tr('en cola', 'queued')}
+              {(l.repairId || l.vatBp !== settings.defaultVatBp) && (
+                <small className="ln-note">
+                  {l.repairId && tr('Reparación', 'Repair')}
+                  {l.repairId && l.vatBp !== settings.defaultVatBp && ' · '}
+                  {l.vatBp !== settings.defaultVatBp && `IVA ${rate(l.vatBp)}`}
                 </small>
               )}
-            </button>
-          )}
-          {till !== undefined && (
-            <button className={`printer-pill${till ? ' ready' : ''}`} onMouseDown={keep} onClick={onCash} title={tr('Caja', 'Till')}>
-              <i aria-hidden="true" />
-              <span>{till ? `${tr('Caja abierta desde', 'Till open since')} ${since(till)}` : tr('Caja cerrada', 'Till closed')}</span>
-            </button>
-          )}
-        </div>
-        <div className="paper-scroll" ref={paperRef}>
-          {preview && <Paper lines={preview.lines} logo={logo} cols={settings.columns} />}
-          {previewErr && <p className="form-error">{previewErr}</p>}
-        </div>
-        <div className="checkout">
-          {last && (
-            <div className="last">
-              <span>
-                {tr('Último', 'Last')} <b className="mono">{last.number}</b> · {eur(last.totalCents)}
+            </div>
+          ))}
+
+          {!lines.length && paid && (
+            <div className="done">
+              <span className="done-check">
+                <Check size={26} strokeWidth={3} />
               </span>
-              <span className="last-actions">
-                {repeatable(last) && (
-                  <button className="link" onMouseDown={keep} onClick={() => repeat(last)} title={tr('Añadir los mismos artículos a este ticket', 'Add the same items to this ticket')}>
-                    <Repeat2 size={14} />
+              <strong>{eur(paid.totalCents)}</strong>
+              <span className="muted">
+                {METHODS.find((m) => m.id === paid.payment.method)?.label()} · <span className="mono">{paid.number}</span>
+              </span>
+              {change > 0 && (
+                <div className="done-change">
+                  <span>{tr('Cambio', 'Change')}</span>
+                  <strong>{eur(change)}</strong>
+                </div>
+              )}
+              <div className="done-actions">
+                {!noPrinter && (
+                  <button className="btn" onMouseDown={keep} onClick={() => reprint(paid.id, !!last?.printed).then(() => setLast((cur) => (cur ? { ...cur, printed: true } : cur)))}>
+                    <Printer size={16} />
+                    {last?.printed ? tr('Copia', 'Copy') : tr('Imprimir', 'Print')}
+                  </button>
+                )}
+                <button className="btn" onMouseDown={keep} onClick={() => setSharing(paid)} title={tr('Enviar por WhatsApp, email o PDF', 'Send by WhatsApp, email or PDF')}>
+                  <Send size={16} />
+                  {tr('Enviar', 'Send')}
+                </button>
+                {repeatable(paid) && (
+                  <button className="btn" onMouseDown={keep} onClick={() => repeat(paid)} title={tr('Añadir los mismos artículos a una venta nueva', 'Add the same items to a new sale')}>
+                    <Repeat2 size={16} />
                     {tr('Repetir', 'Repeat')}
                   </button>
                 )}
-                {!noPrinter && (
-                  <button className="link" onMouseDown={keep} onClick={() => reprint(last.id, true)}>
-                    <Printer size={14} />
-                    {tr('Copia', 'Copy')}
-                  </button>
-                )}
-                <button className="link" onClick={() => setSharing(last)} title={tr('Enviar por WhatsApp, email o PDF', 'Send by WhatsApp, email or PDF')}>
-                  <Send size={14} />
-                  {tr('Enviar', 'Send')}
-                </button>
-              </span>
+              </div>
             </div>
           )}
-          <div className="checkout-total">
-            <span>
-              {tr('Total', 'Total')}
-              {count > 0 && ` · ${count} ${count === 1 ? tr('unidad', 'unit') : tr('unidades', 'units')}`}
-            </span>
+
+          {!lines.length && !paid && (
+            <div className="till-empty">
+              <ScanBarcode size={30} />
+              <p>{tr('Escribe, escanea o toca un producto.', 'Type, scan or tap a product.')}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="till-foot">
+          <div className="till-total">
+            <span>{tr('Total', 'Total')}</span>
             <strong>{eur(total)}</strong>
           </div>
-          {negative && (
-            <p className="form-error">{tr('El total es negativo: revisa los descuentos.', 'The total is negative: check the discounts.')}</p>
+          {negative && <p className="form-error">{tr('El total es negativo: revisa los descuentos.', 'The total is negative: check the discounts.')}</p>}
+
+          {noPrinter ? (
+            <button className="print-row" onMouseDown={keep} onClick={onSetupPrinter} disabled={!onSetupPrinter}>
+              <Printer size={17} />
+              <span>{tr('Sin impresora: las ventas se guardan sin imprimir', 'No printer: sales are saved without printing')}</span>
+            </button>
+          ) : (
+            <button className={`print-row${printOn ? ' on' : ''}`} role="switch" aria-checked={printOn} onMouseDown={keep} onClick={() => setPrintOn(!printOn)} title="F6">
+              <Printer size={17} />
+              <span>
+                {printOn ? tr('Imprimir ticket', 'Print the ticket') : tr('Sin imprimir', 'No printing')}
+                {(printerTrouble || lastFailed) && <small> · {lastFailed ? tr('el último no salió', 'the last one failed') : printerStateText(printer!.state)}</small>}
+              </span>
+              <i className="switch" aria-hidden="true" />
+            </button>
           )}
-          <button className="btn-charge" disabled={!lines.length || busy || paying || negative} onMouseDown={keep} onClick={openPay}>
-            <span>{tr('Cobrar', 'Charge')}</span>
-            <kbd>F12</kbd>
-          </button>
+
+          <div className={`tender${lines.length && !negative ? '' : ' off'}`}>
+            <span>{tr('Entrega', 'Given')}</span>
+            {quick(total, 3).map((c) => (
+              <button key={c} onMouseDown={keep} onClick={() => payNow('cash', c)} disabled={!lines.length || busy || negative} title={tr('Con este billete: se ve el cambio', 'With this note: shows the change')}>
+                {fmt(c).replace(',00', '')} €
+              </button>
+            ))}
+            <button className="tender-more" onMouseDown={keep} onClick={openPay} disabled={!lines.length || busy || negative} title={tr('Otra cantidad, factura con datos del cliente…', 'Another amount, invoice with customer details…')}>
+              {tr('Más', 'More')}
+              <kbd>F12</kbd>
+            </button>
+          </div>
+
+          <div className={`pay-grid${settings.payBizum ? ' three' : ''}`}>
+            <button className="pay-btn pay-cash" onMouseDown={keep} onClick={() => payNow('cash')} disabled={!lines.length || busy || negative}>
+              <Banknote size={26} />
+              <span>{tr('Efectivo', 'Cash')}</span>
+              <kbd>F9</kbd>
+            </button>
+            <button className="pay-btn pay-card" onMouseDown={keep} onClick={() => payNow('card')} disabled={!lines.length || busy || negative}>
+              <CreditCard size={26} />
+              <span>{tr('Tarjeta', 'Card')}</span>
+              <kbd>F10</kbd>
+            </button>
+            {settings.payBizum && (
+              <button className="pay-btn pay-bizum" onMouseDown={keep} onClick={() => payNow('bizum')} disabled={!lines.length || busy || negative}>
+                <Smartphone size={26} />
+                <span>Bizum</span>
+              </button>
+            )}
+          </div>
+          <div className="pay-grid low">
+            <button className="pay-btn pay-recharge" onMouseDown={keep} onClick={openRecharge}>
+              <SmartphoneCharging size={21} />
+              <span>{tr('Recarga', 'Recharge')}</span>
+              <kbd>F7</kbd>
+            </button>
+            <button className="pay-btn pay-expense" onMouseDown={keep} onClick={openExpense}>
+              <ShoppingCart size={21} />
+              <span>{tr('Gasto', 'Expense')}</span>
+              <kbd>F8</kbd>
+            </button>
+          </div>
         </div>
       </aside>
+
+      {paying && (
+        <div className="pay-back" onMouseDown={() => !busy && setPaying(false)}>
+          <div className="pay" onMouseDown={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label={tr('Cobrar', 'Charge')} ref={payRef}>
+            <div className="pay-head">
+              <h2>{tr('Cobrar', 'Charge')}</h2>
+              {method === 'cash' && till === null && (
+                <div className="till-note">
+                  <Wallet size={17} />
+                  <span>{tr('Caja cerrada', 'Till closed')}</span>
+                  <div className="money-input">
+                    <input
+                      value={float}
+                      onChange={(e) => setFloat(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key !== 'Enter') return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        openTill();
+                      }}
+                      inputMode="decimal"
+                      placeholder={tr('Fondo', 'Float')}
+                      aria-label={tr('Fondo inicial', 'Starting float')}
+                    />
+                    <span>€</span>
+                  </div>
+                  <button className="btn sm" onMouseDown={keep} onClick={openTill} disabled={opening || floatCents === null || floatCents < 0}>
+                    {tr('Abrir caja', 'Open till')}
+                  </button>
+                </div>
+              )}
+              <button className="icon-btn" onMouseDown={keep} onClick={() => setPaying(false)} disabled={busy} aria-label={tr('Cerrar', 'Close')}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="pay-body">
+              <div className="pay-total">
+                <span>{tr('Total a cobrar', 'Amount due')}</span>
+                <strong>{eur(total)}</strong>
+              </div>
+              <div className="methods">
+                {METHODS.map((m) => (
+                  <button key={m.id} className={`method${method === m.id ? ' on' : ''}`} onMouseDown={keep} onClick={() => setMethod(m.id)}>
+                    <m.icon size={20} />
+                    <span>{m.label()}</span>
+                    <kbd>{m.key}</kbd>
+                  </button>
+                ))}
+              </div>
+              {method === 'cash' ? (
+                <div className="cash">
+                  <label className="field">
+                    <span className="field-label">{tr('Entregado por el cliente', 'Received from the customer')}</span>
+                    <div className="money-input big">
+                      <input ref={givenRef} autoFocus value={given} onChange={(e) => setGiven(e.target.value)} placeholder={fmt(total)} inputMode="decimal" />
+                      <span>€</span>
+                    </div>
+                  </label>
+                  <div className="quick">
+                    <button className={given === '' ? 'on' : ''} onMouseDown={keep} onClick={() => setGiven('')}>
+                      {tr('Exacto', 'Exact')}
+                    </button>
+                    {quick(total).map((c) => (
+                      <button key={c} className={tendered === c ? 'on' : ''} onMouseDown={keep} onClick={() => setGiven(fmt(c))}>
+                        {eur(c)}
+                      </button>
+                    ))}
+                  </div>
+                  {badAmount || tooMuch ? (
+                    <div className="change short">
+                      <span>{tooMuch ? tr('Importe demasiado alto', 'Amount too high') : tr('Importe no válido', 'Invalid amount')}</span>
+                      <strong>{given}</strong>
+                    </div>
+                  ) : (
+                    <div className={`change${short ? ' short' : ''}`}>
+                      <span>{short ? tr('Falta', 'Still due') : tr('Cambio', 'Change')}</span>
+                      <strong>{eur(short ? total - (tendered ?? 0) : preview?.payment?.changeCents ?? 0)}</strong>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="pay-note">
+                  {method === 'card'
+                    ? tr('Cobra en el datáfono y confirma aquí.', 'Take the payment on the card terminal, then confirm here.')
+                    : tr('Comprueba que el Bizum ha llegado y confirma.', 'Check that the Bizum payment has arrived, then confirm.')}
+                </p>
+              )}
+              {invoice ? (
+                <div className="customer">
+                  <div className="customer-head">
+                    <b>{tr('Factura con datos del cliente', 'Invoice with customer details')}</b>
+                    {!overLimit && (
+                      <button className="link" onMouseDown={keep} onClick={() => setInvoice(false)}>
+                        {tr('Quitar', 'Remove')}
+                      </button>
+                    )}
+                  </div>
+                  {overLimit && (
+                    <p className="pay-hint">
+                      {service
+                        ? tr('Con una reparación, más de 400 €: hace falta una factura con los datos del cliente.', 'With a repair, over 400 EUR: this needs an invoice with the customer details.')
+                        : tr('Más de 3.000 €: hace falta una factura con los datos del cliente.', 'Over 3,000 EUR: this needs an invoice with the customer details.')}
+                    </p>
+                  )}
+                  <div className="grid2">
+                    <Field label={tr('Nombre o razón social', 'Name or company')}>
+                      <input value={customer.name} onChange={(e) => setCustomer({ ...customer, name: e.target.value })} maxLength={120} />
+                    </Field>
+                    <Field label="NIF" error={customer.nif.trim() && !customerNif(customer.nif) ? tr('Revisa el NIF', 'Check the NIF') : undefined}>
+                      <input value={customer.nif} onChange={(e) => setCustomer({ ...customer, nif: e.target.value.toUpperCase() })} maxLength={20} />
+                    </Field>
+                  </div>
+                  <Field label={tr('Dirección', 'Address')}>
+                    <input value={customer.address} onChange={(e) => setCustomer({ ...customer, address: e.target.value })} maxLength={200} />
+                  </Field>
+                </div>
+              ) : (
+                <button className="link invoice-link" onMouseDown={keep} onClick={() => setInvoice(true)}>
+                  {tr('Factura con datos del cliente', 'Invoice with customer details')}
+                </button>
+              )}
+            </div>
+            <div className="pay-actions">
+              {noPrinter ? (
+                <>
+                  <button className="btn btn-primary btn-xl" disabled={busy || blocked} onMouseDown={keep} onClick={() => confirmPay(false)}>
+                    <Save size={20} />
+                    {busy ? tr('Guardando…', 'Saving…') : tr('Guardar venta', 'Save the sale')}
+                    <kbd className="on-dark">Enter</kbd>
+                  </button>
+                  <p className="pay-hint">
+                    {tr('No hay impresora configurada: la venta se guarda y se puede imprimir después desde Hoy.', 'No printer is set up: the sale is saved and can be printed later from Today.')}
+                    {onSetupPrinter && (
+                      <>
+                        {' '}
+                        <button className="link" onMouseDown={keep} onClick={onSetupPrinter}>
+                          {tr('Configurar impresora', 'Set up printer')}
+                        </button>
+                      </>
+                    )}
+                  </p>
+                </>
+              ) : (
+                <>
+                  <button className="btn btn-primary btn-xl" disabled={busy || blocked} onMouseDown={keep} onClick={() => confirmPay(printOn)}>
+                    {printOn ? <Printer size={20} /> : <Save size={20} />}
+                    {busy ? tr('Guardando…', 'Saving…') : printOn ? tr('Cobrar e imprimir', 'Charge and print') : tr('Cobrar sin imprimir', 'Charge without printing')}
+                    <kbd className="on-dark">Enter</kbd>
+                  </button>
+                  <button className="btn btn-ghost" disabled={busy || blocked} onMouseDown={keep} onClick={() => confirmPay(!printOn)}>
+                    {printOn ? tr('Cobrar sin imprimir', 'Charge without printing') : tr('Cobrar e imprimir', 'Charge and print')}
+                    <kbd>Shift+Enter</kbd>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {sharing && <ShareDialog ticketId={sharing.id} number={sharing.number} onClose={() => setSharing(null)} />}
-      {quickBook && <QuickSaleModal settings={settings} onClose={() => setQuickBook(false)} />}
+      {seeTicket && preview && (
+        <Modal title={tr('Así saldrá el ticket', 'This is how the ticket will look')} onClose={() => setSeeTicket(false)}>
+          <div className="see-ticket">
+            <Paper lines={preview.lines} logo={logo} cols={settings.columns} />
+          </div>
+          {previewErr && <p className="form-error">{previewErr}</p>}
+        </Modal>
+      )}
+      {recharge && (
+        <RechargeModal
+          settings={settings}
+          cents={recharge.cents}
+          onSave={saveEntry}
+          onClose={(saved) => {
+            if (saved && recharge.fromCart) {
+              history.current = [];
+              setLines([]);
+              setSel(null);
+            }
+            setRecharge(null);
+            searchRef.current?.focus();
+          }}
+        />
+      )}
+      {expense !== null && (
+        <ExpenseModal
+          initial={expense}
+          settings={settings}
+          onSave={saveEntry}
+          onClose={() => {
+            setExpense(null);
+            searchRef.current?.focus();
+          }}
+        />
+      )}
       {clock && (
         <ClockModal
           last={clock.last}
           onCancel={() => setClock(null)}
           onConfirm={() => {
-            const p = clock.print;
+            const c = clock.charge;
             setClock(null);
-            finish(p, true);
+            finish(c, true);
           }}
         />
       )}

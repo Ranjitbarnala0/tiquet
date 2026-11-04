@@ -1,9 +1,9 @@
-// The shop's book: every euro in and out in one list. Sales charged with a
-// ticket come from the tickets themselves; sales made without a ticket and
-// expenses are typed here, one line each. An entry is never edited or
-// wiped: deleting one takes it out of every list and total, and keeps a note
-// of who deleted it and when that only the owner sees, so the books stay
-// traceable (Ley 58/2003 art. 29.2.j).
+// Every euro in and out in one list. Sales are tickets, printed or not, and
+// come from the tickets themselves; recharges and expenses are typed here, one
+// line each. An entry is never edited or wiped: deleting one takes it out of
+// every list and total, and keeps a note of who deleted it and when that only
+// the owner sees, so the books stay traceable (Ley 58/2003 art. 29.2.j).
+// Sales typed here before every sale became a ticket stay as they were.
 
 use std::fs;
 use std::path::PathBuf;
@@ -25,13 +25,13 @@ pub const METHODS: [&str; 4] = ["cash", "card", "bizum", "transfer"];
 #[derive(Deserialize, Default, Debug)]
 #[serde(default, rename_all = "camelCase")]
 pub struct EntryIn {
-    // sale | expense
+    // expense | recharge
     pub kind: String,
     pub concept: String,
     pub cents: i64,
     pub method: String,
     pub vat_bp: Option<i64>,
-    pub category: String,
+    // who it was bought from; on a recharge, the operator
     pub supplier: String,
     pub supplier_nif: String,
     pub invoice_ref: String,
@@ -56,16 +56,17 @@ pub struct Entry {
     pub supplier_nif: String,
     pub invoice_ref: String,
     pub by_name: String,
+    pub cost_cents: Option<i64>,
     pub deleted_at: Option<String>,
     pub deleted_by: Option<String>,
     pub delete_reason: Option<String>,
 }
 
-// a line of the book as the screen shows it: an entry or a ticket
+// a line of the day as the screen shows it: a ticket or a typed entry
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Row {
-    // sale (typed, no ticket) | expense | ticket
+    // ticket | recharge | expense | sale (typed, from before)
     pub source: &'static str,
     pub id: i64,
     pub at: String,
@@ -74,9 +75,16 @@ pub struct Row {
     pub cents: i64,
     pub method: String,
     pub by_name: String,
-    pub category: String,
-    // a ticket's number
+    pub supplier: String,
+    pub invoice_ref: String,
+    // of a recharge, what counts as an expense
+    pub cost_cents: i64,
+    // of a ticket: its number, whether it is a return or a full invoice, and
+    // printed | unknown | failed | none
     pub number: Option<String>,
+    pub refund: bool,
+    pub invoice: bool,
+    pub printed: Option<String>,
     // a voided ticket or a deleted entry: shown crossed out, never counted
     pub gone: bool,
     pub deleted_by: Option<String>,
@@ -87,16 +95,26 @@ pub struct Row {
 #[derive(Serialize, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct Summary {
-    pub ticket_cents: i64,
-    pub ticket_count: i64,
-    pub sale_cents: i64,
-    pub sale_count: i64,
-    pub expense_cents: i64,
-    pub expense_count: i64,
-    pub result_cents: i64,
-    // cash in less cash out: tickets, typed sales and expenses paid in cash
+    // sales by how they were paid, net of returns, and recharges apart
     pub cash_cents: i64,
-    pub by_category: Vec<(String, i64)>,
+    pub card_cents: i64,
+    pub bizum_cents: i64,
+    pub other_cents: i64,
+    pub recharge_cents: i64,
+    // all of the above
+    pub total_cents: i64,
+    pub sale_count: i64,
+    pub refund_count: i64,
+    pub recharge_count: i64,
+    // what was bought, what the operators keep of the recharges, and both
+    pub purchase_cents: i64,
+    pub purchase_count: i64,
+    pub recharge_cost_cents: i64,
+    pub expense_cents: i64,
+    // the total less the expenses
+    pub net_cents: i64,
+    // cash that came in less cash that went out
+    pub drawer_cents: i64,
 }
 
 #[derive(Serialize, Debug)]
@@ -107,7 +125,7 @@ pub struct Quick {
     pub uses: i64,
 }
 
-const COLS: &str = "id, kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, deleted_at, deleted_by, delete_reason";
+const COLS: &str = "id, kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, cost_cents, deleted_at, deleted_by, delete_reason";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
     Ok(Entry {
@@ -123,9 +141,10 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
         supplier_nif: r.get(9)?,
         invoice_ref: r.get(10)?,
         by_name: r.get(11)?,
-        deleted_at: r.get(12)?,
-        deleted_by: r.get(13)?,
-        delete_reason: r.get(14)?,
+        cost_cents: r.get(12)?,
+        deleted_at: r.get(13)?,
+        deleted_by: r.get(14)?,
+        delete_reason: r.get(15)?,
     })
 }
 
@@ -156,10 +175,11 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
             return Ok((get(conn, id)?, true));
         }
     }
-    let kind = e.kind.as_str();
-    if !["sale", "expense"].contains(&kind) {
-        return fail("E_INVALID:kind");
-    }
+    let recharge = match e.kind.as_str() {
+        "expense" => false,
+        "recharge" => true,
+        _ => return fail("E_INVALID:kind"),
+    };
     if e.cents <= 0 || e.cents > 100 * MAX_PRICE {
         return fail("E_INVALID:amount");
     }
@@ -167,17 +187,13 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
     if !METHODS.contains(&method) {
         return fail("E_INVALID:method");
     }
+    let supplier = text(&e.supplier, 120);
     let concept = match text(&e.concept, 120) {
-        c if c.is_empty() && kind == "sale" => "Venta".to_string(),
-        c if c.is_empty() => "Gasto".to_string(),
-        c => c,
+        c if !c.is_empty() => c,
+        _ if !recharge => "Gasto".to_string(),
+        _ if supplier.is_empty() => "Recarga".to_string(),
+        _ => format!("Recarga {supplier}"),
     };
-    let category = match (kind, text(&e.category, 60)) {
-        ("expense", c) if c.is_empty() => "Otros".to_string(),
-        ("expense", c) => c,
-        _ => String::new(),
-    };
-    let vat = e.vat_bp.unwrap_or(s.default_vat_bp).clamp(0, 10_000);
     let at = match e.date.trim() {
         "" => now(),
         d => {
@@ -192,9 +208,16 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
             }
         }
     };
+    // a recharge is money for the operator: it comes in and, but for the
+    // shop's commission, counts as spent. Tax is the operator's.
+    let (kind, vat, category, cost) = if recharge {
+        ("sale", 0, "", Some(e.cents - div_round(e.cents * s.recharge_commission_bp, 10_000)))
+    } else {
+        ("expense", e.vat_bp.unwrap_or(s.default_vat_bp).clamp(0, 10_000), "Compras", None)
+    };
     conn.execute(
-        "INSERT INTO book (kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, training, client_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        "INSERT INTO book (kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, training, client_id, cost_cents)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             kind,
             at,
@@ -203,12 +226,13 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
             method,
             vat,
             category,
-            text(&e.supplier, 120),
+            supplier,
             text(&e.supplier_nif, 20).to_uppercase(),
             text(&e.invoice_ref, 40),
             me.name,
             s.training,
             e.client_id.filter(|c| !c.is_empty()),
+            cost,
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -222,6 +246,13 @@ fn may_change(me: &SessionUser, e: &Entry, staff: bool) -> bool {
     me.role == "admin" || (staff && e.by_name == me.name && e.at[..10] == now()[..10])
 }
 
+fn mark(conn: &Connection, id: i64, by: &str, reason: &str) -> Result<()> {
+    let reason = text(reason, 120);
+    let reason = (!reason.is_empty()).then_some(reason.as_str());
+    conn.execute("UPDATE book SET deleted_at = ?1, deleted_by = ?2, delete_reason = ?3 WHERE id = ?4", params![now(), by, reason, id])?;
+    event(conn, id, by, "deleted", reason)
+}
+
 pub fn delete(conn: &Connection, me: &SessionUser, staff: bool, id: i64, reason: &str) -> Result<Entry> {
     let e = get(conn, id)?;
     if !may_change(me, &e, staff) {
@@ -230,13 +261,24 @@ pub fn delete(conn: &Connection, me: &SessionUser, staff: bool, id: i64, reason:
     if e.deleted_at.is_some() {
         return Ok(e);
     }
-    let reason = text(reason, 120);
-    conn.execute(
-        "UPDATE book SET deleted_at = ?1, deleted_by = ?2, delete_reason = ?3 WHERE id = ?4",
-        params![now(), me.name, (!reason.is_empty()).then_some(reason.as_str()), id],
-    )?;
-    event(conn, id, &me.name, "deleted", (!reason.is_empty()).then_some(reason.as_str()))?;
+    mark(conn, id, &me.name, reason)?;
     get(conn, id)
+}
+
+// what was typed on a day, deleted the same way as one by one
+pub fn delete_day(conn: &Connection, by: &str, date: &str, training: bool, reason: &str, what: &str) -> Result<i64> {
+    let only = match what {
+        "sales" => "AND kind = 'sale' AND cost_cents IS NULL",
+        "recharges" => "AND cost_cents IS NOT NULL",
+        "expenses" => "AND kind = 'expense'",
+        _ => "",
+    };
+    let mut stmt = conn.prepare(&format!("SELECT id FROM book WHERE at >= ?1 AND at <= ?1 || 'T99' AND training = ?2 AND deleted_at IS NULL {only}"))?;
+    let ids = stmt.query_map(params![date, training], |r| r.get::<_, i64>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    for id in &ids {
+        mark(conn, *id, by, reason)?;
+    }
+    Ok(ids.len() as i64)
 }
 
 pub fn restore(conn: &Connection, me: &SessionUser, staff: bool, id: i64) -> Result<Entry> {
@@ -252,8 +294,8 @@ pub fn restore(conn: &Connection, me: &SessionUser, staff: bool, id: i64) -> Res
     get(conn, id)
 }
 
-// Everything between two dates, newest first: typed entries (the deleted
-// ones only when asked) and tickets (voided ones crossed out).
+// Everything between two dates, newest first; what was voided or deleted only
+// when asked for.
 pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Result<Vec<Row>> {
     let (from, to) = r.bounds()?;
     let mut out = Vec::new();
@@ -262,17 +304,26 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
     ))?;
     for e in stmt.query_map(params![from, to, training, deleted], row)? {
         let e = e?;
-        let sign = if e.kind == "expense" { -1 } else { 1 };
+        let (source, sign) = match (e.kind.as_str(), e.cost_cents) {
+            ("expense", _) => ("expense", -1),
+            (_, Some(_)) => ("recharge", 1),
+            _ => ("sale", 1),
+        };
         out.push(Row {
-            source: if e.kind == "expense" { "expense" } else { "sale" },
+            source,
             id: e.id,
             at: e.at,
             concept: e.concept,
             cents: sign * e.cents,
             method: e.method,
             by_name: e.by_name,
-            category: e.category,
+            supplier: e.supplier,
+            invoice_ref: e.invoice_ref,
+            cost_cents: e.cost_cents.unwrap_or(0),
             number: None,
+            refund: false,
+            invoice: false,
+            printed: None,
             gone: e.deleted_at.is_some(),
             deleted_by: e.deleted_by,
             deleted_at: e.deleted_at,
@@ -280,17 +331,23 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
         });
     }
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.issued_at, t.number, t.kind, t.total_cents, t.payment_method, t.user_name, t.voided_at IS NOT NULL,
+        "SELECT t.id, t.issued_at, t.number, t.kind, t.total_cents, t.payment_method, t.user_name, t.voided_at, t.voided_by, t.void_reason,
                 COALESCE((SELECT name FROM ticket_lines WHERE ticket_id = t.id ORDER BY pos LIMIT 1), ''),
-                (SELECT COUNT(*) FROM ticket_lines WHERE ticket_id = t.id)
-         FROM tickets t WHERE t.issued_at >= ?1 AND t.issued_at <= ?2 AND t.training = ?3",
+                (SELECT COUNT(*) FROM ticket_lines WHERE ticket_id = t.id),
+                t.customer_name IS NOT NULL,
+                CASE WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id AND p.status IN ('printed', 'sent')) THEN 'printed'
+                     WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id AND p.status = 'unknown') THEN 'unknown'
+                     WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id) THEN 'failed'
+                     ELSE 'none' END
+         FROM tickets t WHERE t.issued_at >= ?1 AND t.issued_at <= ?2 AND t.training = ?3 AND (?4 OR t.voided_at IS NULL)",
     )?;
-    let tickets = stmt.query_map(params![from, to, training], |r| {
-        let first: String = r.get(8)?;
-        let lines: i64 = r.get(9)?;
-        let kind: String = r.get(3)?;
+    let tickets = stmt.query_map(params![from, to, training, deleted], |r| {
+        let first: String = r.get(10)?;
+        let lines: i64 = r.get(11)?;
+        let refund = r.get::<_, String>(3)? == "refund";
+        let voided_at: Option<String> = r.get(7)?;
         let mut concept = if lines > 1 { format!("{first} y {} más", lines - 1) } else { first };
-        if kind == "refund" {
+        if refund {
             concept = format!("Devolución: {concept}");
         }
         Ok(Row {
@@ -301,12 +358,17 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
             cents: r.get(4)?,
             method: r.get(5)?,
             by_name: r.get(6)?,
-            category: String::new(),
+            supplier: String::new(),
+            invoice_ref: String::new(),
+            cost_cents: 0,
             number: Some(r.get(2)?),
-            gone: r.get(7)?,
-            deleted_by: None,
-            deleted_at: None,
-            delete_reason: None,
+            refund,
+            invoice: r.get(12)?,
+            printed: Some(r.get(13)?),
+            gone: voided_at.is_some(),
+            deleted_by: r.get(8)?,
+            deleted_at: voided_at,
+            delete_reason: r.get(9)?,
         })
     })?;
     for t in tickets {
@@ -318,42 +380,49 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
 
 pub fn summary(rows: &[Row]) -> Summary {
     let mut s = Summary::default();
-    let mut cats: std::collections::BTreeMap<String, i64> = Default::default();
     for r in rows.iter().filter(|r| !r.gone) {
         match r.source {
-            "ticket" => {
-                s.ticket_cents += r.cents;
-                s.ticket_count += 1;
+            "recharge" => {
+                s.recharge_cents += r.cents;
+                s.recharge_count += 1;
+                s.recharge_cost_cents += r.cost_cents;
             }
-            "sale" => {
-                s.sale_cents += r.cents;
-                s.sale_count += 1;
+            "expense" => {
+                s.purchase_cents -= r.cents;
+                s.purchase_count += 1;
             }
             _ => {
-                s.expense_cents -= r.cents;
-                s.expense_count += 1;
-                *cats.entry(r.category.clone()).or_default() -= r.cents;
+                match r.method.as_str() {
+                    "cash" => s.cash_cents += r.cents,
+                    "card" => s.card_cents += r.cents,
+                    "bizum" => s.bizum_cents += r.cents,
+                    _ => s.other_cents += r.cents,
+                }
+                if r.refund {
+                    s.refund_count += 1;
+                } else {
+                    s.sale_count += 1;
+                }
             }
         }
         if r.method == "cash" {
-            s.cash_cents += r.cents;
+            s.drawer_cents += r.cents;
         }
     }
-    s.result_cents = s.ticket_cents + s.sale_cents - s.expense_cents;
-    let mut by: Vec<(String, i64)> = cats.into_iter().collect();
-    by.sort_by_key(|(_, c)| std::cmp::Reverse(*c));
-    s.by_category = by;
+    s.total_cents = s.cash_cents + s.card_cents + s.bizum_cents + s.other_cents + s.recharge_cents;
+    s.expense_cents = s.purchase_cents + s.recharge_cost_cents;
+    s.net_cents = s.total_cents - s.expense_cents;
     s
 }
 
-// what the shop types most, for one-tap buttons: the last 90 days' sales
+// what the shop buys most, for one-tap buttons: the last 90 days' expenses
 pub fn quick(conn: &Connection, training: bool) -> Result<Vec<Quick>> {
     let since = (chrono::Local::now() - chrono::Duration::days(90)).format("%Y-%m-%d").to_string();
     let mut stmt = conn.prepare(
         "SELECT concept, cents, n FROM (
            SELECT concept, cents, COUNT(*) OVER (PARTITION BY lower(concept)) AS n,
                   ROW_NUMBER() OVER (PARTITION BY lower(concept) ORDER BY id DESC) AS k
-           FROM book WHERE kind = 'sale' AND deleted_at IS NULL AND training = ?1 AND at >= ?2 AND concept <> 'Venta')
+           FROM book WHERE kind = 'expense' AND deleted_at IS NULL AND training = ?1 AND at >= ?2 AND concept <> 'Gasto')
          WHERE k = 1 ORDER BY n DESC, concept LIMIT 8",
     )?;
     let rows = stmt
@@ -362,23 +431,25 @@ pub fn quick(conn: &Connection, training: bool) -> Result<Vec<Quick>> {
     Ok(rows)
 }
 
-// what the cash drawer gained from typed entries since it was opened
-pub fn cash_between(conn: &Connection, from: &str, to: &str) -> Result<i64> {
+// what typed entries did to the cash drawer since it was opened: the money of
+// recharges came in, expenses went out. What a recharge costs is paid to the
+// operator from elsewhere, so the drawer keeps the cash.
+pub fn cash_between(conn: &Connection, from: &str, to: &str) -> Result<(i64, i64)> {
     Ok(conn.query_row(
-        "SELECT COALESCE(SUM(CASE kind WHEN 'sale' THEN cents ELSE -cents END), 0) FROM book
-         WHERE method = 'cash' AND deleted_at IS NULL AND training = 0 AND at >= ?1 AND at <= ?2",
+        "SELECT COALESCE(SUM(CASE kind WHEN 'sale' THEN cents ELSE 0 END), 0), COALESCE(SUM(CASE kind WHEN 'expense' THEN cents ELSE 0 END), 0)
+         FROM book WHERE method = 'cash' AND deleted_at IS NULL AND training = 0 AND at >= ?1 AND at <= ?2",
         params![from, to],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
 }
 
-// The book for the gestor: income and expenses with VAT split out, the
-// tickets as one line each. Deleted entries and voided tickets are not in
-// the books, so not here either.
+// The period for the gestor: income and expenses with VAT split out, the
+// tickets as one line each, recharges with what they cost. Deleted entries
+// and voided tickets are not in the books, so not here either.
 pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
     let (from, to) = r.bounds()?;
     let mut out = String::from(
-        "\u{feff}Fecha;Origen;Tipo;Concepto;Categoría;Pago;Base;IVA %;Cuota IVA;Total;Proveedor;NIF proveedor;Nº factura;Usuario\r\n",
+        "\u{feff}Fecha;Origen;Tipo;Concepto;Pago;Base;IVA %;Cuota IVA;Total;Coste recarga;Proveedor;NIF proveedor;Nº factura;Usuario\r\n",
     );
     let mut lines: Vec<(String, String)> = Vec::new();
     let mut stmt = conn.prepare(&format!(
@@ -391,14 +462,18 @@ pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
         let fields = [
             datetime(&e.at),
             "Manual".to_string(),
-            if e.kind == "expense" { "Gasto".into() } else { "Venta sin ticket".into() },
+            match (e.kind.as_str(), e.cost_cents) {
+                ("expense", _) => "Gasto".to_string(),
+                (_, Some(_)) => "Recarga".to_string(),
+                _ => "Venta".to_string(),
+            },
             cell(&e.concept),
-            cell(&e.category),
             method_label(&e.method).to_string(),
             plain(sign * base),
             plain(e.vat_bp),
             plain(sign * (e.cents - base)),
             plain(sign * e.cents),
+            e.cost_cents.map(plain).unwrap_or_default(),
             cell(&e.supplier),
             cell(&e.supplier_nif),
             cell(&e.invoice_ref),
@@ -431,14 +506,14 @@ pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
         let fields = [
             datetime(&at),
             format!("Ticket {number}"),
-            if kind == "refund" { "Devolución".into() } else { "Venta con ticket".into() },
-            String::new(),
+            if kind == "refund" { "Devolución".into() } else { "Venta".into() },
             String::new(),
             method_label(&method).to_string(),
             plain(base),
             rate.map(plain).unwrap_or_else(|| "varios".into()),
             plain(vat),
             plain(total),
+            String::new(),
             String::new(),
             String::new(),
             String::new(),
@@ -453,7 +528,7 @@ pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
     }
     let dir = backup::documents().join("Exportaciones");
     fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("libro_{}_{}.csv", r.from, r.to));
+    let path = dir.join(format!("ventas_{}_{}.csv", r.from, r.to));
     fs::write(&path, out)?;
     Ok(path)
 }
@@ -486,31 +561,51 @@ mod tests {
         Range { from: d.clone(), to: d }
     }
 
+    fn rows_today(c: &Connection) -> Vec<Row> {
+        rows(c, &today(), false, false).unwrap()
+    }
+
     #[test]
-    fn sales_and_expenses_add_up_and_deleting_leaves_a_trace() {
+    fn recharges_are_takings_and_expenses_at_once() {
+        let c = conn();
+        let s = Settings { recharge_commission_bp: 500, ..Settings::default() };
+        let ana = me("Ana", "cashier");
+        let (r, _) = add(&c, &ana, &s, EntryIn { supplier: "Lycamobile".into(), ..entry("recharge", "", 1000, "cash") }).unwrap();
+        assert_eq!((r.concept.as_str(), r.vat_bp, r.cost_cents), ("Recarga Lycamobile", 0, Some(950)));
+        add(&c, &ana, &s, entry("recharge", "", 500, "card")).unwrap();
+        add(&c, &ana, &s, entry("expense", "  pantalla   iphone 11 ", 4500, "cash")).unwrap();
+        let list = rows_today(&c);
+        let sum = summary(&list);
+        assert_eq!((sum.recharge_cents, sum.recharge_count, sum.recharge_cost_cents), (1500, 2, 1425));
+        assert_eq!((sum.purchase_cents, sum.expense_cents), (4500, 5925));
+        assert_eq!((sum.total_cents, sum.net_cents), (1500, -4425));
+        // the money of a recharge stays in the drawer; a purchase comes out of it
+        assert_eq!(sum.drawer_cents, 1000 - 4500);
+        assert_eq!(cash_between(&c, &today().from, &format!("{}T99", today().to)).unwrap(), (1000, 4500));
+        assert!(list.iter().any(|r| r.concept == "pantalla iphone 11" && r.source == "expense"));
+        // no other kind of entry is typed: a sale is a ticket
+        assert_eq!(add(&c, &ana, &s, entry("sale", "x", 100, "cash")).unwrap_err().0, "E_INVALID:kind");
+    }
+
+    #[test]
+    fn deleting_leaves_a_trace_and_an_undo() {
         let c = conn();
         let s = Settings::default();
         let ana = me("Ana", "cashier");
-        let (a, _) = add(&c, &ana, &s, entry("sale", "Recarga", 1000, "cash")).unwrap();
-        add(&c, &ana, &s, entry("sale", "  funda   iphone ", 1250, "card")).unwrap();
-        add(&c, &ana, &s, EntryIn { category: "Luz y agua".into(), ..entry("expense", "Luz", 4500, "cash") }).unwrap();
-        let list = rows_today(&c);
-        let sum = summary(&list);
-        assert_eq!((sum.sale_cents, sum.expense_cents, sum.result_cents, sum.cash_cents), (2250, 4500, -2250, -3500));
-        assert_eq!(sum.by_category, vec![("Luz y agua".to_string(), 4500)]);
-        assert!(list.iter().any(|r| r.concept == "funda iphone"));
+        let (a, _) = add(&c, &ana, &s, entry("recharge", "", 1000, "cash")).unwrap();
+        add(&c, &ana, &s, entry("expense", "Fundas", 1250, "card")).unwrap();
         // deleted: out of every list and total, but kept with who did it
         delete(&c, &ana, true, a.id, "").unwrap();
-        let after = summary(&rows_today(&c));
-        assert_eq!(after.sale_cents, 1250);
+        assert_eq!(summary(&rows_today(&c)).recharge_cents, 0);
         let kept = rows(&c, &today(), false, true).unwrap();
-        let gone = kept.iter().find(|r| r.id == a.id && r.source == "sale").unwrap();
+        let gone = kept.iter().find(|r| r.id == a.id && r.source == "recharge").unwrap();
         assert!(gone.gone && gone.deleted_by.as_deref() == Some("Ana"));
         assert!(c.execute("DELETE FROM book WHERE id = ?1", [a.id]).is_err());
         assert!(c.execute("UPDATE book SET cents = 1 WHERE id = ?1", [a.id]).is_err());
+        assert!(c.execute("UPDATE book SET cost_cents = 1 WHERE id = ?1", [a.id]).is_err());
         // undone: back in the totals, and the history says both
         restore(&c, &ana, true, a.id).unwrap();
-        assert_eq!(summary(&rows_today(&c)).sale_cents, 2250);
+        assert_eq!(summary(&rows_today(&c)).recharge_cents, 1000);
         let n: i64 = c.query_row("SELECT COUNT(*) FROM book_events WHERE entry_id = ?1", [a.id], |r| r.get(0)).unwrap();
         assert_eq!(n, 3);
         // someone else's entry is the owner's to delete
@@ -519,8 +614,19 @@ mod tests {
         assert_eq!(delete(&c, &ana, false, a.id, "").unwrap_err().0, "E_FORBIDDEN");
     }
 
-    fn rows_today(c: &Connection) -> Vec<Row> {
-        rows(c, &today(), false, false).unwrap()
+    #[test]
+    fn sales_typed_before_every_sale_was_a_ticket_still_count() {
+        let c = conn();
+        c.execute(
+            "INSERT INTO book (kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name)
+             VALUES ('sale', ?1, 'funda', 900, 'bizum', 2100, '', '', '', '', 'Ana')",
+            [now()],
+        )
+        .unwrap();
+        let list = rows_today(&c);
+        assert_eq!(list[0].source, "sale");
+        let sum = summary(&list);
+        assert_eq!((sum.bizum_cents, sum.sale_count, sum.total_cents, sum.net_cents), (900, 1, 900, 900));
     }
 
     #[test]
@@ -528,21 +634,21 @@ mod tests {
         let c = conn();
         let s = Settings::default();
         let ana = me("Ana", "cashier");
-        let once = EntryIn { client_id: Some("x1".into()), ..entry("sale", "Funda", 900, "cash") };
+        let once = EntryIn { client_id: Some("x1".into()), ..entry("expense", "Fundas", 900, "cash") };
         let (a, dup) = add(&c, &ana, &s, once).unwrap();
         assert!(!dup);
-        let (b, dup) = add(&c, &ana, &s, EntryIn { client_id: Some("x1".into()), ..entry("sale", "Funda", 900, "cash") }).unwrap();
+        let (b, dup) = add(&c, &ana, &s, EntryIn { client_id: Some("x1".into()), ..entry("expense", "Fundas", 900, "cash") }).unwrap();
         assert!(dup && a.id == b.id);
-        assert_eq!(add(&c, &ana, &s, entry("sale", "x", 0, "cash")).unwrap_err().0, "E_INVALID:amount");
-        assert_eq!(add(&c, &ana, &s, entry("sale", "x", 100, "crypto")).unwrap_err().0, "E_INVALID:method");
+        assert_eq!(add(&c, &ana, &s, entry("expense", "x", 0, "cash")).unwrap_err().0, "E_INVALID:amount");
+        assert_eq!(add(&c, &ana, &s, entry("expense", "x", 100, "crypto")).unwrap_err().0, "E_INVALID:method");
         let future = EntryIn { date: "2999-01-01".into(), ..entry("expense", "x", 100, "cash") };
         assert_eq!(add(&c, &ana, &s, future).unwrap_err().0, "E_INVALID:date");
-        let past = EntryIn { date: "2026-01-02".into(), ..entry("expense", "Alquiler", 50000, "transfer") };
+        let past = EntryIn { date: "2026-01-02".into(), ..entry("expense", "Pantallas", 50000, "transfer") };
         let (p, _) = add(&c, &ana, &s, past).unwrap();
-        assert_eq!((p.at.as_str(), p.category.as_str()), ("2026-01-02T12:00:00", "Otros"));
-        // the most typed sales come back as one-tap buttons, at their last price
-        add(&c, &ana, &s, entry("sale", "funda", 950, "cash")).unwrap();
+        assert_eq!((p.at.as_str(), p.category.as_str()), ("2026-01-02T12:00:00", "Compras"));
+        // what is bought most comes back as one-tap buttons, at its last price
+        add(&c, &ana, &s, entry("expense", "fundas", 950, "cash")).unwrap();
         let q = quick(&c, false).unwrap();
-        assert_eq!((q[0].concept.as_str(), q[0].cents, q[0].uses), ("funda", 950, 2));
+        assert_eq!((q[0].concept.as_str(), q[0].cents, q[0].uses), ("fundas", 950, 2));
     }
 }

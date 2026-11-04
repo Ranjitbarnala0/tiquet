@@ -6,6 +6,7 @@ import { App } from './App';
 import { tr } from './i18n';
 import { ToastProvider } from './toast';
 import './styles.css';
+import './till.css';
 
 function report(message: string) {
   call('log.client', { message }).catch(() => {});

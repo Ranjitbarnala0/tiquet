@@ -158,10 +158,16 @@ export function Cash({ user }: { user: User }) {
               <span>{tr('Entradas y salidas', 'Cash in and out')}</span>
               <b>{eur(d.movesCents)}</b>
             </div>
-            {d.bookCents !== 0 && (
+            {d.rechargeCents !== 0 && (
               <div className="stat">
-                <span>{tr('Libro: sin ticket − gastos', 'Book: no-ticket sales − expenses')}</span>
-                <b>{eur(d.bookCents)}</b>
+                <span>{tr('Recargas en efectivo', 'Recharges in cash')}</span>
+                <b>{eur(d.rechargeCents)}</b>
+              </div>
+            )}
+            {d.expenseCents !== 0 && (
+              <div className="stat">
+                <span>{tr('Gastos en efectivo', 'Expenses in cash')}</span>
+                <b>{eur(-d.expenseCents)}</b>
               </div>
             )}
           </div>

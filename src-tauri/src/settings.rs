@@ -52,9 +52,18 @@ pub struct Settings {
     pub auto_lock_min: u32,
     // the user signed in when Tiquet opens, with no password asked; 0 asks
     pub auto_login: i64,
-    // cashiers may delete what they typed in the book today; the owner may
-    // delete anything
+    // cashiers may delete what they sold or typed today; the owner may delete
+    // anything
     pub book_staff_delete: bool,
+    // cashiers see the day's totals on the main page
+    pub staff_totals: bool,
+    // a Bizum button beside cash and card on the main page
+    pub pay_bizum: bool,
+    // the amounts and operators the recharge window offers, comma separated,
+    // and what the shop earns on each recharge, in basis points
+    pub recharge_amounts: String,
+    pub recharge_operators: String,
+    pub recharge_commission_bp: i64,
     // practice mode: sales get their own series, print as not valid and
     // never count anywhere
     pub training: bool,
@@ -107,6 +116,11 @@ impl Default for Settings {
             auto_lock_min: 0,
             auto_login: 0,
             book_staff_delete: true,
+            staff_totals: true,
+            pay_bizum: false,
+            recharge_amounts: "5, 10, 15, 20, 30, 50".into(),
+            recharge_operators: String::new(),
+            recharge_commission_bp: 0,
             training: false,
             verifactu: "off".into(),
             cert: String::new(),
@@ -168,6 +182,9 @@ impl Settings {
             self.auto_lock_min = 0;
         }
         self.auto_login = self.auto_login.max(0);
+        self.recharge_amounts = self.recharge_amounts.trim().chars().take(120).collect();
+        self.recharge_operators = self.recharge_operators.trim().chars().take(200).collect();
+        self.recharge_commission_bp = self.recharge_commission_bp.clamp(0, 10_000);
         if !["off", "test", "prod"].contains(&self.verifactu.as_str()) {
             self.verifactu = "off".into();
         }

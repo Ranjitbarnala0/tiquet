@@ -6,13 +6,9 @@ Point-of-sale ticket printing for small shops. A Windows desktop app that prints
 
 Built for a phone accessories shop in Spain that was printing tickets from a 1990s-style program with an advert in the footer. Tiquet prints the same kind of ticket, with the shop's own logo and none of the noise.
 
-![Sale screen with the live ticket preview](docs/venta.png)
+![The main page: products, the sale, big pay buttons and the day's totals](docs/venta.jpg)
 
-| Charging | Tickets |
-| --- | --- |
-| ![Payment with change and the final ticket](docs/cobrar.png) | ![Ticket history with reprint and void](docs/tickets.png) |
-| **Reports** | **Settings** |
-| ![Sales, payment methods and VAT](docs/informes.png) | ![Shop, logo and printer settings](docs/ajustes.png) |
+![Hoy: every sale, recharge and expense of the day with its totals](docs/hoy.jpg)
 
 ## Install
 
@@ -41,10 +37,14 @@ Picking a printer from the list sets the kind: a receipt printer prints raw, any
 - **Products at hand.** Below the ticket: **Recientes** (what was sold lately, catalogue or not), **Favoritos** and **Todos**, one tap to add. **Repetir** puts the items of any earlier ticket into a new sale.
 - **Exact preview.** The ticket on the right is rendered from the same lines that are sent to the printer, so what you see is what prints, including change and VAT.
 - **Payments.** Cash with quick amounts and change, card, Bizum. Opens the cash drawer on cash sales. A barcode scanned while the payment window is open adds the item; it never confirms a payment.
-- **Tickets that cannot be edited.** Numbered per year without gaps (`T2026-000001`). Issued tickets can be reprinted or voided the same day with a reason, never edited or deleted; the database enforces it.
+- **Tickets that cannot be edited.** Numbered per year without gaps (`T2026-000001`), printed or not. Issued tickets can be reprinted or voided, never edited or erased; the database enforces it.
 - **Returns and invoices.** A return is its own rectifying ticket (`TR2026-...`) that points at the sale, line by line. A sale can carry the customer's name, NIF and address as a full invoice (`TF2026-...`); over 3.000 € it must.
 - **Repairs.** A phone left at the shop gets its own number (`REP2026-000001`), a resguardo for the customer and a slip for the phone. Its status is kept with who changed it and when. A deposit is a ticket of its own, and **Entregar y cobrar** charges the rest in Venta. See [Repairs](#repairs).
-- **Libro.** The shop's book of everything in and out: type `funda 10` for a sale without a ticket or `-luz 45` for an expense (F8 from Venta), and see them beside the ticket sales with totals by day, month or quarter. Typed entries can be deleted, with undo; the owner still sees what was deleted and by whom. Cash entries count in Caja, and **Exportar** gives the gestor the book with VAT split out.
+- **One main page.** Everything happens in **Venta**. The box is always ready: start typing or scanning anywhere and it lands there. `funda 10` adds an item, `-pantalla 45` saves an expense, `recarga 10` saves a recharge, `-10%` takes 10% off. **Efectivo** (F9) and **Tarjeta** (F10) charge with one tap; a switch (F6) says whether the ticket prints, and that is the only difference between a sale with a ticket and one without.
+- **Recharges.** **Recarga** (F7): tap the amount. It counts in the day's recharges and, because the money is the operator's, in the expenses too, less the commission set in Ajustes. Amounts, operators and commission are set in **Ajustes > Venta**.
+- **Expenses.** **Gasto** (F8): what was bought and how much. For the gestor it can also carry the supplier, invoice number, VAT and date.
+- **Hoy.** Every sale, recharge and expense of the day in one list, printed or not, with cash, card, recharges, the total of all, expenses and what is left. Any day, week, month or year; **Caja** and **Informes** are here too. **Exportar** gives the gestor everything with VAT split out.
+- **Delete anything.** A sale, a recharge, an expense, or a whole day (or only its sales, recharges or expenses). It leaves every list and total, and the owner still sees it under **Borrados**, with who deleted it, when and why. Nothing is erased, as Spanish law requires of till software.
 - **Send the ticket.** **Enviar** on a ticket opens the customer's WhatsApp chat with the ticket written in it, emails it with the PDF attached (through the shop's own mail account, set up in **Ajustes > Enviar tickets**, or the PC's mail app), or saves or copies the PDF. A repair still in the shop has a WhatsApp button that writes the message for its status, such as "ready to collect".
 - **Printing that tells the truth.** A ticket counts as printed once Windows has let go of it, or once a network printer has taken all of it. If the printer is off or out of paper the job is cancelled, so nothing prints and no drawer opens later on its own. The first print is the original; every other one says COPIA.
 - **Cash drawer.** Opening float, cash in and out with a reason, and a closing count against what the sales say, with a printed Z report.
@@ -81,7 +81,7 @@ Picking a printer from the list sets the kind: a receipt printer prints raw, any
 Rules:
 
 - Repairs are numbered per year without gaps, like tickets, and a restored backup never hands out a repair number already printed.
-- Repairs are never deleted. One taken in by mistake is cancelled with a reason. A deposit must be voided or returned from Tickets first.
+- Repairs are never deleted. One taken in by mistake is cancelled with a reason. A deposit must be voided or returned from Hoy first.
 - A delivered or cancelled repair cannot change. The one way back is voiding the ticket that delivered it, which returns the repair to its last status.
 - A repair is a service, so a ticket with a repair on it is a simplified invoice only up to 400 € (RD 1619/2012 art. 4). Above that, Venta asks for the customer's details. A deposit can be 400 € at most.
 - In training mode repairs can be taken in, but no deposit or delivery is charged.

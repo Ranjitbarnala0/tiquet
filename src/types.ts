@@ -2,6 +2,7 @@ import type { Lang, PrinterState } from './i18n';
 
 export type Role = 'admin' | 'cashier';
 export type Method = 'cash' | 'card' | 'bizum';
+export type BookMethod = Method | 'transfer';
 export type TicketKind = 'sale' | 'refund';
 
 export interface User {
@@ -61,6 +62,11 @@ export interface Settings {
   autoLockMin: number;
   autoLogin: number;
   bookStaffDelete: boolean;
+  staffTotals: boolean;
+  payBizum: boolean;
+  rechargeAmounts: string;
+  rechargeOperators: string;
+  rechargeCommissionBp: number;
   training: boolean;
   verifactu: 'off' | 'test' | 'prod';
   cert: string;
@@ -91,8 +97,9 @@ export interface CashDrawer {
   session: CashSession | null;
   moves: { at: string; byName: string; cents: number; reason: string }[];
   cashCents: number;
-  // sales typed in the book less expenses, in cash
-  bookCents: number;
+  // recharges paid in cash, and expenses paid from the drawer
+  rechargeCents: number;
+  expenseCents: number;
   movesCents: number;
   expectedCents: number;
 }
@@ -383,7 +390,65 @@ export interface PrinterStatus {
   last: PrintRow | null;
 }
 
+// a line of the day: a ticket, or a recharge or an expense typed in
+export interface DayRow {
+  source: 'ticket' | 'recharge' | 'expense' | 'sale';
+  id: number;
+  at: string;
+  concept: string;
+  cents: number;
+  method: BookMethod;
+  byName: string;
+  supplier: string;
+  invoiceRef: string;
+  costCents: number;
+  number: string | null;
+  refund: boolean;
+  invoice: boolean;
+  printed: 'printed' | 'unknown' | 'failed' | 'none' | null;
+  gone: boolean;
+  deletedBy: string | null;
+  deletedAt: string | null;
+  deleteReason: string | null;
+}
+
+export interface DaySummary {
+  cashCents: number;
+  cardCents: number;
+  bizumCents: number;
+  otherCents: number;
+  rechargeCents: number;
+  totalCents: number;
+  saleCount: number;
+  refundCount: number;
+  rechargeCount: number;
+  purchaseCents: number;
+  purchaseCount: number;
+  rechargeCostCents: number;
+  expenseCents: number;
+  netCents: number;
+  drawerCents: number;
+}
+
+export interface DayList {
+  rows: DayRow[];
+  // none when the cashiers do not see the totals
+  summary: DaySummary | null;
+  from: string;
+  to: string;
+  capped: boolean;
+  staffDelete: boolean;
+  anyDay: boolean;
+}
+
+export interface DayGone {
+  tickets: number;
+  entries: number;
+  kept: number;
+}
+
 export interface Summary {
+  day: DaySummary;
   totalCents: number;
   salesCents: number;
   refundCents: number;

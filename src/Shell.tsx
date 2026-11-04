@@ -1,27 +1,23 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { BadgeCheck, BookOpen, ChartColumn, FlaskConical, Lock, Maximize2, Minimize2, Package, ReceiptText, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Users as UsersIcon, Wallet, Wrench } from 'lucide-react';
+import { BadgeCheck, CalendarDays, FlaskConical, Lock, Maximize2, Minimize2, Package, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Wrench } from 'lucide-react';
 import { call, native } from './api';
-import { Book } from './Book';
-import { Cash } from './Cash';
+import { Day, type DayView } from './Day';
 import { initials } from './format';
 import { errorText, tr, type Lang } from './i18n';
 import { Products } from './Products';
 import { Repairs } from './Repairs';
-import { Reports } from './Reports';
 import { Sale } from './Sale';
 import { SettingsScreen } from './SettingsScreen';
-import { Tickets } from './Tickets';
 import { useToast } from './toast';
 import type { ItemDraft } from './ItemDialog';
 import type { Logo, Product, Settings, TicketRecord, User, VerifactuStatus } from './types';
 import { Mark, Modal } from './ui';
 import { UpdateBar, useUpdate } from './Update';
-import { Users } from './Users';
 import { sendError, stuck } from './Verifactu';
 
-type Screen = 'sale' | 'tickets' | 'repairs' | 'cash' | 'book' | 'products' | 'reports' | 'users' | 'settings';
-export type SettingsTab = 'shop' | 'ticket' | 'printer' | 'mail' | 'data' | 'verifactu';
+type Screen = 'sale' | 'day' | 'repairs' | 'products' | 'settings';
+export type SettingsTab = 'shop' | 'sale' | 'ticket' | 'printer' | 'mail' | 'users' | 'data' | 'verifactu';
 
 interface Props {
   installId: string;
@@ -37,6 +33,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const toast = useToast();
   const [screen, setScreen] = useState<Screen>('sale');
   const [tabRequest, setTabRequest] = useState<{ tab: SettingsTab; n: number }>({ tab: 'shop', n: 0 });
+  const [dayRequest] = useState<{ view: DayView; n: number }>({ view: 'moves', n: 0 });
   const [settings, setSettings] = useState<Settings | null>(null);
   const [logo, setLogo] = useState<Logo | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
@@ -118,7 +115,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   }, []);
 
   useEffect(() => {
-    if (!admin && !['sale', 'tickets', 'repairs', 'cash', 'book'].includes(screen)) setScreen('sale');
+    if (!admin && !['sale', 'day', 'repairs'].includes(screen)) setScreen('sale');
   }, [admin, screen]);
 
   // the core opened the window full screen if Ajustes says so; only the
@@ -220,7 +217,13 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
         if (!r.set) {
           toast.info(tr('No hay código de recuperación: si se olvida la contraseña de administrador no habrá forma de entrar.', 'There is no recovery code: a forgotten administrator password would lock everyone out.'), {
             sticky: true,
-            action: { label: tr('Crear', 'Create'), run: () => setScreen('users') },
+            action: {
+              label: tr('Crear', 'Create'),
+              run: () => {
+                setTabRequest((r) => ({ tab: 'users', n: r.n + 1 }));
+                setScreen('settings');
+              },
+            },
           });
         }
       })
@@ -264,164 +267,149 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
 
   const nav: { id: Screen; label: string; icon: typeof ShoppingBag }[] = [
     { id: 'sale', label: tr('Venta', 'Sale'), icon: ShoppingBag },
-    { id: 'tickets', label: tr('Tickets', 'Tickets'), icon: ReceiptText },
+    { id: 'day', label: tr('Hoy', 'Today'), icon: CalendarDays },
     { id: 'repairs', label: tr('Reparaciones', 'Repairs'), icon: Wrench },
-    { id: 'cash', label: tr('Caja', 'Till'), icon: Wallet },
-    { id: 'book', label: tr('Libro', 'Book'), icon: BookOpen },
   ];
   if (admin) {
-    nav.push(
-      { id: 'products', label: tr('Productos', 'Products'), icon: Package },
-      { id: 'reports', label: tr('Informes', 'Reports'), icon: ChartColumn },
-      { id: 'users', label: tr('Usuarios', 'Users'), icon: UsersIcon },
-      { id: 'settings', label: tr('Ajustes', 'Settings'), icon: SettingsIcon },
-    );
+    nav.push({ id: 'products', label: tr('Productos', 'Products'), icon: Package }, { id: 'settings', label: tr('Ajustes', 'Settings'), icon: SettingsIcon });
   }
 
   return (
     <div className={`shell${settings.training ? ' practice' : ''}`}>
-      <header className="top">
-        <div className="brand">
-          <Mark size={26} />
-          <span>Tiquet</span>
-          {settings.shopName && <span className="brand-shop">{settings.shopName}</span>}
+      <aside className="rail">
+        <div className="rail-brand" title={settings.shopName || 'Tiquet'}>
+          <Mark size={38} />
         </div>
-        <nav className="nav">
+        <nav className="rail-nav">
           {nav.map((n) => (
-            <button key={n.id} className={screen === n.id ? 'on' : ''} onClick={() => go(n.id)} title={n.label}>
-              <n.icon size={17} />
+            <button key={n.id} className={screen === n.id ? 'on' : ''} onClick={() => go(n.id)} aria-current={screen === n.id ? 'page' : undefined}>
+              <n.icon size={22} />
               <span>{n.label}</span>
             </button>
           ))}
         </nav>
-        <div className="top-right">
-          <div className="me">
-            <span className="avatar sm">{initials(user.name)}</span>
-            <div>
-              <b>{user.name}</b>
-              <span>{admin ? tr('Administrador', 'Administrator') : tr('Cajero', 'Cashier')}</span>
-            </div>
-          </div>
-          <button className="btn btn-ghost" onClick={() => guard(onLogout)} title={tr('Bloquear y cambiar de usuario', 'Lock and switch user')}>
-            <Lock size={16} />
-            <span>{tr('Bloquear', 'Lock')}</span>
-          </button>
+        <div className="rail-foot">
           {native && settings.fullscreen && (
             <button
-              className="btn btn-ghost icon-only"
+              className="rail-tool"
               onClick={() => fullscreen(!full)}
               title={full ? tr('Salir de pantalla completa', 'Leave full screen') : tr('Pantalla completa', 'Full screen')}
               aria-label={full ? tr('Salir de pantalla completa', 'Leave full screen') : tr('Pantalla completa', 'Full screen')}
             >
-              {full ? <Minimize2 size={17} /> : <Maximize2 size={17} />}
+              {full ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
             </button>
           )}
+          <button className="rail-me" onClick={() => guard(onLogout)} title={`${user.name} · ${tr('Bloquear y cambiar de usuario', 'Lock and switch user')}`}>
+            <span className="avatar sm">{initials(user.name)}</span>
+            <Lock size={13} />
+          </button>
         </div>
-      </header>
-      <div className="bars">
-        <UpdateBar u={updates} saleBusy={saleBusy} />
-        {vf && stuck(vf) && (
-          <div className={`vf-bar${vf.problems.length > 0 ? ' bad' : ''}`} role="status">
-            <BadgeCheck size={16} />
-            <span>
-              {vf.problems.length > 0
-                ? tr(`VERI*FACTU: la AEAT pide corregir ${vf.problems.length} registro(s).`, `VERI*FACTU: the AEAT asks for ${vf.problems.length} record(s) to be corrected.`)
-                : tr(`VERI*FACTU: ${vf.pending} registro(s) sin enviar a la AEAT.`, `VERI*FACTU: ${vf.pending} record(s) not sent to the AEAT yet.`)}{' '}
-              {sendError(vf.lastError)?.text}
-            </span>
-            {admin && (
-              <button className="btn btn-ghost sm" onClick={() => go('settings', 'verifactu')}>
-                {tr('Ver', 'View')}
-              </button>
-            )}
-          </div>
-        )}
-        {settings.training && (
-          <div className="training-bar" role="status">
-            <FlaskConical size={16} />
-            <span>{tr('Modo prueba: las ventas no son reales, salen marcadas y no cuentan en ningún informe.', 'Training mode: sales are not real, print marked and never count in any report.')}</span>
-            {admin && (
-              <button
-                className="btn btn-ghost sm"
-                onClick={() =>
-                  call<Settings>('settings.save', { training: false })
-                    .then(setSettings)
-                    .catch((e) => toast.error(errorText(e)))
-                }
-              >
-                {tr('Salir del modo prueba', 'Leave training mode')}
-              </button>
-            )}
-          </div>
-        )}
+      </aside>
+      <div className="stage">
+        <div className="bars">
+          <UpdateBar u={updates} saleBusy={saleBusy} />
+          {vf && stuck(vf) && (
+            <div className={`vf-bar${vf.problems.length > 0 ? ' bad' : ''}`} role="status">
+              <BadgeCheck size={16} />
+              <span>
+                {vf.problems.length > 0
+                  ? tr(`VERI*FACTU: la AEAT pide corregir ${vf.problems.length} registro(s).`, `VERI*FACTU: the AEAT asks for ${vf.problems.length} record(s) to be corrected.`)
+                  : tr(`VERI*FACTU: ${vf.pending} registro(s) sin enviar a la AEAT.`, `VERI*FACTU: ${vf.pending} record(s) not sent to the AEAT yet.`)}{' '}
+                {sendError(vf.lastError)?.text}
+              </span>
+              {admin && (
+                <button className="btn btn-ghost sm" onClick={() => go('settings', 'verifactu')}>
+                  {tr('Ver', 'View')}
+                </button>
+              )}
+            </div>
+          )}
+          {settings.training && (
+            <div className="training-bar" role="status">
+              <FlaskConical size={16} />
+              <span>{tr('Modo prueba: las ventas no son reales, salen marcadas y no cuentan en ningún informe.', 'Training mode: sales are not real, print marked and never count in any report.')}</span>
+              {admin && (
+                <button
+                  className="btn btn-ghost sm"
+                  onClick={() =>
+                    call<Settings>('settings.save', { training: false })
+                      .then(setSettings)
+                      .catch((e) => toast.error(errorText(e)))
+                  }
+                >
+                  {tr('Salir del modo prueba', 'Leave training mode')}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+        <main className="main">
+          <Sale
+            cartKey={`tiquet.cart.${installId}.${user.id}`}
+            active={screen === 'sale'}
+            admin={admin}
+            incoming={incoming}
+            onCatalogue={loadProducts}
+            settings={settings}
+            logo={logo}
+            products={products}
+            onSold={loadProducts}
+            onSetupPrinter={setupPrinter}
+            onBusy={setSaleBusy}
+            onDay={() => go('day')}
+          />
+          {screen === 'day' && (
+            <Day
+              user={user}
+              settings={settings}
+              logo={logo}
+              request={dayRequest}
+              onSetupPrinter={setupPrinter}
+              onRepeat={(t: TicketRecord) => {
+                const lines = t.lines
+                  .filter((l) => l.qty > 0 && !l.repairId)
+                  .map((l) => ({ name: l.name, qty: l.qty, unitCents: l.unitCents, vatBp: l.vatBp, productId: l.productId ?? undefined }));
+                setIncoming((cur) => ({ lines, from: t.number, n: (cur?.n ?? 0) + 1 }));
+                setScreen('sale');
+              }}
+            />
+          )}
+          {screen === 'repairs' && (
+            <Repairs
+              user={user}
+              settings={settings}
+              logo={logo}
+              onSetupPrinter={setupPrinter}
+              onCharge={(line, number) => {
+                setIncoming((cur) => ({ lines: [line], from: number, n: (cur?.n ?? 0) + 1 }));
+                setScreen('sale');
+              }}
+            />
+          )}
+          {screen === 'products' && admin && <Products settings={settings} onChanged={loadProducts} />}
+          {screen === 'settings' && admin && (
+            <SettingsScreen
+              onRestored={onLogout}
+              onDirty={setSettingsDirty}
+              request={tabRequest}
+              settings={settings}
+              onSaved={(s) => {
+                if (native && s.fullscreen !== settings.fullscreen) fullscreen(s.fullscreen);
+                setSettings(s);
+              }}
+              version={version}
+              updates={updates}
+              saleBusy={saleBusy}
+              logo={logo}
+              onLogo={loadLogo}
+              lang={lang}
+              onLang={onLang}
+              me={user}
+              onMe={setUser}
+            />
+          )}
+        </main>
       </div>
-      <main className="main">
-        <Sale
-          cartKey={`tiquet.cart.${installId}.${user.id}`}
-          active={screen === 'sale'}
-          admin={admin}
-          incoming={incoming}
-          onCatalogue={loadProducts}
-          settings={settings}
-          logo={logo}
-          products={products}
-          onSold={loadProducts}
-          onSetupPrinter={setupPrinter}
-          onBusy={setSaleBusy}
-          onCash={() => go('cash')}
-        />
-        {screen === 'tickets' && (
-          <Tickets
-            user={user}
-            settings={settings}
-            logo={logo}
-            onSetupPrinter={setupPrinter}
-            onRepeat={(t: TicketRecord) => {
-              const lines = t.lines
-                .filter((l) => l.qty > 0 && !l.repairId)
-                .map((l) => ({ name: l.name, qty: l.qty, unitCents: l.unitCents, vatBp: l.vatBp, productId: l.productId ?? undefined }));
-              setIncoming((cur) => ({ lines, from: t.number, n: (cur?.n ?? 0) + 1 }));
-              setScreen('sale');
-            }}
-          />
-        )}
-        {screen === 'repairs' && (
-          <Repairs
-            user={user}
-            settings={settings}
-            logo={logo}
-            onSetupPrinter={setupPrinter}
-            onCharge={(line, number) => {
-              setIncoming((cur) => ({ lines: [line], from: number, n: (cur?.n ?? 0) + 1 }));
-              setScreen('sale');
-            }}
-          />
-        )}
-        {screen === 'cash' && <Cash user={user} />}
-        {screen === 'book' && <Book user={user} settings={settings} />}
-        {screen === 'products' && admin && <Products settings={settings} onChanged={loadProducts} />}
-        {screen === 'reports' && admin && <Reports />}
-        {screen === 'users' && admin && <Users me={user} onMe={setUser} />}
-        {screen === 'settings' && admin && (
-          <SettingsScreen
-            onRestored={onLogout}
-            onDirty={setSettingsDirty}
-            request={tabRequest}
-            settings={settings}
-            onSaved={(s) => {
-              if (native && s.fullscreen !== settings.fullscreen) fullscreen(s.fullscreen);
-              setSettings(s);
-            }}
-            version={version}
-            updates={updates}
-            saleBusy={saleBusy}
-            logo={logo}
-            onLogo={loadLogo}
-            lang={lang}
-            onLang={onLang}
-          />
-        )}
-      </main>
       {leave && (
         <Modal
           title={tr('Hay cambios sin guardar', 'There are unsaved changes')}

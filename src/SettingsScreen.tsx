@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BadgeCheck, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Printer, ReceiptText, RefreshCw, ScanSearch, Store, Trash2 } from 'lucide-react';
+import { BadgeCheck, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Printer, ReceiptText, RefreshCw, ScanSearch, ShoppingBag, Store, Trash2, Users as UsersIcon } from 'lucide-react';
 import { call, native } from './api';
 import { dateTime, rate, VAT_RATES } from './format';
 import { errorText, printerStateText, tr, warningText, type Lang } from './i18n';
@@ -7,11 +7,12 @@ import { loadImage, rasterize, type LogoMode } from './logo';
 import { Paper } from './Paper';
 import { useToast } from './toast';
 import type { SettingsTab } from './Shell';
-import type { Logo, MailConfig, PLine, PortEntry, PrinterEntry, Preview, Settings, UserRow } from './types';
+import type { Logo, MailConfig, PLine, PortEntry, PrinterEntry, Preview, Settings, User, UserRow } from './types';
 import { spanishNif } from './nif';
 import type { Updates } from './Update';
 import { printerLabel, usePrinterStatus } from './usePrinter';
 import { Field, Modal, Segmented, Toggle } from './ui';
+import { Users } from './Users';
 import { VerifactuTab } from './Verifactu';
 
 interface BackupStatus {
@@ -58,9 +59,11 @@ interface Props {
   version: string;
   updates: Updates;
   saleBusy: boolean;
+  me: User;
+  onMe: (u: User) => void;
 }
 
-export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved, logo, onLogo, lang, onLang, version, updates, saleBusy }: Props) {
+export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved, logo, onLogo, lang, onLang, version, updates, saleBusy, me, onMe }: Props) {
   const toast = useToast();
   const [d, setD] = useState<Settings>(settings);
   const [tab, setTab] = useState<SettingsTab>(request.tab);
@@ -298,9 +301,11 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
 
   const tabs: { id: SettingsTab; label: string; icon: typeof Store }[] = [
     { id: 'shop', label: tr('Comercio', 'Shop'), icon: Store },
+    { id: 'sale', label: tr('Venta', 'Sale'), icon: ShoppingBag },
     { id: 'ticket', label: tr('Ticket', 'Ticket'), icon: ReceiptText },
     { id: 'printer', label: tr('Impresora', 'Printer'), icon: Printer },
     { id: 'mail', label: tr('Enviar tickets', 'Send tickets'), icon: Mail },
+    { id: 'users', label: tr('Usuarios', 'Users'), icon: UsersIcon },
     { id: 'data', label: tr('Datos y copias', 'Data & backups'), icon: HardDrive },
     { id: 'verifactu', label: 'VERI*FACTU', icon: BadgeCheck },
   ];
@@ -333,6 +338,47 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
         </div>
 
         <div className="settings-body">
+          {tab === 'users' && <Users me={me} onMe={onMe} />}
+
+          {tab === 'sale' && (
+            <div className="stack">
+              <Toggle
+                checked={d.bookStaffDelete}
+                onChange={(v) => set('bookStaffDelete', v)}
+                label={tr('Los cajeros pueden borrar lo que hicieron hoy', 'Cashiers can delete what they did today')}
+                hint={tr('Sus ventas, recargas y gastos de hoy. El administrador siempre puede borrar y ver lo borrado.', 'Their sales, recharges and expenses of today. The administrator can always delete, and see what was deleted.')}
+              />
+              <Toggle
+                checked={d.staffTotals}
+                onChange={(v) => set('staffTotals', v)}
+                label={tr('Los cajeros ven los totales del día', 'Cashiers see the day’s totals')}
+                hint={tr('Efectivo, tarjeta, recargas, gastos y lo que queda.', 'Cash, card, recharges, expenses and what is left.')}
+              />
+              <Toggle
+                checked={d.payBizum}
+                onChange={(v) => set('payBizum', v)}
+                label={tr('Botón de Bizum en la venta', 'Bizum button on the sale page')}
+                hint={tr('Junto a Efectivo y Tarjeta. Sin él, Bizum sigue en Más.', 'Beside Cash and Card. Without it, Bizum stays under More.')}
+              />
+              <Field label={tr('Importes de recarga', 'Recharge amounts')} hint={tr('Un botón por importe, separados por comas', 'One button per amount, separated by commas')}>
+                <input value={d.rechargeAmounts} onChange={(e) => set('rechargeAmounts', e.target.value)} placeholder="5, 10, 15, 20, 30, 50" maxLength={120} />
+              </Field>
+              <Field label={tr('Operadores de recarga (opcional)', 'Recharge operators (optional)')} hint={tr('Para saber cuánto se recargó de cada uno, separados por comas', 'To know how much was recharged with each, separated by commas')}>
+                <input value={d.rechargeOperators} onChange={(e) => set('rechargeOperators', e.target.value)} placeholder="Vodafone, Orange, Movistar, Lycamobile, Lebara, Digi" maxLength={200} />
+              </Field>
+              <Field label={tr('Comisión de recargas', 'Recharge commission')} hint={tr('Lo que gana la tienda en cada recarga. El resto cuenta como gasto.', 'What the shop earns on each recharge. The rest counts as an expense.')}>
+                <select value={d.rechargeCommissionBp} onChange={(e) => set('rechargeCommissionBp', Number(e.target.value))}>
+                  {[0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1500, 2000].map((bp) => (
+                    <option key={bp} value={bp}>
+                      {rate(bp)}
+                    </option>
+                  ))}
+                  {![0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1500, 2000].includes(d.rechargeCommissionBp) && <option value={d.rechargeCommissionBp}>{rate(d.rechargeCommissionBp)}</option>}
+                </select>
+              </Field>
+            </div>
+          )}
+
           {tab === 'shop' && (
             <div className="stack">
               <Field label={tr('Nombre del comercio', 'Shop name')} hint={tr('En grande, arriba del ticket', 'Large, at the top of the ticket')}>
@@ -783,12 +829,6 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   </select>
                 </Field>
               </div>
-              <Toggle
-                checked={d.bookStaffDelete}
-                onChange={(v) => set('bookStaffDelete', v)}
-                label={tr('Los cajeros pueden borrar lo que apuntaron hoy en el Libro', 'Cashiers can delete what they put in the Book today')}
-                hint={tr('El administrador siempre puede borrar y ver lo borrado.', 'The administrator can always delete, and see what was deleted.')}
-              />
               <Toggle
                 checked={d.autostart}
                 onChange={(v) => set('autostart', v)}

@@ -449,6 +449,17 @@ WHEN (SELECT training FROM book WHERE id = OLD.entry_id) = 0
 BEGIN SELECT RAISE(ABORT, 'book history cannot change'); END;
 "#;
 
+// A recharge is a sale in the book that also carries what the operator keeps
+// of it: that part counts as an expense. NULL on every other entry.
+const SCHEMA_V10: &str = r#"
+ALTER TABLE book ADD COLUMN cost_cents INTEGER CHECK (cost_cents IS NULL OR cost_cents >= 0);
+
+DROP TRIGGER book_fixed;
+CREATE TRIGGER book_fixed BEFORE UPDATE OF id, kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif,
+  invoice_ref, by_name, training, client_id, cost_cents ON book
+BEGIN SELECT RAISE(ABORT, 'a book entry does not change'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -465,6 +476,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V7)],
     &[Step::Sql(SCHEMA_V8)],
     &[Step::Sql(SCHEMA_V9)],
+    &[Step::Sql(SCHEMA_V10)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;
