@@ -52,9 +52,11 @@ pub struct Settings {
     pub auto_lock_min: u32,
     // the user signed in when Tiquet opens, with no password asked; 0 asks
     pub auto_login: i64,
-    // cashiers may delete what they sold or typed today; the owner may delete
-    // anything
+    // cashiers may correct and delete what they sold or typed today; the
+    // owner may do it to anything
     pub book_staff_delete: bool,
+    // new versions come down and install themselves when the till is free
+    pub auto_update: bool,
     // cashiers see the day's totals on the main page
     pub staff_totals: bool,
     // a Bizum button beside cash and card on the main page
@@ -116,6 +118,7 @@ impl Default for Settings {
             auto_lock_min: 0,
             auto_login: 0,
             book_staff_delete: true,
+            auto_update: true,
             staff_totals: true,
             pay_bizum: false,
             recharge_amounts: "5, 10, 15, 20, 30, 50".into(),
@@ -210,6 +213,11 @@ pub fn put(conn: &Connection, key: &str, value: &str) -> Result<()> {
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         params![key, value],
     )?;
+    Ok(())
+}
+
+pub fn clear(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
     Ok(())
 }
 

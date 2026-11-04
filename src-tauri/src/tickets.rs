@@ -311,12 +311,23 @@ pub struct TicketRecord {
     // as stored when the ticket was issued
     pub vat: Vec<VatRow>,
     pub prints: Vec<PrintRow>,
+    pub payment_changes: Vec<PaymentChange>,
     pub shop: ShopInfo,
     pub customer: Option<Customer>,
     pub training: bool,
     // the AEAT's QR printed on it, and how its billing record went
     pub qr: Option<String>,
     pub aeat: Option<TicketAeat>,
+}
+
+// how a ticket's payment was put right
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct PaymentChange {
+    pub at: String,
+    pub by_name: String,
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Serialize, Debug)]
@@ -380,6 +391,8 @@ pub struct SaleOpts {
     pub expected_cents: Option<i64>,
     // makes it a full invoice
     pub customer: Option<Customer>,
+    // the ticket this sale corrects: it is voided in the same step
+    pub replaces: Option<i64>,
 }
 
 pub struct RefundPlan {
@@ -739,6 +752,10 @@ pub fn sell(
     if delivers {
         repairs::delivered(&tx, id, &user.name)?;
     }
+    if let Some(old) = opts.replaces {
+        let number: String = tx.query_row("SELECT number FROM tickets WHERE id = ?1", [id], |r| r.get(0))?;
+        void_in(&tx, old, &user.name, &format!("Corregida en {number}"), false)?;
+    }
     tx.commit()?;
     Ok((load(conn, id)?, false))
 }
@@ -858,6 +875,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                         lines: Vec::new(),
                         vat: Vec::new(),
                         prints: Vec::new(),
+                        payment_changes: Vec::new(),
                         customer: r.get::<_, Option<String>>(16)?.map(|name| Customer {
                             name,
                             nif: r.get::<_, Option<String>>(17).ok().flatten().unwrap_or_default(),
@@ -918,6 +936,10 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
     rec.prints = stmt
         .query_map([id], |r| Ok(PrintRow { at: r.get(0)?, copy: r.get(1)?, status: r.get(2)?, detail: r.get(3)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut stmt = conn.prepare("SELECT at, by_name, from_method, to_method FROM ticket_payments WHERE ticket_id = ?1 ORDER BY id")?;
+    rec.payment_changes = stmt
+        .query_map([id], |r| Ok(PaymentChange { at: r.get(0)?, by_name: r.get(1)?, from: r.get(2)?, to: r.get(3)? }))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     rec.qr = verifactu::qr_of(conn, id)?;
     rec.aeat = verifactu::ticket_state(conn, id)?;
     Ok(rec)
@@ -962,6 +984,29 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<TicketSummary>> {
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+// A sale charged the wrong way: how it was paid is in no billing record, so it
+// is put right on the ticket itself, with who changed it and when.
+pub fn set_payment(conn: &mut Connection, id: i64, to: &str, by: &str) -> Result<()> {
+    let to = method(to)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let row: Option<(String, i64)> = tx
+        .query_row("SELECT payment_method, total_cents FROM tickets WHERE id = ?1 AND voided_at IS NULL", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .optional()?;
+    let Some((from, total)) = row else {
+        return fail("E_NOT_FOUND");
+    };
+    if from == to {
+        return Ok(());
+    }
+    tx.execute(
+        "INSERT INTO ticket_payments (ticket_id, at, by_name, from_method, to_method) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, now(), by, from, to],
+    )?;
+    tx.execute("UPDATE tickets SET payment_method = ?1, tendered_cents = ?2, change_cents = 0 WHERE id = ?3", params![to, total, id])?;
+    tx.commit()?;
+    Ok(())
 }
 
 // For a ticket issued by mistake, for a sale that never happened: a real
@@ -1067,6 +1112,7 @@ pub fn wipe_training(conn: &mut Connection) -> Result<usize> {
     let tx = conn.transaction()?;
     let practice = "SELECT id FROM tickets WHERE training = 1";
     tx.execute(&format!("DELETE FROM ticket_prints WHERE ticket_id IN ({practice})"), [])?;
+    tx.execute(&format!("DELETE FROM ticket_payments WHERE ticket_id IN ({practice})"), [])?;
     tx.execute(&format!("DELETE FROM ticket_vat WHERE ticket_id IN ({practice})"), [])?;
     tx.execute(&format!("DELETE FROM ticket_lines WHERE ticket_id IN ({practice})"), [])?;
     let n = tx.execute("DELETE FROM tickets WHERE training = 1", [])?;

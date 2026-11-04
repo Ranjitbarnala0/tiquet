@@ -1541,6 +1541,81 @@
   }
 }
 
+/* a sale that was charged the wrong way, put right with a tap */
+.done-pay {
+  display: flex;
+  gap: 2px;
+  margin-top: 4px;
+  padding: 3px;
+  border-radius: 12px;
+  background: var(--hover);
+}
+
+.done-pay button {
+  height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.done-pay button:hover {
+  color: var(--ink);
+}
+
+.done-pay button.on {
+  background: var(--panel);
+  color: var(--ink);
+  box-shadow: var(--shadow-1);
+}
+
+/* the cart is correcting a sale: charging it replaces that ticket */
+.fixing {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 6px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.fixing span {
+  flex: 1;
+  min-width: 0;
+}
+
+.pay-fix {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  flex: 1 1 100%;
+  gap: 8px 10px;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* a new version on the sign-in screen */
+.update-float {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  z-index: 50;
+  transform: translateX(-50%);
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  border-radius: 12px;
+  box-shadow: var(--shadow-2);
+}
+
 /* the sign-in and setup pages */
 .brand {
   display: flex;

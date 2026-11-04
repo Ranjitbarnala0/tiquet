@@ -18,6 +18,11 @@ use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, Ti
 use crate::verifactu::{self, Env};
 use crate::{aeat, auth, backup, book, cash, diag, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
 
+// who was signed in as Tiquet closed to update itself
+const RESUME: &str = "resumeUser";
+// how long that lasts: more than this and it was no update
+const RESUME_SECS: i64 = 300;
+
 // the screen shows the newest of a long period; the totals count them all
 const DAY_ROWS: usize = 1500;
 
@@ -117,6 +122,14 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         }
         "logout" => {
             st.set_session(None);
+            settings::clear(&st.conn(), RESUME)?;
+            Ok(Value::Null)
+        }
+        // Tiquet is closing to update itself and opens again by itself: whoever
+        // is signed in carries on, with no password to type
+        "session.keep" => {
+            let me = st.user()?;
+            settings::put(&st.conn(), RESUME, &json!({ "id": me.id, "at": tickets::now() }).to_string())?;
             Ok(Value::Null)
         }
         // the screen says someone is using it (typing, clicking, scrolling):
@@ -319,14 +332,26 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             {
                 let mut conn = st.conn();
                 let s = settings::load(&conn)?;
-                let admin = me.role == "admin";
-                if !admin && (!s.book_staff_delete || tickets::load(&conn, t)?.user_name != me.name) {
-                    return fail("E_FORBIDDEN");
-                }
-                tickets::void_on(&mut conn, t, &me.name, &reason, admin && verifactu::Env::of(&s).is_none())?;
+                may_fix(&conn, &me, &s, t)?;
+                tickets::void_on(&mut conn, t, &me.name, &reason, me.role == "admin" && verifactu::Env::of(&s).is_none())?;
             }
             aeat::kick();
             log::info(format!("ticket {t} voided by {}: {reason}", me.name));
+            ticket_get(st, t)
+        }
+        // charged the wrong way: put right on the ticket itself, which keeps
+        // who changed it and when
+        "tickets.payment" => {
+            let me = st.user()?;
+            let t = id(&a)?;
+            let method = a.get("method").and_then(Value::as_str).unwrap_or_default();
+            {
+                let mut conn = st.conn();
+                let s = settings::load(&conn)?;
+                may_fix(&conn, &me, &s, t)?;
+                tickets::set_payment(&mut conn, t, method, &me.name)?;
+            }
+            log::info(format!("ticket {t} now paid by {method}, changed by {}", me.name));
             ticket_get(st, t)
         }
         "tickets.refund" => {
@@ -522,6 +547,14 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 }
             }
             Ok(json!({ "entry": entry, "duplicate": duplicate }))
+        }
+        "book.edit" => {
+            let me = st.user()?;
+            let conn = st.conn();
+            let s = settings::load(&conn)?;
+            let e = book::edit(&conn, &me, &s, id(&a)?, parse(a)?)?;
+            log::info(format!("book: {} {} corrected by {}", e.concept, money::fmt(e.cents), me.name));
+            to(e)
         }
         // a receipt for a recharge, when the customer asks for one
         "book.print" => {
@@ -881,8 +914,10 @@ fn bootstrap(st: &AppState) -> Result<Value> {
     // Ajustes can sign someone in as Tiquet opens: on its first screen only,
     // never again after they lock the till or sign out
     let first = st.first_open();
-    if first && st.current().is_none() && s.auto_login > 0 {
-        if let Some((u, _, true)) = users::credentials(&conn, s.auto_login)? {
+    if first && st.current().is_none() {
+        let resumed = resume(&conn)?;
+        let open_as = resumed.or((s.auto_login > 0).then_some(s.auto_login));
+        if let Some((u, _, true)) = open_as.map(|id| users::credentials(&conn, id)).transpose()?.flatten() {
             log::info(format!("{} signed in as Tiquet opened", u.name));
             st.touch();
             st.set_session(Some(u));
@@ -902,7 +937,20 @@ fn bootstrap(st: &AppState) -> Result<Value> {
         "shopName": s.shop_name,
         "session": st.current(),
         "version": env!("CARGO_PKG_VERSION"),
+        "autoUpdate": s.auto_update,
     }))
+}
+
+// who to sign back in after an update, if Tiquet closed for one moments ago
+fn resume(conn: &rusqlite::Connection) -> Result<Option<i64>> {
+    let Some(stored) = settings::get(conn, RESUME)? else {
+        return Ok(None);
+    };
+    settings::clear(conn, RESUME)?;
+    let v: Value = serde_json::from_str(&stored).unwrap_or(Value::Null);
+    let at = v["at"].as_str().and_then(|t| chrono::NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S").ok());
+    let fresh = at.is_some_and(|at| (0..=RESUME_SECS).contains(&(chrono::Local::now().naive_local() - at).num_seconds()));
+    Ok(v["id"].as_i64().filter(|_| fresh))
 }
 
 #[derive(Deserialize)]
@@ -1113,11 +1161,28 @@ fn drawer_opens(s: &Settings, method: &str) -> bool {
     }
 }
 
+// A cashier corrects or deletes what they sold today, when Ajustes allows it;
+// the owner anything.
+fn may_fix(conn: &rusqlite::Connection, me: &SessionUser, s: &Settings, ticket: i64) -> Result<()> {
+    if me.role == "admin" {
+        return Ok(());
+    }
+    let t = tickets::load(conn, ticket)?;
+    if s.book_staff_delete && t.user_name == me.name && t.issued_at.get(..10) == tickets::now().get(..10) {
+        Ok(())
+    } else {
+        fail("E_FORBIDDEN")
+    }
+}
+
 fn finalize(st: &AppState, a: FinalizeIn) -> Result<Value> {
     let me = st.user()?;
     let (rec, dup, s, logo) = {
         let mut conn = st.conn();
         let s = settings::load(&conn)?;
+        if let Some(old) = a.opts.replaces {
+            may_fix(&conn, &me, &s, old)?;
+        }
         let (rec, dup) = tickets::sell(&mut conn, &me, &s, a.lines, &a.payment, &a.opts)?;
         let logo = tickets::logo_for(&conn, &rec)?;
         (rec, dup, s, logo)
@@ -2117,6 +2182,71 @@ mod tests {
         let path = dispatch(&st, "book.export", json!({ "from": today, "to": today })).unwrap()["path"].as_str().unwrap().to_string();
         let csv = std::fs::read_to_string(path).unwrap();
         assert!(csv.contains("Pantalla") && !csv.contains("Recarga;") && csv.contains(";Venta;"));
+    }
+
+    #[test]
+    fn a_sale_charged_the_wrong_way_is_put_right_on_the_same_ticket() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        dispatch(&st, "cash.open", json!({ "floatCents": 1000 })).unwrap();
+        let args = json!({ "lines": sale()["lines"], "payment": { "method": "cash", "tenderedCents": 1000 } });
+        let t = dispatch(&st, "sale.finalize", args).unwrap()["ticket"].clone();
+        assert_eq!(t["payment"]["changeCents"], 310);
+        let r = dispatch(&st, "tickets.payment", json!({ "id": t["id"], "method": "card" })).unwrap()["ticket"].clone();
+        // the same ticket: number, time and amount as they were, the money where it belongs
+        assert_eq!((&r["number"], &r["issuedAt"], &r["totalCents"]), (&t["number"], &t["issuedAt"], &t["totalCents"]));
+        assert_eq!((r["payment"]["method"].as_str(), r["payment"]["changeCents"].as_i64()), (Some("card"), Some(0)));
+        assert_eq!((r["paymentChanges"][0]["from"].as_str(), r["paymentChanges"][0]["byName"].as_str()), (Some("cash"), Some("Ana")));
+        assert_eq!(dispatch(&st, "cash.state", json!({})).unwrap()["expectedCents"], 1000);
+        let sum = dispatch(&st, "day.totals", json!({})).unwrap();
+        assert_eq!((sum["cashCents"].as_i64(), sum["cardCents"].as_i64()), (Some(0), Some(690)));
+        let lines = dispatch(&st, "tickets.get", json!({ "id": t["id"] })).unwrap()["lines"].to_string();
+        assert!(lines.contains("Tarjeta") && !lines.contains("Efectivo"));
+        // only through here, and not on a sale that was deleted
+        assert!(st.conn().execute("UPDATE tickets SET payment_method = 'bizum'", []).is_err());
+        assert!(st.conn().execute("UPDATE tickets SET total_cents = 1", []).is_err());
+        assert_eq!(dispatch(&st, "tickets.payment", json!({ "id": t["id"], "method": "oro" })).unwrap_err(), "E_INVALID:method");
+        dispatch(&st, "tickets.void", json!({ "id": t["id"] })).unwrap();
+        assert_eq!(dispatch(&st, "tickets.payment", json!({ "id": t["id"], "method": "cash" })).unwrap_err(), "E_NOT_FOUND");
+    }
+
+    #[test]
+    fn a_sale_with_the_wrong_items_is_replaced_in_one_step() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let old = dispatch(&st, "sale.finalize", sale()).unwrap()["ticket"].clone();
+        let new_lines = json!([{ "name": "Cable", "qty": 2, "unitCents": 690, "vatBp": 2100 }]);
+        let args = json!({ "lines": new_lines, "payment": { "method": "card" }, "replaces": old["id"], "print": false });
+        let new = dispatch(&st, "sale.finalize", args).unwrap()["ticket"].clone();
+        assert_ne!(new["number"], old["number"]);
+        let gone = dispatch(&st, "tickets.get", json!({ "id": old["id"] })).unwrap()["ticket"].clone();
+        assert_eq!(gone["voidReason"].as_str().unwrap(), format!("Corregida en {}", new["number"].as_str().unwrap()));
+        let sum = dispatch(&st, "day.totals", json!({})).unwrap();
+        assert_eq!((sum["totalCents"].as_i64(), sum["saleCount"].as_i64()), (Some(1380), Some(1)));
+        // a sale that cannot be corrected leaves everything as it was
+        let args = json!({ "lines": new_lines, "payment": { "method": "cash" }, "replaces": old["id"] });
+        assert!(dispatch(&st, "sale.finalize", args).is_err());
+        assert_eq!(dispatch(&st, "day.totals", json!({})).unwrap()["totalCents"], 1380);
+    }
+
+    #[test]
+    fn who_was_signed_in_carries_on_after_an_update() {
+        let dir = std::env::temp_dir().join(format!("tiquet-resume-{}-{}", std::process::id(), tickets::now().replace(':', "")));
+        let args = json!({ "shopName": "Tienda", "shopNif": "B12345674", "adminName": "Ana", "password": "123456", "samples": false, "lang": "es" });
+        {
+            let st = AppState::open(&dir, PrintSink::Dir(dir.join("prints"))).unwrap();
+            dispatch(&st, "setup", args).unwrap();
+            dispatch(&st, "session.keep", json!({})).unwrap();
+        }
+        let st = AppState::open(&dir, PrintSink::Dir(dir.join("prints"))).unwrap();
+        assert_eq!(dispatch(&st, "bootstrap", json!({})).unwrap()["session"]["name"], "Ana");
+        assert!(settings::get(&st.conn(), RESUME).unwrap().is_none());
+        // once only, and never from long ago
+        let st = AppState::open(&dir, PrintSink::Dir(dir.join("prints"))).unwrap();
+        assert!(dispatch(&st, "bootstrap", json!({})).unwrap()["session"].is_null());
+        settings::put(&st.conn(), RESUME, r#"{"id":1,"at":"2026-01-01T10:00:00"}"#).unwrap();
+        let st = AppState::open(&dir, PrintSink::Dir(dir.join("prints"))).unwrap();
+        assert!(dispatch(&st, "bootstrap", json!({})).unwrap()["session"].is_null());
     }
 
     #[test]

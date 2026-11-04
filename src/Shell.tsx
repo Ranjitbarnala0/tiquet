@@ -19,6 +19,8 @@ import { sendError, stuck } from './Verifactu';
 type Screen = 'sale' | 'day' | 'repairs' | 'products' | 'settings';
 export type SettingsTab = 'shop' | 'sale' | 'ticket' | 'printer' | 'mail' | 'users' | 'data' | 'verifactu';
 
+const VERSION_KEY = 'tiquet.version';
+
 interface Props {
   installId: string;
   version: string;
@@ -40,11 +42,13 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const [loadErr, setLoadErr] = useState('');
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [leave, setLeave] = useState<null | (() => void)>(null);
-  const [incoming, setIncoming] = useState<{ lines: ItemDraft[]; from: string; n: number } | null>(null);
+  const [incoming, setIncoming] = useState<{ lines: ItemDraft[]; from: string; n: number; replaces?: { id: number; number: string } } | null>(null);
   const [vf, setVf] = useState<VerifactuStatus | null>(null);
   // a ticket on the screen or being charged: no update is offered then
   const [saleBusy, setSaleBusy] = useState(false);
-  const updates = useUpdate(saleBusy);
+  // whoever is signed in carries on after the update, with no password to type
+  const keepSession = useCallback(() => call('session.keep'), []);
+  const updates = useUpdate(saleBusy || settingsDirty, { auto: !!settings?.autoUpdate, before: keepSession });
   const [full, setFull] = useState(false);
   const admin = user.role === 'admin';
 
@@ -72,6 +76,17 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
     loadLogo();
     loadProducts();
   }, [loadSettings, loadLogo, loadProducts]);
+
+  // Tiquet updates itself: the first screen after one says so
+  useEffect(() => {
+    try {
+      const was = localStorage.getItem(VERSION_KEY);
+      localStorage.setItem(VERSION_KEY, version);
+      if (was && was !== version) toast.ok(`${tr('Tiquet se ha actualizado a la versión', 'Tiquet was updated to version')} ${version}`);
+    } catch {
+      // it just will not say so
+    }
+  }, [version, toast]);
 
   // Only when chosen in Ajustes: the screen locks itself too, so a till left
   // alone does not stay open on the last admin's session. The core keeps the
@@ -365,11 +380,11 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
               logo={logo}
               request={dayRequest}
               onSetupPrinter={setupPrinter}
-              onRepeat={(t: TicketRecord) => {
+              onRepeat={(t: TicketRecord, correct: boolean) => {
                 const lines = t.lines
                   .filter((l) => l.qty > 0 && !l.repairId)
                   .map((l) => ({ name: l.name, qty: l.qty, unitCents: l.unitCents, vatBp: l.vatBp, productId: l.productId ?? undefined }));
-                setIncoming((cur) => ({ lines, from: t.number, n: (cur?.n ?? 0) + 1 }));
+                setIncoming((cur) => ({ lines, from: t.number, n: (cur?.n ?? 0) + 1, replaces: correct ? { id: t.id, number: t.number } : undefined }));
                 setScreen('sale');
               }}
             />

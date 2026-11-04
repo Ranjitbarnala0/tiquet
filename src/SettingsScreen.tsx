@@ -345,8 +345,8 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               <Toggle
                 checked={d.bookStaffDelete}
                 onChange={(v) => set('bookStaffDelete', v)}
-                label={tr('Los cajeros pueden borrar lo que hicieron hoy', 'Cashiers can delete what they did today')}
-                hint={tr('Sus ventas, recargas y gastos de hoy. El administrador siempre puede borrar y ver lo borrado.', 'Their sales, recharges and expenses of today. The administrator can always delete, and see what was deleted.')}
+                label={tr('Los cajeros pueden corregir y borrar lo que hicieron hoy', 'Cashiers can correct and delete what they did today')}
+                hint={tr('Sus ventas, recargas y gastos de hoy. El administrador siempre puede, y ve lo que se borró.', 'Their sales, recharges and expenses of today. The administrator always can, and sees what was deleted.')}
               />
               <Toggle
                 checked={d.staffTotals}
@@ -829,6 +829,12 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   </select>
                 </Field>
               </div>
+              <Toggle
+                checked={d.autoUpdate}
+                onChange={(v) => set('autoUpdate', v)}
+                label={tr('Actualizar Tiquet solo', 'Update Tiquet by itself')}
+                hint={tr('Las versiones nuevas se descargan solas y se instalan cuando nadie está usando la caja.', 'New versions download by themselves and install when nobody is using the till.')}
+              />
               <Toggle
                 checked={d.autostart}
                 onChange={(v) => set('autostart', v)}

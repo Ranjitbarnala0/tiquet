@@ -51,9 +51,12 @@ let seq = 0;
 const uid = () => `l${Date.now().toString(36)}${(seq++).toString(36)}`;
 const newSaleId = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 
-// what survives a crash: the lines, and the id the core uses to tell a retry
-// of this same cart from a new sale
-function storedCart(key: string): { saleId: string; lines: CartLine[] } {
+// the sale this cart corrects: charging it replaces that ticket
+type Fixing = { id: number; number: string };
+
+// what survives a crash: the lines, the sale they correct, and the id the core
+// uses to tell a retry of this same cart from a new sale
+function storedCart(key: string): { saleId: string; lines: CartLine[]; fixing?: Fixing | null } {
   try {
     const v = JSON.parse(localStorage.getItem(key) ?? 'null');
     if (Array.isArray(v)) return { saleId: newSaleId(), lines: v };
@@ -267,8 +270,9 @@ interface Props {
   cartKey: string;
   active: boolean;
   admin: boolean;
-  // items handed over from another screen, e.g. a ticket repeated from Tickets
-  incoming: { lines: ItemDraft[]; from: string; n: number } | null;
+  // items handed over from another screen: a ticket repeated from Hoy, or one
+  // to correct, which the new sale then replaces
+  incoming: { lines: ItemDraft[]; from: string; n: number; replaces?: Fixing } | null;
   onCatalogue: () => void;
   settings: Settings;
   logo: Logo | null;
@@ -314,6 +318,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const toast = useToast();
   const [restored] = useState(() => storedCart(cartKey));
   const [lines, setLines] = useState<CartLine[]>(restored.lines);
+  const [fixing, setFixing] = useState<Fixing | null>(restored.fixing ?? null);
   const saleId = useRef(restored.saleId);
   const [clock, setClock] = useState<{ last: string; charge: Charge } | null>(null);
   const history = useRef<CartLine[][]>([]);
@@ -378,11 +383,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   // survives a crash or a power cut mid-sale
   useEffect(() => {
     try {
-      localStorage.setItem(cartKey, JSON.stringify({ saleId: saleId.current, lines }));
+      localStorage.setItem(cartKey, JSON.stringify({ saleId: saleId.current, lines, fixing }));
     } catch {
       // storage unavailable: the cart simply isn't restored
     }
-  }, [lines, cartKey]);
+  }, [lines, fixing, cartKey]);
 
   // Tiquet closed between charging and clearing the screen: the cart came
   // back, but the core already has its ticket
@@ -394,6 +399,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         saleId.current = newSaleId();
         history.current = [];
         setLines([]);
+        setFixing(null);
         toast.info(`${tr('Esta venta ya se había cobrado', 'This sale had already been charged')} (${r.ticket.number}). ${tr('Se ha vaciado el ticket.', 'The ticket has been cleared.')}`, {
           sticky: true,
         });
@@ -609,6 +615,16 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       toast.info(tr('Esa reparación ya está en el ticket', 'That repair is already on the ticket'));
       return;
     }
+    if (incoming.replaces) {
+      if (lines.length) {
+        toast.error(tr('Termina o vacía la venta en curso para corregir otra.', 'Finish or clear the sale in progress to correct another one.'));
+        return;
+      }
+      setFixing(incoming.replaces);
+      addMany(incoming.lines);
+      toast.info(`${tr('Cambia lo que haga falta y cóbrala: sustituirá a', 'Change what you need and charge it: it will replace')} ${incoming.from}`);
+      return;
+    }
     addMany(incoming.lines);
     toast.ok(
       repair
@@ -657,7 +673,18 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     setSel(lines[i + 1]?.key ?? lines[i - 1]?.key ?? null);
   };
 
+  const dropFix = () => {
+    history.current = [];
+    setFixing(null);
+    setLines([]);
+    setSel(null);
+  };
+
   const clear = () => {
+    if (fixing) {
+      dropFix();
+      return;
+    }
     if (!lines.length) return;
     const cleared = lines;
     commit([]);
@@ -811,6 +838,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         clockOk,
         expectedCents: total,
         customer: c.invoice ? customer : undefined,
+        replaces: fixing?.id,
       });
       history.current = [];
       saleId.current = newSaleId();
@@ -820,6 +848,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       setPaying(false);
       setGiven('');
       setLast({ ticket: r.ticket, printed: r.printed });
+      if (fixing) toast.ok(`${fixing.number} ${tr('corregida', 'corrected')}: ${r.ticket.number}`);
+      setFixing(null);
       if (r.duplicate) {
         toast.info(`${tr('Esta venta ya estaba cobrada', 'This sale had already been charged')}: ${r.ticket.number}`, { sticky: true });
       } else if (r.printError) {
@@ -842,6 +872,19 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       }
     } finally {
       setBusy(false);
+    }
+  };
+
+  // charged the wrong way: it is noticed right here, and put right on the
+  // same ticket with one tap
+  const changePay = async (m: Method) => {
+    if (!last || last.ticket.payment.method === m) return;
+    try {
+      const r = await call<{ ticket: TicketRecord }>('tickets.payment', { id: last.ticket.id, method: m });
+      setLast((cur) => (cur ? { ...cur, ticket: r.ticket } : cur));
+      loadDay();
+    } catch (e) {
+      toast.error(errorText(e));
     }
   };
 
@@ -1178,6 +1221,18 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           </div>
         </div>
 
+        {fixing && (
+          <div className="fixing">
+            <Pencil size={15} />
+            <span>
+              {tr('Corrigiendo', 'Correcting')} <b className="mono">{fixing.number}</b>
+            </span>
+            <button className="link" onMouseDown={keep} onClick={dropFix}>
+              {tr('Cancelar', 'Cancel')}
+            </button>
+          </div>
+        )}
+
         <div className="till-lines" ref={linesRef}>
           {lines.map((l) => (
             <div key={l.key} className={`ln${sel === l.key ? ' sel' : ''}`} onMouseDown={() => setSel(l.key)}>
@@ -1237,9 +1292,14 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                 <Check size={26} strokeWidth={3} />
               </span>
               <strong>{eur(paid.totalCents)}</strong>
-              <span className="muted">
-                {METHODS.find((m) => m.id === paid.payment.method)?.label()} · <span className="mono">{paid.number}</span>
-              </span>
+              <span className="muted mono">{paid.number}</span>
+              <div className="done-pay" role="radiogroup" aria-label={tr('Pagado con', 'Paid with')}>
+                {METHODS.filter((m) => m.id !== 'bizum' || settings.payBizum || paid.payment.method === 'bizum').map((m) => (
+                  <button key={m.id} role="radio" aria-checked={paid.payment.method === m.id} className={paid.payment.method === m.id ? 'on' : ''} onMouseDown={keep} onClick={() => changePay(m.id)}>
+                    {m.label()}
+                  </button>
+                ))}
+              </div>
               {change > 0 && (
                 <div className="done-change">
                   <span>{tr('Cambio', 'Change')}</span>

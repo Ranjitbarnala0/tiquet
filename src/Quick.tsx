@@ -3,7 +3,7 @@ import { call } from './api';
 import { eur, fmt, isoDate, parseMoney, rate, VAT_RATES } from './format';
 import { errorText, tr } from './i18n';
 import { useToast } from './toast';
-import type { BookMethod, Settings } from './types';
+import type { BookMethod, DayRow, Settings } from './types';
 import { Field, Modal, Segmented } from './ui';
 
 // an amount this big is checked twice: a typo of 1000 for 10,00 is easy
@@ -72,9 +72,11 @@ export function useEntrySave(onChanged: () => void) {
   );
 }
 
-const pays = (): { value: BookMethod; label: string }[] => [
+// cash and card, and what an older entry was paid with if it was neither
+const pays = (now: BookMethod = 'cash'): { value: BookMethod; label: string }[] => [
   { value: 'cash', label: tr('Efectivo', 'Cash') },
   { value: 'card', label: tr('Tarjeta', 'Card') },
+  ...(now === 'bizum' ? [{ value: now, label: 'Bizum' }] : now === 'transfer' ? [{ value: now, label: tr('Transferencia', 'Transfer') }] : []),
 ];
 
 // Tap an amount and it is done: the money counts as a sale and, because it
@@ -82,19 +84,25 @@ const pays = (): { value: BookMethod; label: string }[] => [
 export function RechargeModal({
   settings,
   cents,
+  entry,
   onSave,
   onClose,
 }: {
   settings: Settings;
   cents: number;
+  // the recharge being corrected
+  entry?: DayRow;
   onSave: (e: EntryDraft) => Promise<boolean>;
   onClose: (saved: boolean) => void;
 }) {
   const amounts = useMemo(() => list(settings.rechargeAmounts).map((a) => parseMoney(a)).filter((c): c is number => !!c && c > 0), [settings.rechargeAmounts]);
-  const operators = useMemo(() => list(settings.rechargeOperators), [settings.rechargeOperators]);
+  const operators = useMemo(() => {
+    const all = list(settings.rechargeOperators);
+    return entry?.supplier && !all.includes(entry.supplier) ? [...all, entry.supplier] : all;
+  }, [settings.rechargeOperators, entry]);
   const [text, setText] = useState(cents > 0 ? fmt(cents) : '');
-  const [operator, setOperator] = useState('');
-  const [method, setMethod] = useState<BookMethod>('cash');
+  const [operator, setOperator] = useState(entry?.supplier ?? '');
+  const [method, setMethod] = useState<BookMethod>(entry?.method ?? 'cash');
   const typed = parseMoney(text);
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -111,7 +119,7 @@ export function RechargeModal({
   };
 
   return (
-    <Modal title={tr('Recarga', 'Phone recharge')} onClose={() => onClose(false)}>
+    <Modal title={entry ? tr('Corregir la recarga', 'Correct the recharge') : tr('Recarga', 'Phone recharge')} onClose={() => onClose(false)}>
       <form className="quick-form" onSubmit={submit}>
         {operators.length > 0 && (
           <div className="picks">
@@ -134,10 +142,10 @@ export function RechargeModal({
             <input ref={ref} value={text} onChange={(e) => setText(e.target.value)} inputMode="decimal" placeholder={tr('Otro importe', 'Other amount')} aria-label={tr('Importe', 'Amount')} />
             <span>€</span>
           </div>
-          <Segmented value={method} onChange={setMethod} options={pays()} />
+          <Segmented value={method} onChange={setMethod} options={pays(entry?.method)} />
         </div>
         <button className="btn btn-recharge btn-xl" disabled={!typed || typed <= 0}>
-          {typed && typed > 0 ? `${tr('Apuntar recarga', 'Save recharge')} · ${eur(typed)}` : tr('Toca un importe', 'Tap an amount')}
+          {typed && typed > 0 ? `${entry ? tr('Guardar', 'Save') : tr('Apuntar recarga', 'Save recharge')} · ${eur(typed)}` : tr('Toca un importe', 'Tap an amount')}
           <kbd className="on-dark">Enter</kbd>
         </button>
         <p className="field-hint">{tr('Cuenta en las recargas del día y, a la vez, en los gastos.', 'It counts in the day’s recharges and, at the same time, in the expenses.')}</p>
@@ -159,24 +167,27 @@ function split(text: string): { concept: string; cents: number } | null {
 // What was bought or paid for and how much. Two boxes, Enter, done.
 export function ExpenseModal({
   initial,
+  entry,
   settings,
   onSave,
   onClose,
 }: {
   initial: string;
+  // the expense being corrected
+  entry?: DayRow;
   settings: Settings;
   onSave: (e: EntryDraft) => Promise<boolean>;
   onClose: (saved: boolean) => void;
 }) {
-  const [concept, setConcept] = useState(initial);
-  const [text, setText] = useState('');
-  const [method, setMethod] = useState<BookMethod>('cash');
-  const [more, setMore] = useState(false);
-  const [supplier, setSupplier] = useState('');
-  const [supplierNif, setSupplierNif] = useState('');
-  const [invoiceRef, setInvoiceRef] = useState('');
-  const [vatBp, setVatBp] = useState(settings.defaultVatBp);
-  const [date, setDate] = useState('');
+  const [concept, setConcept] = useState(entry?.concept ?? initial);
+  const [text, setText] = useState(entry ? fmt(Math.abs(entry.cents)) : '');
+  const [method, setMethod] = useState<BookMethod>(entry?.method ?? 'cash');
+  const [more, setMore] = useState(!!entry && !!(entry.supplier || entry.invoiceRef || entry.supplierNif));
+  const [supplier, setSupplier] = useState(entry?.supplier ?? '');
+  const [supplierNif, setSupplierNif] = useState(entry?.supplierNif ?? '');
+  const [invoiceRef, setInvoiceRef] = useState(entry?.invoiceRef ?? '');
+  const [vatBp, setVatBp] = useState(entry?.vatBp ?? settings.defaultVatBp);
+  const [date, setDate] = useState(entry ? entry.at.slice(0, 10) : '');
   const [sure, setSure] = useState(false);
   const [recent, setRecent] = useState<Quick[]>([]);
   const amountRef = useRef<HTMLInputElement>(null);
@@ -200,12 +211,12 @@ export function ExpenseModal({
       setSure(true);
       return;
     }
-    const extra = more ? { supplier, supplierNif, invoiceRef, vatBp, date } : {};
+    const extra = more || entry ? { supplier, supplierNif, invoiceRef, vatBp, date } : {};
     if (await onSave({ kind: 'expense', method, ...parsed, ...extra })) onClose(true);
   };
 
   return (
-    <Modal title={tr('Gasto', 'Expense')} onClose={() => onClose(false)}>
+    <Modal title={entry ? tr('Corregir el gasto', 'Correct the expense') : tr('Gasto', 'Expense')} onClose={() => onClose(false)}>
       <form className="quick-form" onSubmit={submit}>
         <Field label={tr('¿Qué has comprado o pagado?', 'What did you buy or pay for?')}>
           <input
@@ -253,7 +264,7 @@ export function ExpenseModal({
             />
             <span>€</span>
           </div>
-          <Segmented value={method} onChange={setMethod} options={pays()} />
+          <Segmented value={method} onChange={setMethod} options={pays(entry?.method)} />
         </div>
         {sure && parsed && (
           <p className="form-error">
@@ -261,7 +272,7 @@ export function ExpenseModal({
           </p>
         )}
         <button className="btn btn-expense btn-xl" disabled={!parsed}>
-          {parsed ? `${tr('Apuntar gasto', 'Save expense')} · ${eur(parsed.cents)}` : tr('Escribe qué y cuánto', 'Type what and how much')}
+          {parsed ? `${entry ? tr('Guardar', 'Save') : tr('Apuntar gasto', 'Save expense')} · ${eur(parsed.cents)}` : tr('Escribe qué y cuánto', 'Type what and how much')}
           <kbd className="on-dark">Enter</kbd>
         </button>
         <button type="button" className="link more-link" onClick={() => setMore(!more)}>

@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CreditCard,
   Download,
+  Pencil,
   Printer,
   ReceiptText,
   Repeat2,
@@ -22,6 +23,7 @@ import { Cash } from './Cash';
 import { addDays, dateTime, eur, isoDate, shortDate } from './format';
 import { errorText, getLang, isPrinterSetup, isTransient, printText, tr, warningText } from './i18n';
 import { Paper } from './Paper';
+import { ExpenseModal, RechargeModal, type EntryDraft } from './Quick';
 import { RefundModal } from './Refund';
 import { Reports } from './Reports';
 import { ShareDialog } from './Share';
@@ -79,7 +81,8 @@ export function Day(props: {
   logo: Logo | null;
   request: { view: DayView; n: number };
   onSetupPrinter?: () => void;
-  onRepeat: (t: TicketRecord) => void;
+  // the same items in a new sale; with `correct`, one that replaces this ticket
+  onRepeat: (t: TicketRecord, correct: boolean) => void;
 }) {
   const [view, setView] = useState<DayView>(props.request.view);
   useEffect(() => setView(props.request.view), [props.request]);
@@ -108,7 +111,7 @@ export function Day(props: {
   );
 }
 
-function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User; settings: Settings; logo: Logo | null; onSetupPrinter?: () => void; onRepeat: (t: TicketRecord) => void }) {
+function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User; settings: Settings; logo: Logo | null; onSetupPrinter?: () => void; onRepeat: (t: TicketRecord, correct: boolean) => void }) {
   const toast = useToast();
   const admin = user.role === 'admin';
   const today = isoDate(new Date());
@@ -120,6 +123,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const [sel, setSel] = useState<string | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [removing, setRemoving] = useState<DayRow | null>(null);
+  const [editing, setEditing] = useState<DayRow | null>(null);
   const [reason, setReason] = useState('');
   const [wholeDay, setWholeDay] = useState(false);
   const [word, setWord] = useState('');
@@ -206,9 +210,44 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
     setRange(presetRange(p));
   };
 
-  const mayDelete = (r: DayRow) => {
-    const own = !!data?.staffDelete && r.byName === user.name && r.at.slice(0, 10) === today;
-    return admin ? (isTicket(r) ? r.at.slice(0, 10) === today || !!data?.anyDay : true) : own;
+  const own = (r: DayRow) => !!data?.staffDelete && r.byName === user.name && r.at.slice(0, 10) === today;
+  const mayFix = (r: DayRow) => admin || own(r);
+  const mayDelete = (r: DayRow) => (admin ? !isTicket(r) || r.at.slice(0, 10) === today || !!data?.anyDay : own(r));
+
+  // charged the wrong way: one tap on the same ticket, and one tap back
+  const setPayment = (id: number, method: Method) =>
+    call<Detail>('tickets.payment', { id, method }).then((d) => {
+      setDetail((cur) => (cur?.ticket.id === id ? d : cur));
+      load();
+    });
+
+  const changePay = async (t: TicketRecord, method: Method) => {
+    const was = t.payment.method;
+    if (busy || was === method) return;
+    setBusy(true);
+    try {
+      await setPayment(t.id, method);
+      toast.ok(`${t.number}: ${methodName(method)}`, {
+        action: { label: tr('Deshacer', 'Undo'), run: () => setPayment(t.id, was).catch((e) => toast.error(errorText(e))) },
+      });
+    } catch (e) {
+      toast.error(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveEdit = async (e: EntryDraft) => {
+    if (!editing) return false;
+    try {
+      await call('book.edit', { id: editing.id, ...e });
+      toast.ok(tr('Corregido', 'Corrected'));
+      load();
+      return true;
+    } catch (err) {
+      toast.error(errorText(err));
+      return false;
+    }
   };
 
   const reprint = async () => {
@@ -322,6 +361,9 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
 
   const t = detail && ticketId === detail.ticket.id ? detail.ticket : undefined;
   const returnable = t ? t.kind === 'sale' && !t.voidedAt && t.lines.some((l) => l.qty > (l.refunded ?? 0)) : false;
+  // a sale of today is corrected in a new one that replaces it; a repair or a
+  // return already made is tied to this ticket
+  const correctable = t ? t.kind === 'sale' && !t.voidedAt && t.issuedAt.slice(0, 10) === today && t.lines.every((l) => !l.repairId) && !t.refunds.some((r) => !r.voided) : false;
   const onPaper = t ? t.prints.some((p) => p.status !== 'failed') : false;
   const lastPrint = t?.prints[t.prints.length - 1];
   const printedTimes = t ? t.prints.filter((p) => p.status === 'printed' || p.status === 'sent').length : 0;
@@ -582,8 +624,15 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                     {tr('Imprimir justificante', 'Print a receipt')}
                   </button>
                 )}
+                {!row.gone && row.source !== 'sale' && mayFix(row) && (
+                  <button className="btn" onClick={() => setEditing(row)}>
+                    <Pencil size={16} />
+                    {tr('Editar', 'Edit')}
+                  </button>
+                )}
                 {row.gone
-                  ? mayDelete(row) && (
+                  ? mayDelete(row) &&
+                    row.deleteReason !== 'Corregido' && (
                       <button className="btn" onClick={() => restore(row)}>
                         <RotateCcw size={16} />
                         {tr('Recuperar', 'Restore')}
@@ -644,6 +693,11 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                   ) : (
                     <p className="print-note">{tr('No se ha impreso', 'Not printed')}</p>
                   )}
+                  {t.paymentChanges.map((c) => (
+                    <p key={c.at + c.to} className="print-note">
+                      {tr('Cambiado de', 'Changed from')} {methodName(c.from)} {tr('a', 'to')} {methodName(c.to)} · {c.byName} · {dateTime(c.at)}
+                    </p>
+                  ))}
                   {t.aeat && <p className={`print-note${t.aeat.state === 'Incorrecto' ? ' bad' : ''}`}>{aeatText(t.aeat)}</p>}
                   {t.voidedAt && (
                     <p className="void-note">
@@ -652,7 +706,27 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                     </p>
                   )}
                 </div>
+                {!t.voidedAt && mayFix(row) && (
+                  <div className="pay-fix">
+                    <span>{tr('Pagado con', 'Paid with')}</span>
+                    <Segmented
+                      value={t.payment.method}
+                      onChange={(m) => changePay(t, m)}
+                      options={[
+                        { value: 'cash', label: tr('Efectivo', 'Cash') },
+                        { value: 'card', label: tr('Tarjeta', 'Card') },
+                        { value: 'bizum', label: 'Bizum' },
+                      ]}
+                    />
+                  </div>
+                )}
                 <div className="actions">
+                  {correctable && mayFix(row) && (
+                    <button className="btn" onClick={() => onRepeat(t, true)} title={tr('Cambiar artículos, cantidades o precios', 'Change items, quantities or prices')}>
+                      <Pencil size={16} />
+                      {tr('Editar', 'Edit')}
+                    </button>
+                  )}
                   <button className="btn" onClick={reprint} disabled={busy}>
                     <Printer size={16} />
                     {onPaper ? tr('Copia', 'Copy') : tr('Imprimir', 'Print')}
@@ -662,7 +736,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                     {tr('Enviar', 'Send')}
                   </button>
                   {t.kind === 'sale' && t.lines.some((l) => !l.repairId) && (
-                    <button className="btn" onClick={() => onRepeat(t)} title={tr('Una venta nueva con los mismos artículos', 'A new sale with the same items')}>
+                    <button className="btn" onClick={() => onRepeat(t, false)} title={tr('Una venta nueva con los mismos artículos', 'A new sale with the same items')}>
                       <Repeat2 size={16} />
                       {tr('Repetir', 'Repeat')}
                     </button>
@@ -692,6 +766,9 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
       </div>
 
       {sharing && t && <ShareDialog ticketId={t.id} number={t.number} onClose={() => setSharing(false)} />}
+
+      {editing?.source === 'recharge' && <RechargeModal settings={settings} cents={editing.cents} entry={editing} onSave={saveEdit} onClose={() => setEditing(null)} />}
+      {editing?.source === 'expense' && <ExpenseModal initial="" entry={editing} settings={settings} onSave={saveEdit} onClose={() => setEditing(null)} />}
 
       {removing && (
         <Modal

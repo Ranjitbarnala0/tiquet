@@ -63,6 +63,7 @@ async fn call(app: AppHandle, cmd: String, mut args: Value) -> Result<Value, Str
     match cmd.as_str() {
         // anyone at the till may update, and so may the failure screen
         "app.update.check" => return update::check(&app).await,
+        "app.update.fetch" => return update::fetch(&app).await,
         "app.update.install" => return update::install(&app).await,
         "app.ready" if update::testing() => {
             if let Err(e) = update::install(&app).await {
@@ -190,7 +191,11 @@ fn show(app: &AppHandle, shell: &Shell) {
         return;
     }
     UP.store(true, Ordering::SeqCst);
-    focus(app);
+    // --no-window: the whole app runs with its window hidden, so an update
+    // can be tried for real on a PC someone is working at
+    if !std::env::args().any(|a| a == "--no-window") {
+        focus(app);
+    }
 }
 
 fn focus(app: &AppHandle) {
@@ -233,13 +238,16 @@ pub fn run() {
     if testing {
         std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", std::env::temp_dir().join("tiquet-test-webview"));
     }
-    let data_dir = match &selftest {
-        Some(_) => {
+    // --data <folder>: another set of data, to try an update without the real one
+    let other_data = arg("--data");
+    let data_dir = match (&selftest, &other_data) {
+        (Some(_), _) => {
             let dir = std::env::temp_dir().join("tiquet-selftest");
             let _ = std::fs::remove_dir_all(&dir);
             Ok(dir)
         }
-        None => paths::data_dir().map_err(|e| e.0),
+        (None, Some(dir)) => Ok(dir.clone()),
+        (None, None) => paths::data_dir().map_err(|e| e.0),
     };
     // logging starts before the window, so a window that fails to open is logged
     if let Ok(dir) = &data_dir {
@@ -280,7 +288,7 @@ pub fn run() {
         .setup(move |app| {
             let core = match &data_dir {
                 Ok(dir) => {
-                    if selftest.is_none() {
+                    if selftest.is_none() && other_data.is_none() {
                         if let Ok(old) = app.path().app_local_data_dir() {
                             if let Err(e) = paths::adopt(&old, dir) {
                                 log::error(format!("could not move the database from {}: {}", old.display(), e.0));

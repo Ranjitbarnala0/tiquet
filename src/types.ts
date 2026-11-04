@@ -25,6 +25,7 @@ export interface Boot {
   shopName: string;
   session: User | null;
   version: string;
+  autoUpdate: boolean;
 }
 
 export interface Settings {
@@ -62,6 +63,7 @@ export interface Settings {
   autoLockMin: number;
   autoLogin: number;
   bookStaffDelete: boolean;
+  autoUpdate: boolean;
   staffTotals: boolean;
   payBizum: boolean;
   rechargeAmounts: string;
@@ -253,6 +255,7 @@ export interface TicketRecord {
   refunds: TicketRef[];
   lines: SaleLine[];
   prints: PrintRow[];
+  paymentChanges: { at: string; byName: string; from: Method; to: Method }[];
   customer: Customer | null;
   training: boolean;
   qr: string | null;
@@ -400,7 +403,9 @@ export interface DayRow {
   method: BookMethod;
   byName: string;
   supplier: string;
+  supplierNif: string;
   invoiceRef: string;
+  vatBp: number;
   costCents: number;
   number: string | null;
   refund: boolean;

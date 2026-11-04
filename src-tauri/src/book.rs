@@ -39,6 +39,9 @@ pub struct EntryIn {
     pub date: String,
     // made by the screen for each entry: a second Enter returns the first
     pub client_id: Option<String>,
+    // a correction stays on the moment of the entry it replaces
+    #[serde(skip)]
+    pub keep_at: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -76,7 +79,9 @@ pub struct Row {
     pub method: String,
     pub by_name: String,
     pub supplier: String,
+    pub supplier_nif: String,
     pub invoice_ref: String,
+    pub vat_bp: i64,
     // of a recharge, what counts as an expense
     pub cost_cents: i64,
     // of a ticket: its number, whether it is a return or a full invoice, and
@@ -195,6 +200,7 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
         _ => format!("Recarga {supplier}"),
     };
     let at = match e.date.trim() {
+        _ if e.keep_at.is_some() => e.keep_at.clone().unwrap_or_default(),
         "" => now(),
         d => {
             let Ok(day) = chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d") else {
@@ -253,6 +259,32 @@ fn mark(conn: &Connection, id: i64, by: &str, reason: &str) -> Result<()> {
     event(conn, id, by, "deleted", reason)
 }
 
+// Correcting an entry: entries never change, so the old one is marked with
+// this and a new one takes its place, on the same moment unless the date was
+// changed. To whoever uses it, it is simply an edit.
+pub const CORRECTED: &str = "Corregido";
+
+pub fn edit(conn: &Connection, me: &SessionUser, s: &Settings, id: i64, e: EntryIn) -> Result<Entry> {
+    let old = get(conn, id)?;
+    if !may_change(me, &old, s.book_staff_delete) {
+        return fail("E_FORBIDDEN");
+    }
+    if old.deleted_at.is_some() {
+        return fail("E_NOT_FOUND");
+    }
+    // what it is stays what it is; a sale typed before 1.8 is not touched
+    let kind = match (old.kind.as_str(), old.cost_cents) {
+        ("expense", _) => "expense",
+        (_, Some(_)) => "recharge",
+        _ => return fail("E_INVALID:kind"),
+    };
+    let same_day = e.date.trim().is_empty() || e.date.trim() == &old.at[..10];
+    mark(conn, id, &me.name, CORRECTED)?;
+    let (new, _) = add(conn, me, s, EntryIn { kind: kind.into(), client_id: None, keep_at: same_day.then(|| old.at.clone()), ..e })?;
+    event(conn, new.id, &me.name, "added", Some(&format!("corrige {id}")))?;
+    Ok(new)
+}
+
 pub fn delete(conn: &Connection, me: &SessionUser, staff: bool, id: i64, reason: &str) -> Result<Entry> {
     let e = get(conn, id)?;
     if !may_change(me, &e, staff) {
@@ -289,6 +321,10 @@ pub fn restore(conn: &Connection, me: &SessionUser, staff: bool, id: i64) -> Res
     if e.deleted_at.is_none() {
         return Ok(e);
     }
+    // the entry that corrected it is the one in force now
+    if e.delete_reason.as_deref() == Some(CORRECTED) {
+        return fail("E_INVALID:kind");
+    }
     conn.execute("UPDATE book SET deleted_at = NULL, deleted_by = NULL, delete_reason = NULL WHERE id = ?1", [id])?;
     event(conn, id, &me.name, "restored", None)?;
     get(conn, id)
@@ -318,7 +354,9 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
             method: e.method,
             by_name: e.by_name,
             supplier: e.supplier,
+            supplier_nif: e.supplier_nif,
             invoice_ref: e.invoice_ref,
+            vat_bp: e.vat_bp,
             cost_cents: e.cost_cents.unwrap_or(0),
             number: None,
             refund: false,
@@ -359,7 +397,9 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
             method: r.get(5)?,
             by_name: r.get(6)?,
             supplier: String::new(),
+            supplier_nif: String::new(),
             invoice_ref: String::new(),
+            vat_bp: 0,
             cost_cents: 0,
             number: Some(r.get(2)?),
             refund,
@@ -612,6 +652,31 @@ mod tests {
         assert_eq!(delete(&c, &me("Eva", "cashier"), true, a.id, "").unwrap_err().0, "E_FORBIDDEN");
         assert!(delete(&c, &me("Jefe", "admin"), false, a.id, "error").is_ok());
         assert_eq!(delete(&c, &ana, false, a.id, "").unwrap_err().0, "E_FORBIDDEN");
+    }
+
+    #[test]
+    fn an_edit_replaces_the_entry_and_keeps_the_old_one_on_record() {
+        let c = conn();
+        let s = Settings::default();
+        let ana = me("Ana", "cashier");
+        let (a, _) = add(&c, &ana, &s, entry("expense", "Fundas", 1000, "cash")).unwrap();
+        let (r, _) = add(&c, &ana, &s, entry("recharge", "", 1000, "cash")).unwrap();
+        // the wrong way of paying and the wrong amount, put right
+        let b = edit(&c, &ana, &s, a.id, entry("expense", "Fundas iPhone", 1500, "card")).unwrap();
+        assert_eq!((b.concept.as_str(), b.cents, b.method.as_str(), b.at.as_str()), ("Fundas iPhone", 1500, "card", a.at.as_str()));
+        let e = edit(&c, &ana, &s, r.id, EntryIn { supplier: "Lebara".into(), ..entry("recharge", "", 2000, "card") }).unwrap();
+        assert_eq!((e.cost_cents, e.supplier.as_str(), e.concept.as_str()), (Some(2000), "Lebara", "Recarga Lebara"));
+        let sum = summary(&rows_today(&c));
+        assert_eq!((sum.purchase_cents, sum.recharge_cents, sum.drawer_cents), (1500, 2000, 0));
+        // the old one is still there, marked, and cannot come back over the new one
+        let kept = rows(&c, &today(), false, true).unwrap();
+        assert!(kept.iter().any(|x| x.id == a.id && x.gone && x.delete_reason.as_deref() == Some(CORRECTED)));
+        assert_eq!(restore(&c, &ana, true, a.id).unwrap_err().0, "E_INVALID:kind");
+        assert_eq!(edit(&c, &ana, &s, a.id, entry("expense", "x", 100, "cash")).unwrap_err().0, "E_NOT_FOUND");
+        // someone else's is the owner's to correct, and a new date moves it
+        assert_eq!(edit(&c, &me("Eva", "cashier"), &s, b.id, entry("expense", "x", 100, "cash")).unwrap_err().0, "E_FORBIDDEN");
+        let moved = edit(&c, &me("Jefe", "admin"), &s, b.id, EntryIn { date: "2026-01-02".into(), ..entry("expense", "Fundas", 1500, "card") }).unwrap();
+        assert_eq!(moved.at, "2026-01-02T12:00:00");
     }
 
     #[test]

@@ -460,6 +460,41 @@ CREATE TRIGGER book_fixed BEFORE UPDATE OF id, kind, at, concept, cents, method,
 BEGIN SELECT RAISE(ABORT, 'a book entry does not change'); END;
 "#;
 
+// How a sale was paid is in no billing record and can be put right: every
+// change is kept, and the database refuses one that was not written down
+// first. Everything else on a ticket stays frozen.
+const SCHEMA_V11: &str = r#"
+CREATE TABLE ticket_payments (
+  id          INTEGER PRIMARY KEY,
+  ticket_id   INTEGER NOT NULL REFERENCES tickets (id),
+  at          TEXT NOT NULL,
+  by_name     TEXT NOT NULL,
+  from_method TEXT NOT NULL,
+  to_method   TEXT NOT NULL
+);
+CREATE INDEX ticket_payments_ticket ON ticket_payments (ticket_id);
+
+CREATE TRIGGER ticket_payments_frozen BEFORE UPDATE ON ticket_payments
+BEGIN SELECT RAISE(ABORT, 'payment history cannot change'); END;
+CREATE TRIGGER ticket_payments_no_delete BEFORE DELETE ON ticket_payments
+WHEN (SELECT training FROM tickets WHERE id = OLD.ticket_id) IS NOT 1
+BEGIN SELECT RAISE(ABORT, 'payment history cannot change'); END;
+
+DROP TRIGGER tickets_frozen;
+CREATE TRIGGER tickets_frozen BEFORE UPDATE OF
+  id, number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
+  shop, kind, refund_of, refund_reason, client_id,
+  customer_name, customer_nif, customer_address, training ON tickets
+BEGIN SELECT RAISE(ABORT, 'issued tickets cannot be modified'); END;
+
+CREATE TRIGGER tickets_payment BEFORE UPDATE OF payment_method, tendered_cents, change_cents ON tickets
+WHEN OLD.voided_at IS NOT NULL OR NOT EXISTS (
+  SELECT 1 FROM ticket_payments p
+  WHERE p.ticket_id = OLD.id AND p.from_method = OLD.payment_method AND p.to_method = NEW.payment_method
+    AND p.id = (SELECT MAX(id) FROM ticket_payments WHERE ticket_id = OLD.id))
+BEGIN SELECT RAISE(ABORT, 'a change of payment is written down first'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -477,6 +512,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V8)],
     &[Step::Sql(SCHEMA_V9)],
     &[Step::Sql(SCHEMA_V10)],
+    &[Step::Sql(SCHEMA_V11)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;
