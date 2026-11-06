@@ -59,12 +59,11 @@ interface Props {
   onLang: (l: Lang) => void;
   version: string;
   updates: Updates;
-  saleBusy: boolean;
   me: User;
   onMe: (u: User) => void;
 }
 
-export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved, logo, onLogo, lang, onLang, version, updates, saleBusy, me, onMe }: Props) {
+export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved, logo, onLogo, lang, onLang, version, updates, me, onMe }: Props) {
   const toast = useToast();
   const [d, setD] = useState<Settings>(settings);
   const [tab, setTab] = useState<SettingsTab>(request.tab);
@@ -933,11 +932,11 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   ) : (
                     updates.upToDate && <span className="muted">{tr('Es la versión más reciente.', 'This is the latest version.')}</span>
                   )}
-                  {updates.found && saleBusy && <span className="field-hint">{tr('Termina o vacía el ticket de Venta para actualizar.', 'Finish or clear the ticket in Sale to update.')}</span>}
+                  {updates.failed && !updates.found && <span className="form-error">{tr('No se pudo buscar. Revisa la conexión a internet.', 'Could not check. Look at the internet connection.')}</span>}
                 </div>
                 <div className="info-actions">
                   {updates.found ? (
-                    <button className="btn btn-primary" onClick={updates.install} disabled={updates.installing || saleBusy}>
+                    <button className="btn btn-primary" onClick={updates.install} disabled={updates.installing}>
                       <Download size={16} />
                       {updates.installing ? tr('Actualizando…', 'Updating…') : tr('Actualizar ahora', 'Update now')}
                     </button>

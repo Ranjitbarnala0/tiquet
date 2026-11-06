@@ -15,6 +15,9 @@ use crate::log;
 
 // an installer already downloaded and checked, ready to run
 static READY: Mutex<Option<(Update, Vec<u8>)>> = Mutex::new(None);
+// why asking GitHub last failed: a till with no internet says so once in its
+// log, not every quarter of an hour
+static FAILED: Mutex<String> = Mutex::new(String::new());
 
 fn fail(e: impl std::fmt::Display) -> String {
     format!("E_UPDATE:{e}")
@@ -31,7 +34,16 @@ fn updater(app: &AppHandle, wait: Duration) -> Result<Updater, String> {
 }
 
 pub async fn check(app: &AppHandle) -> Result<Value, String> {
-    let found = updater(app, Duration::from_secs(30))?.check().await.map_err(fail)?;
+    let found = updater(app, Duration::from_secs(30))?.check().await.map_err(|e| {
+        let e = e.to_string();
+        let mut failed = FAILED.lock().unwrap_or_else(|e| e.into_inner());
+        if *failed != e {
+            log::warn(format!("update check failed: {e}"));
+            failed.clone_from(&e);
+        }
+        fail(e)
+    })?;
+    FAILED.lock().unwrap_or_else(|e| e.into_inner()).clear();
     Ok(match found {
         Some(u) => json!({ "version": u.version, "notes": u.body }),
         None => Value::Null,

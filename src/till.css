@@ -76,6 +76,12 @@
   margin-top: auto;
 }
 
+.rail-version {
+  color: var(--rail-ink);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .rail-tool {
   display: grid;
   place-items: center;

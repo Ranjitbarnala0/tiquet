@@ -212,7 +212,7 @@ export function App() {
       <>
         {updates.found && (
           <div className="update-float">
-            <UpdateBar u={updates} saleBusy={false} />
+            <UpdateBar u={updates} />
           </div>
         )}
         <Login boot={boot} lang={lang} onLang={changeLang} onLogin={setUser} />

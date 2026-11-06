@@ -9,6 +9,10 @@ import { useToast } from './toast';
 // a new version installs itself
 const EVERY = 15 * 60_000;
 const QUIET = 2 * 60_000;
+// With a ticket on the screen it waits longer, for someone who only stepped
+// away. A ticket forgotten there must not stop updates: it is saved, and it
+// comes back when Tiquet opens again.
+const LEFT = 10 * 60_000;
 // Installing closes Tiquet, and only the installer opens it again. If an
 // antivirus stopped the installer Tiquet would just vanish, so a version gets
 // two tries alone; after that it waits for someone to press the button.
@@ -40,22 +44,25 @@ interface Opts {
   // new versions come down and install themselves
   auto?: boolean;
   quiet?: number;
+  // something that closing Tiquet would lose: it waits for as long as it lasts
+  hold?: boolean;
   // the last thing to do before Tiquet closes to install
   before?: () => Promise<unknown>;
 }
 
 // Asks GitHub for a newer Tiquet a few seconds after start and every quarter
-// of an hour, never while a sale is in progress: a check that falls due then
-// waits until the ticket is cleared. With `auto` the installer comes down in
-// the background and runs once nobody has touched the till for a while, no
-// sale is on the screen and no window is open. Installing closes Tiquet; the
-// installer runs silently and opens the new version.
-export function useUpdate(busy: boolean, { on = true, auto = false, quiet = QUIET, before }: Opts = {}) {
+// of an hour, whatever is on the screen: asking and downloading get in nobody's
+// way. With `auto` the new version runs once nobody has touched the till for a
+// while and no window is open; a ticket on the screen only makes that wait
+// longer. Installing closes Tiquet; the installer runs silently and opens the
+// new version.
+export function useUpdate(ticket: boolean, { on = true, auto = false, quiet = QUIET, hold = false, before }: Opts = {}) {
   const toast = useToast();
   const [found, setFound] = useState<string | null>(null);
   const [later, setLater] = useState(false);
   const [checking, setChecking] = useState(false);
   const [upToDate, setUpToDate] = useState(false);
+  const [failed, setFailed] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
   const [due, setDue] = useState(false);
@@ -65,8 +72,10 @@ export function useUpdate(busy: boolean, { on = true, auto = false, quiet = QUIE
   const running = useRef(false);
   const fetching = useRef(false);
   const seen = useRef(Date.now());
-  const busyNow = useRef(busy);
-  busyNow.current = busy;
+  const ticketNow = useRef(ticket);
+  ticketNow.current = ticket;
+  const holdNow = useRef(hold);
+  holdNow.current = hold;
   const beforeNow = useRef(before);
   beforeNow.current = before;
 
@@ -78,9 +87,11 @@ export function useUpdate(busy: boolean, { on = true, auto = false, quiet = QUIE
         setFound(r?.version ?? null);
         setUpToDate(!r);
         setLater(false);
+        setFailed(false);
         setRound((n) => n + 1);
       } catch (e) {
         // a shop without internet is not told about it every time
+        setFailed(true);
         if (asked) toast.error(errorText(e));
       } finally {
         setChecking(false);
@@ -100,10 +111,10 @@ export function useUpdate(busy: boolean, { on = true, auto = false, quiet = QUIE
   }, [on]);
 
   useEffect(() => {
-    if (!due || busy) return;
+    if (!due) return;
     setDue(false);
     check();
-  }, [due, busy, check]);
+  }, [due, check]);
 
   const run = useCallback(
     async (alone: boolean) => {
@@ -163,7 +174,8 @@ export function useUpdate(busy: boolean, { on = true, auto = false, quiet = QUIE
     const kinds = ['keydown', 'pointerdown', 'wheel'];
     kinds.forEach((k) => window.addEventListener(k, touched, true));
     const t = setInterval(() => {
-      if (busyNow.current || document.querySelector('.modal-back, .pay-back') || Date.now() - seen.current < quiet) return;
+      if (holdNow.current || document.querySelector('.modal-back, .pay-back')) return;
+      if (Date.now() - seen.current < (ticketNow.current ? LEFT : quiet)) return;
       if (found) tried(found);
       run(true);
     }, 5000);
@@ -173,11 +185,11 @@ export function useUpdate(busy: boolean, { on = true, auto = false, quiet = QUIE
     };
   }, [waiting, quiet, found, run]);
 
-  return { found, auto: alone, later, checking, upToDate, installing, progress, check, install, hide: () => setLater(true) };
+  return { found, auto: alone, later, checking, upToDate, failed, installing, progress, check, install, hide: () => setLater(true) };
 }
 
-export function UpdateBar({ u, saleBusy }: { u: Updates; saleBusy: boolean }) {
-  if (!u.found || (!u.installing && (u.later || saleBusy))) return null;
+export function UpdateBar({ u }: { u: Updates }) {
+  if (!u.found || (!u.installing && u.later)) return null;
   return (
     <div className="update-bar" role="status">
       <Download size={16} />

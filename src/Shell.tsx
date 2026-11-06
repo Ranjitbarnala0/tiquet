@@ -44,11 +44,11 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const [leave, setLeave] = useState<null | (() => void)>(null);
   const [incoming, setIncoming] = useState<{ lines: ItemDraft[]; from: string; n: number; replaces?: { id: number; number: string } } | null>(null);
   const [vf, setVf] = useState<VerifactuStatus | null>(null);
-  // a ticket on the screen or being charged: no update is offered then
+  // a ticket on the screen or being charged
   const [saleBusy, setSaleBusy] = useState(false);
   // whoever is signed in carries on after the update, with no password to type
   const keepSession = useCallback(() => call('session.keep'), []);
-  const updates = useUpdate(saleBusy || settingsDirty, { auto: !!settings?.autoUpdate, before: keepSession });
+  const updates = useUpdate(saleBusy, { hold: settingsDirty, auto: !!settings?.autoUpdate, before: keepSession });
   const [full, setFull] = useState(false);
   const admin = user.role === 'admin';
 
@@ -314,6 +314,9 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
               {full ? <Minimize2 size={18} /> : <Maximize2 size={18} />}
             </button>
           )}
+          <small className="rail-version" title={tr('Versión de Tiquet', 'Tiquet version')}>
+            {version}
+          </small>
           <button className="rail-me" onClick={() => guard(onLogout)} title={`${user.name} · ${tr('Bloquear y cambiar de usuario', 'Lock and switch user')}`}>
             <span className="avatar sm">{initials(user.name)}</span>
             <Lock size={13} />
@@ -322,7 +325,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
       </aside>
       <div className="stage">
         <div className="bars">
-          <UpdateBar u={updates} saleBusy={saleBusy} />
+          <UpdateBar u={updates} />
           {vf && stuck(vf) && (
             <div className={`vf-bar${vf.problems.length > 0 ? ' bad' : ''}`} role="status">
               <BadgeCheck size={16} />
@@ -414,7 +417,6 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
               }}
               version={version}
               updates={updates}
-              saleBusy={saleBusy}
               logo={logo}
               onLogo={loadLogo}
               lang={lang}

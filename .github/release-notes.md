@@ -1,10 +1,12 @@
-Download `Tiquet_1.9.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.9.1_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.9.0: **your machines, and you decide what counts as an expense.**
+New in 1.9.1: **a ticket on the screen no longer stops an update.** Until now Tiquet did not even look for a new version while something was on the ticket, and a ticket left there stays after closing Tiquet, so a till could go without updates and say nothing. Now it always looks and downloads, the blue bar always shows, and a ticket forgotten on the screen comes back after the update. The version is shown at the bottom left.
+
+Also new in 1.9: **your machines, and you decide what counts as an expense.**
 
 - **A recharge is not always an expense.** In cash it counts as a recharge and nothing more. Made on a machine it also counts as an expense, less the commission. Both can be changed. Recharges saved before this version stay as they were; **Editar** in **Hoy** applies the new rule to one.
 - **Name your machines.** **Ajustes > Máquinas**: one or many, card terminals and recharge machines, with the names you want. There is always one, called Datáfono until you rename it.
