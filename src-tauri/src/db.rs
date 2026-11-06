@@ -495,6 +495,31 @@ WHEN OLD.voided_at IS NOT NULL OR NOT EXISTS (
 BEGIN SELECT RAISE(ABORT, 'a change of payment is written down first'); END;
 "#;
 
+// Which machine took a card or made a recharge, and what a machine's takings
+// added to the expenses. On a ticket that is part of how it was paid, so it
+// changes the same way; on a book entry it never does.
+const SCHEMA_V12: &str = r#"
+ALTER TABLE tickets ADD COLUMN machine_id INTEGER;
+ALTER TABLE tickets ADD COLUMN machine_cost_cents INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE ticket_payments ADD COLUMN from_machine INTEGER;
+ALTER TABLE ticket_payments ADD COLUMN to_machine INTEGER;
+ALTER TABLE book ADD COLUMN machine_id INTEGER;
+
+DROP TRIGGER book_fixed;
+CREATE TRIGGER book_fixed BEFORE UPDATE OF id, kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif,
+  invoice_ref, by_name, training, client_id, cost_cents, machine_id ON book
+BEGIN SELECT RAISE(ABORT, 'a book entry does not change'); END;
+
+DROP TRIGGER tickets_payment;
+CREATE TRIGGER tickets_payment BEFORE UPDATE OF payment_method, tendered_cents, change_cents, machine_id, machine_cost_cents ON tickets
+WHEN OLD.voided_at IS NOT NULL OR NOT EXISTS (
+  SELECT 1 FROM ticket_payments p
+  WHERE p.ticket_id = OLD.id AND p.from_method = OLD.payment_method AND p.to_method = NEW.payment_method
+    AND p.to_machine IS NEW.machine_id
+    AND p.id = (SELECT MAX(id) FROM ticket_payments WHERE ticket_id = OLD.id))
+BEGIN SELECT RAISE(ABORT, 'a change of payment is written down first'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -513,6 +538,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V9)],
     &[Step::Sql(SCHEMA_V10)],
     &[Step::Sql(SCHEMA_V11)],
+    &[Step::Sql(SCHEMA_V12)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;
@@ -661,6 +687,9 @@ mod tests {
         assert!(c.execute("INSERT INTO ticket_lines (ticket_id, pos, name, qty, unit_cents, vat_bp, total_cents) VALUES (1, 1, 'x', 1, 1, 0, 1)", []).is_err());
         let kind: String = c.query_row("SELECT kind FROM tickets WHERE id = 1", [], |r| r.get(0)).unwrap();
         assert_eq!(kind, "sale");
+        // from before there were machines: none, and nothing added to the expenses
+        let machine: (Option<i64>, i64) = c.query_row("SELECT machine_id, machine_cost_cents FROM tickets WHERE id = 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(machine, (None, 0));
         assert!(c.execute("UPDATE tickets SET kind = 'refund' WHERE id = 1", []).is_err());
         let mut c = c;
         let user = crate::state::SessionUser { id: 1, name: "Ana".into(), role: "admin".into() };

@@ -326,7 +326,7 @@ pub fn create(conn: &mut Connection, user: &SessionUser, s: &Settings, n: &NewRe
             repair_id: Some(id),
             ..SaleLine::default()
         };
-        let pay = n.payment.clone().unwrap_or(PaymentIn { method: "cash".into(), tendered_cents: None });
+        let pay = n.payment.clone().unwrap_or(PaymentIn { method: "cash".into(), tendered_cents: None, machine: None });
         let sale = tickets::check(s, vec![line], &pay, &SaleOpts::default())?;
         let ticket = tickets::write_sale(&tx, user, s, sale, request, n.clock_ok)?;
         tx.execute("UPDATE repairs SET deposit_ticket = ?1 WHERE id = ?2", params![ticket, id])?;
@@ -684,7 +684,7 @@ mod tests {
     }
 
     fn cash() -> PaymentIn {
-        PaymentIn { method: "cash".into(), tendered_cents: None }
+        PaymentIn { method: "cash".into(), tendered_cents: None, machine: None }
     }
 
     // what Venta sends for "Entregar y cobrar"

@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     fn cash() -> PaymentIn {
-        PaymentIn { method: "cash".into(), tendered_cents: None }
+        PaymentIn { method: "cash".into(), tendered_cents: None, machine: None }
     }
 
     #[derive(Debug)]

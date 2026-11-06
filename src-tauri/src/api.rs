@@ -345,17 +345,21 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let me = st.user()?;
             let t = id(&a)?;
             let method = a.get("method").and_then(Value::as_str).unwrap_or_default();
+            let machine = a.get("machine").and_then(Value::as_i64);
             {
                 let mut conn = st.conn();
                 let s = settings::load(&conn)?;
                 may_fix(&conn, &me, &s, t)?;
-                tickets::set_payment(&mut conn, t, method, &me.name)?;
+                tickets::set_payment(&mut conn, &s, t, method, machine, &me.name)?;
             }
             log::info(format!("ticket {t} now paid by {method}, changed by {}", me.name));
             ticket_get(st, t)
         }
         "tickets.refund" => {
-            let me = st.admin()?;
+            let me = st.user()?;
+            if me.role != "admin" && !settings::load(&st.conn())?.staff_refund {
+                return fail("E_FORBIDDEN");
+            }
             let r: RefundIn = parse(a.clone())?;
             if flag(&a, "preview", false) {
                 return refund_preview(st, &me, &r);
@@ -540,13 +544,19 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let (entry, duplicate) = book::add(&conn, &me, &s, parse(a)?)?;
                 (entry, duplicate, s)
             };
+            let mut print_error = None;
             if !duplicate {
                 log::info(format!("book: {} {} {} by {}", entry.kind, entry.concept, money::fmt(entry.cents), me.name));
-                if drawer_opens(&s, &entry.method) {
+                let opens = drawer_opens(&s, &entry.method);
+                if s.recharge_print && entry.cost_cents.is_some() {
+                    // the entry is saved: a printer that fails only reports it
+                    let job = Job::doc(&layout::recharge_slip(&entry, &s), None, &Opts::new(&s, opens));
+                    print_error = printer::send_job(&st.sink, &s, "recarga", &job).err().map(|e| e.0).filter(|e| e != "E_NO_PRINTER");
+                } else if opens {
                     printer::send_detached(&st.sink, &s, "cajon", &escpos::kick(&s));
                 }
             }
-            Ok(json!({ "entry": entry, "duplicate": duplicate }))
+            Ok(json!({ "entry": entry, "duplicate": duplicate, "printError": print_error }))
         }
         "book.edit" => {
             let me = st.user()?;
@@ -654,7 +664,8 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         "book.export" => {
             st.admin()?;
             let r: reports::Range = parse(a)?;
-            let path = book::export(&st.conn(), &r)?;
+            let conn = st.conn();
+            let path = book::export(&conn, &settings::load(&conn)?, &r)?;
             Ok(json!({ "path": path.to_string_lossy() }))
         }
 
@@ -1099,7 +1110,7 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
     let mut lines = if a.sample { tickets::sample_lines(s.default_vat_bp) } else { tickets::clamp(a.lines) };
     repairs::canon(&conn, &mut lines)?;
     let totals = tickets::compute(&lines);
-    let payment_in = if a.sample { Some(PaymentIn { method: "cash".into(), tendered_cents: Some(5000) }) } else { a.payment };
+    let payment_in = if a.sample { Some(PaymentIn { method: "cash".into(), tendered_cents: Some(5000), machine: None }) } else { a.payment };
     let (payment, payment_error) = match payment_in.map(|p| tickets::resolve_payment(&p, totals.total_cents)) {
         Some(Ok(p)) => (Some(p), None),
         Some(Err(e)) => (None, Some(e.0)),
@@ -1321,8 +1332,9 @@ fn print_close(st: &AppState, id: i64, user: &str) -> Result<Option<String>> {
             return fail("E_CASH_OPEN");
         };
         let sum = reports::between(&conn, &session.opened_at, &closed_at)?;
+        let machines = book::machines_between(&conn, &session.opened_at, &closed_at)?;
         let drawer = cash::drawer(&conn, Some(session.clone()))?;
-        (layout::cash_close(&s, &session, &drawer, &sum, user), s)
+        (layout::cash_close(&s, &session, &drawer, &sum, &machines, user), s)
     };
     let job = Job::doc(&lines, None, &Opts::new(&s, false));
     printer::send_job(&st.sink, &s, "cierre", &job)
@@ -2167,8 +2179,8 @@ mod tests {
         let list = dispatch(&st, "day.list", json!({ "from": today, "to": today })).unwrap();
         let sum = &list["summary"];
         assert_eq!((sum["cashCents"].as_i64(), sum["cardCents"].as_i64(), sum["rechargeCents"].as_i64()), (Some(690), Some(690), Some(1000)));
-        assert_eq!((sum["totalCents"].as_i64(), sum["expenseCents"].as_i64()), (Some(2380), Some(1400)));
-        assert_eq!(sum["netCents"].as_i64(), Some(980));
+        assert_eq!((sum["totalCents"].as_i64(), sum["expenseCents"].as_i64()), (Some(2380), Some(400)));
+        assert_eq!(sum["netCents"].as_i64(), Some(1980));
         assert_eq!(dispatch(&st, "day.totals", json!({})).unwrap()["totalCents"], 2380);
         let rows = list["rows"].as_array().unwrap();
         let printed: Vec<&str> = rows.iter().filter(|r| r["source"] == "ticket").map(|r| r["printed"].as_str().unwrap()).collect();
@@ -2208,6 +2220,100 @@ mod tests {
         assert_eq!(dispatch(&st, "tickets.payment", json!({ "id": t["id"], "method": "oro" })).unwrap_err(), "E_INVALID:method");
         dispatch(&st, "tickets.void", json!({ "id": t["id"] })).unwrap();
         assert_eq!(dispatch(&st, "tickets.payment", json!({ "id": t["id"], "method": "cash" })).unwrap_err(), "E_NOT_FOUND");
+    }
+
+    #[test]
+    fn a_card_goes_through_a_machine_and_is_put_right_on_it() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        // the second one's money is someone else's; the bank keeps 1,5 % of the first's
+        let machines = json!([
+            { "id": 1, "name": "BBVA", "card": true, "recharge": false, "takingsBp": 150 },
+            { "id": 2, "name": "Prestado", "card": true, "recharge": false, "takingsBp": 10000 },
+            { "id": 3, "name": "Recargas", "card": false, "recharge": true, "rechargeExpense": true, "commissionBp": 400 },
+        ]);
+        let s = dispatch(&st, "settings.save", json!({ "machines": machines, "cardMachine": 2 })).unwrap();
+        assert_eq!((s["machines"].as_array().unwrap().len(), s["cardMachine"].as_i64()), (3, Some(2)));
+        let charge = |payment: Value| dispatch(&st, "sale.finalize", json!({ "lines": sale()["lines"], "payment": payment, "print": false })).unwrap()["ticket"].clone();
+        // the machine asked for, the default one, and none for cash
+        let a = charge(json!({ "method": "card", "machine": 1 }));
+        let b = charge(json!({ "method": "card" }));
+        let c = charge(json!({ "method": "cash", "machine": 1 }));
+        assert_eq!((a["payment"]["machine"].as_i64(), b["payment"]["machine"].as_i64(), c["payment"]["machine"].as_i64()), (Some(1), Some(2), None));
+        // a machine that takes no cards is not asked to
+        assert_eq!(charge(json!({ "method": "card", "machine": 3 }))["payment"]["machine"].as_i64(), Some(2));
+        let totals = || dispatch(&st, "day.totals", json!({})).unwrap();
+        let sum = totals();
+        assert_eq!((sum["cardCents"].as_i64(), sum["machineCostCents"].as_i64()), (Some(2070), Some(10 + 690 + 690)));
+        assert_eq!((sum["expenseCents"].as_i64(), sum["netCents"].as_i64()), (Some(1390), Some(2760 - 1390)));
+        assert_eq!(sum["machines"][0]["salesCents"], 690);
+        assert_eq!((sum["machines"][1]["salesCents"].as_i64(), sum["machines"][1]["count"].as_i64()), (Some(1380), Some(2)));
+        // the wrong machine is put right like the wrong payment, and leaves a trace
+        let r = dispatch(&st, "tickets.payment", json!({ "id": b["id"], "method": "card", "machine": 1 })).unwrap()["ticket"].clone();
+        assert_eq!((r["payment"]["machine"].as_i64(), r["paymentChanges"][0]["fromMachine"].as_i64(), r["paymentChanges"][0]["toMachine"].as_i64()), (Some(1), Some(2), Some(1)));
+        assert_eq!(totals()["machineCostCents"].as_i64(), Some(10 + 10 + 690));
+        let r = dispatch(&st, "tickets.payment", json!({ "id": b["id"], "method": "cash" })).unwrap()["ticket"].clone();
+        assert!(r["payment"]["machine"].is_null());
+        assert_eq!(totals()["machineCostCents"].as_i64(), Some(10 + 690));
+        // a card back goes through the machine that charged it, and undoes what it added
+        let line = a["lines"][0]["id"].clone();
+        let back = dispatch(&st, "tickets.refund", json!({ "id": a["id"], "lines": [{ "lineId": line, "qty": 1 }], "method": "card", "print": false })).unwrap()["ticket"].clone();
+        assert_eq!(back["payment"]["machine"].as_i64(), Some(1));
+        assert_eq!(totals()["machineCostCents"].as_i64(), Some(690));
+        // only through here
+        assert!(st.conn().execute("UPDATE tickets SET machine_id = 2 WHERE id = ?1", [a["id"].as_i64()]).is_err());
+        assert!(st.conn().execute("UPDATE tickets SET machine_cost_cents = 0 WHERE id = ?1", [a["id"].as_i64()]).is_err());
+        // the printed summary and the file for the gestor tell them apart
+        let today = tickets::now()[..10].to_string();
+        let path = dispatch(&st, "book.export", json!({ "from": today, "to": today })).unwrap()["path"].as_str().unwrap().to_string();
+        let csv = std::fs::read_to_string(path).unwrap();
+        assert!(csv.contains(";Máquina;") && csv.contains(";Tarjeta;Prestado;") && csv.contains(";Tarjeta;BBVA;"), "{csv}");
+        let conn = st.conn();
+        let s = settings::load(&conn).unwrap();
+        let range = reports::Range { from: today.clone(), to: today };
+        let day = book::summary(&book::rows(&conn, &range, false, false).unwrap());
+        let sum = reports::summary(&conn, &range).unwrap();
+        let paper = layout::plain(&layout::summary(&sum, &day, &range.from, &range.to, &s, "Ana"), 32);
+        assert!(paper.contains("BBVA (2)") && paper.contains("Prestado (1)"), "{paper}");
+    }
+
+    #[test]
+    fn recharges_print_a_slip_if_the_shop_wants_and_a_failure_loses_nothing() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let jobs = |st: &AppState| st.data_dir.join("prints").read_dir().map_or(0, |d| d.count());
+        let add = || dispatch(&st, "book.add", json!({ "kind": "recharge", "cents": 1000, "method": "cash" })).unwrap();
+        dispatch(&st, "settings.save", json!({ "drawer": "never" })).unwrap();
+        assert!(add()["printError"].is_null());
+        assert_eq!(jobs(&st), 0);
+        dispatch(&st, "settings.save", json!({ "rechargePrint": true })).unwrap();
+        assert!(add()["printError"].is_null());
+        assert_eq!(jobs(&st), 1);
+        // with no printer the recharge is saved and nobody is bothered
+        dispatch(&st, "settings.save", json!({ "printerName": "" })).unwrap();
+        assert!(add()["printError"].is_null());
+        let today = tickets::now()[..10].to_string();
+        let list = dispatch(&st, "day.list", json!({ "from": today, "to": today })).unwrap();
+        assert_eq!(list["summary"]["rechargeCount"], 3);
+    }
+
+    #[test]
+    fn cashiers_give_returns_only_if_the_shop_lets_them() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let jordi = dispatch(&st, "users.save", json!({ "name": "Jordi", "role": "cashier", "password": "4321" })).unwrap();
+        let t = dispatch(&st, "sale.finalize", sale()).unwrap()["ticket"].clone();
+        let args = json!({ "id": t["id"], "lines": [{ "lineId": t["lines"][0]["id"], "qty": 1 }], "method": "cash" });
+        dispatch(&st, "logout", json!({})).unwrap();
+        dispatch(&st, "login", json!({ "userId": jordi["id"], "password": "4321" })).unwrap();
+        assert_eq!(dispatch(&st, "tickets.refund", args.clone()).unwrap_err(), "E_FORBIDDEN");
+        dispatch(&st, "logout", json!({})).unwrap();
+        dispatch(&st, "login", json!({ "userId": 1, "password": "123456" })).unwrap();
+        dispatch(&st, "settings.save", json!({ "staffRefund": true })).unwrap();
+        dispatch(&st, "logout", json!({})).unwrap();
+        dispatch(&st, "login", json!({ "userId": jordi["id"], "password": "4321" })).unwrap();
+        let r = dispatch(&st, "tickets.refund", args).unwrap();
+        assert_eq!((r["ticket"]["totalCents"].as_i64(), r["ticket"]["userName"].as_str()), (Some(-690), Some("Jordi")));
     }
 
     #[test]

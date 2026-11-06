@@ -5,6 +5,7 @@
 // the owner sees, so the books stay traceable (Ley 58/2003 art. 29.2.j).
 // Sales typed here before every sale became a ticket stay as they were.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -35,6 +36,8 @@ pub struct EntryIn {
     pub supplier: String,
     pub supplier_nif: String,
     pub invoice_ref: String,
+    // the machine a recharge was made on; none is a recharge in cash
+    pub machine: Option<i64>,
     // YYYY-MM-DD for something done another day; today when empty
     pub date: String,
     // made by the screen for each entry: a second Enter returns the first
@@ -63,6 +66,7 @@ pub struct Entry {
     pub deleted_at: Option<String>,
     pub deleted_by: Option<String>,
     pub delete_reason: Option<String>,
+    pub machine: Option<i64>,
 }
 
 // a line of the day as the screen shows it: a ticket or a typed entry
@@ -82,7 +86,8 @@ pub struct Row {
     pub supplier_nif: String,
     pub invoice_ref: String,
     pub vat_bp: i64,
-    // of a recharge, what counts as an expense
+    pub machine: Option<i64>,
+    // of a recharge or a sale on a machine, what counts as an expense
     pub cost_cents: i64,
     // of a ticket: its number, whether it is a return or a full invoice, and
     // printed | unknown | failed | none
@@ -111,15 +116,29 @@ pub struct Summary {
     pub sale_count: i64,
     pub refund_count: i64,
     pub recharge_count: i64,
-    // what was bought, what the operators keep of the recharges, and both
+    // what was bought, what recharges and machines add to it, and all three
     pub purchase_cents: i64,
     pub purchase_count: i64,
     pub recharge_cost_cents: i64,
+    pub machine_cost_cents: i64,
     pub expense_cents: i64,
     // the total less the expenses
     pub net_cents: i64,
     // cash that came in less cash that went out
     pub drawer_cents: i64,
+    // what went through each machine
+    pub machines: Vec<MachineSum>,
+}
+
+// sales and recharges on one machine; id 0 is cards from before there were
+// machines
+#[derive(Serialize, Debug, Default, PartialEq, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineSum {
+    pub id: i64,
+    pub sales_cents: i64,
+    pub recharge_cents: i64,
+    pub count: i64,
 }
 
 #[derive(Serialize, Debug)]
@@ -130,7 +149,7 @@ pub struct Quick {
     pub uses: i64,
 }
 
-const COLS: &str = "id, kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, cost_cents, deleted_at, deleted_by, delete_reason";
+const COLS: &str = "id, kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, cost_cents, deleted_at, deleted_by, delete_reason, machine_id";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
     Ok(Entry {
@@ -150,6 +169,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Entry> {
         deleted_at: r.get(13)?,
         deleted_by: r.get(14)?,
         delete_reason: r.get(15)?,
+        machine: r.get(16)?,
     })
 }
 
@@ -188,7 +208,13 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
     if e.cents <= 0 || e.cents > 100 * MAX_PRICE {
         return fail("E_INVALID:amount");
     }
-    let method = if e.method.is_empty() { "cash" } else { e.method.as_str() };
+    // a recharge on a machine is paid the way that machine is paid
+    let machine = s.machine(e.machine).filter(|m| recharge && m.recharge);
+    let method = match machine {
+        Some(m) => m.recharge_method(),
+        None if e.method.is_empty() => "cash",
+        None => e.method.as_str(),
+    };
     if !METHODS.contains(&method) {
         return fail("E_INVALID:method");
     }
@@ -214,16 +240,23 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
             }
         }
     };
-    // a recharge is money for the operator: it comes in and, but for the
-    // shop's commission, counts as spent. Tax is the operator's.
+    // A recharge always comes in as takings. Made on a machine it is money for
+    // the operator too, so it counts as spent but for the shop's commission; in
+    // cash it does not, unless the shop says so. Tax is the operator's.
+    let spent = |bp: i64| e.cents - div_round(e.cents * bp, 10_000);
+    let cost = match machine {
+        Some(m) if m.recharge_expense => spent(m.commission_bp),
+        None if s.recharge_cash_expense => spent(s.recharge_commission_bp),
+        _ => 0,
+    };
     let (kind, vat, category, cost) = if recharge {
-        ("sale", 0, "", Some(e.cents - div_round(e.cents * s.recharge_commission_bp, 10_000)))
+        ("sale", 0, "", Some(cost))
     } else {
         ("expense", e.vat_bp.unwrap_or(s.default_vat_bp).clamp(0, 10_000), "Compras", None)
     };
     conn.execute(
-        "INSERT INTO book (kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, training, client_id, cost_cents)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO book (kind, at, concept, cents, method, vat_bp, category, supplier, supplier_nif, invoice_ref, by_name, training, client_id, cost_cents, machine_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             kind,
             at,
@@ -239,6 +272,7 @@ pub fn add(conn: &Connection, me: &SessionUser, s: &Settings, e: EntryIn) -> Res
             s.training,
             e.client_id.filter(|c| !c.is_empty()),
             cost,
+            machine.map(|m| m.id),
         ],
     )?;
     let id = conn.last_insert_rowid();
@@ -357,6 +391,7 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
             supplier_nif: e.supplier_nif,
             invoice_ref: e.invoice_ref,
             vat_bp: e.vat_bp,
+            machine: e.machine,
             cost_cents: e.cost_cents.unwrap_or(0),
             number: None,
             refund: false,
@@ -376,7 +411,8 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
                 CASE WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id AND p.status IN ('printed', 'sent')) THEN 'printed'
                      WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id AND p.status = 'unknown') THEN 'unknown'
                      WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id) THEN 'failed'
-                     ELSE 'none' END
+                     ELSE 'none' END,
+                t.machine_id, t.machine_cost_cents
          FROM tickets t WHERE t.issued_at >= ?1 AND t.issued_at <= ?2 AND t.training = ?3 AND (?4 OR t.voided_at IS NULL)",
     )?;
     let tickets = stmt.query_map(params![from, to, training, deleted], |r| {
@@ -400,7 +436,8 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
             supplier_nif: String::new(),
             invoice_ref: String::new(),
             vat_bp: 0,
-            cost_cents: 0,
+            machine: r.get(14)?,
+            cost_cents: r.get(15)?,
             number: Some(r.get(2)?),
             refund,
             invoice: r.get(12)?,
@@ -418,8 +455,16 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
     Ok(out)
 }
 
+fn count(machines: &mut BTreeMap<i64, MachineSum>, id: i64, sales: i64, recharges: i64, n: i64) {
+    let m = machines.entry(id).or_insert_with(|| MachineSum { id, ..MachineSum::default() });
+    m.sales_cents += sales;
+    m.recharge_cents += recharges;
+    m.count += n;
+}
+
 pub fn summary(rows: &[Row]) -> Summary {
     let mut s = Summary::default();
+    let mut machines = BTreeMap::new();
     for r in rows.iter().filter(|r| !r.gone) {
         match r.source {
             "recharge" => {
@@ -438,6 +483,7 @@ pub fn summary(rows: &[Row]) -> Summary {
                     "bizum" => s.bizum_cents += r.cents,
                     _ => s.other_cents += r.cents,
                 }
+                s.machine_cost_cents += r.cost_cents;
                 if r.refund {
                     s.refund_count += 1;
                 } else {
@@ -448,11 +494,39 @@ pub fn summary(rows: &[Row]) -> Summary {
         if r.method == "cash" {
             s.drawer_cents += r.cents;
         }
+        if r.source != "expense" && (r.machine.is_some() || r.method == "card") {
+            let (sales, recharges) = if r.source == "recharge" { (0, r.cents) } else { (r.cents, 0) };
+            count(&mut machines, r.machine.unwrap_or(0), sales, recharges, 1);
+        }
     }
     s.total_cents = s.cash_cents + s.card_cents + s.bizum_cents + s.other_cents + s.recharge_cents;
-    s.expense_cents = s.purchase_cents + s.recharge_cost_cents;
+    s.expense_cents = s.purchase_cents + s.recharge_cost_cents + s.machine_cost_cents;
     s.net_cents = s.total_cents - s.expense_cents;
+    s.machines = machines.into_values().collect();
     s
+}
+
+// what went through each machine between two moments, for the closing report
+pub fn machines_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<MachineSum>> {
+    let mut machines = BTreeMap::new();
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(machine_id, 0), SUM(total_cents), COUNT(*) FROM tickets
+         WHERE payment_method = 'card' AND voided_at IS NULL AND training = 0 AND issued_at >= ?1 AND issued_at <= ?2 GROUP BY 1",
+    )?;
+    for r in stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+        let (id, cents, n): (i64, i64, i64) = r?;
+        count(&mut machines, id, cents, 0, n);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(machine_id, 0), SUM(cents), COUNT(*) FROM book
+         WHERE cost_cents IS NOT NULL AND (machine_id IS NOT NULL OR method = 'card')
+           AND deleted_at IS NULL AND training = 0 AND at >= ?1 AND at <= ?2 GROUP BY 1",
+    )?;
+    for r in stmt.query_map(params![from, to], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+        let (id, cents, n): (i64, i64, i64) = r?;
+        count(&mut machines, id, 0, cents, n);
+    }
+    Ok(machines.into_values().collect())
 }
 
 // what the shop buys most, for one-tap buttons: the last 90 days' expenses
@@ -486,10 +560,11 @@ pub fn cash_between(conn: &Connection, from: &str, to: &str) -> Result<(i64, i64
 // The period for the gestor: income and expenses with VAT split out, the
 // tickets as one line each, recharges with what they cost. Deleted entries
 // and voided tickets are not in the books, so not here either.
-pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
+pub fn export(conn: &Connection, s: &Settings, r: &Range) -> Result<PathBuf> {
     let (from, to) = r.bounds()?;
+    let machine = |id: Option<i64>| id.map(|m| cell(s.machine_name(m))).unwrap_or_default();
     let mut out = String::from(
-        "\u{feff}Fecha;Origen;Tipo;Concepto;Pago;Base;IVA %;Cuota IVA;Total;Coste recarga;Proveedor;NIF proveedor;Nº factura;Usuario\r\n",
+        "\u{feff}Fecha;Origen;Tipo;Concepto;Pago;Máquina;Base;IVA %;Cuota IVA;Total;Coste;Proveedor;NIF proveedor;Nº factura;Usuario\r\n",
     );
     let mut lines: Vec<(String, String)> = Vec::new();
     let mut stmt = conn.prepare(&format!(
@@ -509,6 +584,7 @@ pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
             },
             cell(&e.concept),
             method_label(&e.method).to_string(),
+            machine(e.machine),
             plain(sign * base),
             plain(e.vat_bp),
             plain(sign * (e.cents - base)),
@@ -525,7 +601,8 @@ pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
         "SELECT t.issued_at, t.number, t.kind, t.total_cents, t.payment_method, t.user_name,
                 COALESCE((SELECT SUM(base_cents) FROM ticket_vat WHERE ticket_id = t.id), t.total_cents),
                 COALESCE((SELECT SUM(vat_cents) FROM ticket_vat WHERE ticket_id = t.id), 0),
-                (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(vat_bp) END FROM ticket_vat WHERE ticket_id = t.id)
+                (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(vat_bp) END FROM ticket_vat WHERE ticket_id = t.id),
+                t.machine_id, t.machine_cost_cents
          FROM tickets t WHERE t.issued_at >= ?1 AND t.issued_at <= ?2 AND t.training = 0 AND t.voided_at IS NULL",
     )?;
     let tickets = stmt.query_map(params![from, to], |r| {
@@ -539,21 +616,24 @@ pub fn export(conn: &Connection, r: &Range) -> Result<PathBuf> {
             r.get::<_, i64>(6)?,
             r.get::<_, i64>(7)?,
             r.get::<_, Option<i64>>(8)?,
+            r.get::<_, Option<i64>>(9)?,
+            r.get::<_, i64>(10)?,
         ))
     })?;
     for t in tickets {
-        let (at, number, kind, total, method, user, base, vat, rate) = t?;
+        let (at, number, kind, total, method, user, base, vat, rate, on, cost) = t?;
         let fields = [
             datetime(&at),
             format!("Ticket {number}"),
             if kind == "refund" { "Devolución".into() } else { "Venta".into() },
             String::new(),
             method_label(&method).to_string(),
+            machine(on),
             plain(base),
             rate.map(plain).unwrap_or_else(|| "varios".into()),
             plain(vat),
             plain(total),
-            String::new(),
+            if cost != 0 { plain(cost) } else { String::new() },
             String::new(),
             String::new(),
             String::new(),
@@ -582,6 +662,7 @@ pub fn wipe_training(conn: &Connection) -> Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::Machine;
 
     fn conn() -> Connection {
         let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
@@ -605,26 +686,90 @@ mod tests {
         rows(c, &today(), false, false).unwrap()
     }
 
+    // a card terminal that also does recharges, and a machine that only does those
+    fn two_machines() -> Settings {
+        Settings {
+            machines: vec![
+                Machine { id: 1, name: "BBVA".into(), commission_bp: 300, ..Machine::default() },
+                Machine { id: 2, name: "Recargas".into(), card: false, commission_bp: 500, ..Machine::default() },
+            ],
+            ..Settings::default()
+        }
+    }
+
     #[test]
-    fn recharges_are_takings_and_expenses_at_once() {
+    fn a_recharge_is_an_expense_on_a_machine_and_not_in_cash() {
         let c = conn();
-        let s = Settings { recharge_commission_bp: 500, ..Settings::default() };
+        let s = two_machines();
         let ana = me("Ana", "cashier");
+        // in cash it comes in and that is all
         let (r, _) = add(&c, &ana, &s, EntryIn { supplier: "Lycamobile".into(), ..entry("recharge", "", 1000, "cash") }).unwrap();
-        assert_eq!((r.concept.as_str(), r.vat_bp, r.cost_cents), ("Recarga Lycamobile", 0, Some(950)));
-        add(&c, &ana, &s, entry("recharge", "", 500, "card")).unwrap();
+        assert_eq!((r.concept.as_str(), r.vat_bp, r.cost_cents, r.machine), ("Recarga Lycamobile", 0, Some(0), None));
+        // on a machine that takes cards it is paid by card, and spent but for the commission
+        let (r, _) = add(&c, &ana, &s, EntryIn { machine: Some(1), ..entry("recharge", "", 1000, "") }).unwrap();
+        assert_eq!((r.method.as_str(), r.cost_cents, r.machine), ("card", Some(970), Some(1)));
+        // on one that only does recharges the customer paid at the counter
+        let (r, _) = add(&c, &ana, &s, EntryIn { machine: Some(2), ..entry("recharge", "", 2000, "card") }).unwrap();
+        assert_eq!((r.method.as_str(), r.cost_cents, r.machine), ("cash", Some(1900), Some(2)));
         add(&c, &ana, &s, entry("expense", "  pantalla   iphone 11 ", 4500, "cash")).unwrap();
         let list = rows_today(&c);
         let sum = summary(&list);
-        assert_eq!((sum.recharge_cents, sum.recharge_count, sum.recharge_cost_cents), (1500, 2, 1425));
-        assert_eq!((sum.purchase_cents, sum.expense_cents), (4500, 5925));
-        assert_eq!((sum.total_cents, sum.net_cents), (1500, -4425));
-        // the money of a recharge stays in the drawer; a purchase comes out of it
-        assert_eq!(sum.drawer_cents, 1000 - 4500);
-        assert_eq!(cash_between(&c, &today().from, &format!("{}T99", today().to)).unwrap(), (1000, 4500));
+        assert_eq!((sum.recharge_cents, sum.recharge_count, sum.recharge_cost_cents), (4000, 3, 2870));
+        assert_eq!((sum.purchase_cents, sum.expense_cents), (4500, 7370));
+        assert_eq!((sum.total_cents, sum.net_cents), (4000, -3370));
+        // the money of a recharge in hand stays in the drawer; a purchase comes out of it
+        assert_eq!(sum.drawer_cents, 1000 + 2000 - 4500);
+        let (from, to) = (today().from, format!("{}T99", today().to));
+        assert_eq!(cash_between(&c, &from, &to).unwrap(), (3000, 4500));
+        // each machine apart, the same on the screen and on the closing report
+        let machines = vec![
+            MachineSum { id: 1, sales_cents: 0, recharge_cents: 1000, count: 1 },
+            MachineSum { id: 2, sales_cents: 0, recharge_cents: 2000, count: 1 },
+        ];
+        assert_eq!(sum.machines, machines);
+        assert_eq!(machines_between(&c, &from, &to).unwrap(), machines);
         assert!(list.iter().any(|r| r.concept == "pantalla iphone 11" && r.source == "expense"));
         // no other kind of entry is typed: a sale is a ticket
         assert_eq!(add(&c, &ana, &s, entry("sale", "x", 100, "cash")).unwrap_err().0, "E_INVALID:kind");
+    }
+
+    #[test]
+    fn what_counts_as_an_expense_is_up_to_the_shop() {
+        let c = conn();
+        let mut s = two_machines();
+        let ana = me("Ana", "cashier");
+        // this machine's recharges are not an expense, recharges in cash are
+        s.machines[0].recharge_expense = false;
+        s.recharge_cash_expense = true;
+        s.recharge_commission_bp = 200;
+        let cost = |s: &Settings, machine, cents| add(&c, &ana, s, EntryIn { machine, ..entry("recharge", "", cents, "cash") }).unwrap().0.cost_cents;
+        assert_eq!(cost(&s, Some(1), 1000), Some(0));
+        assert_eq!(cost(&s, None, 1000), Some(980));
+        // paid in cash on a machine that also takes cards: the drawer has it
+        s.machines[0].recharge_cash = true;
+        let (r, _) = add(&c, &ana, &s, EntryIn { machine: Some(1), ..entry("recharge", "", 500, "") }).unwrap();
+        assert_eq!(r.method, "cash");
+        // a machine that does no recharges makes none, and an unknown one neither
+        s.machines[0].recharge = false;
+        let (r, _) = add(&c, &ana, &s, EntryIn { machine: Some(1), ..entry("recharge", "", 500, "cash") }).unwrap();
+        assert_eq!(r.machine, None);
+        let (r, _) = add(&c, &ana, &s, EntryIn { machine: Some(9), ..entry("recharge", "", 500, "cash") }).unwrap();
+        assert_eq!(r.machine, None);
+        // a change in Ajustes is for what comes next: what was saved stays as it was
+        let before = summary(&rows_today(&c)).recharge_cost_cents;
+        s.recharge_cash_expense = false;
+        assert_eq!(cost(&s, None, 1000), Some(0));
+        assert_eq!(summary(&rows_today(&c)).recharge_cost_cents, before);
+        // only a recharge is made on a machine
+        let (e, _) = add(&c, &ana, &s, EntryIn { machine: Some(2), ..entry("expense", "Fundas", 900, "card") }).unwrap();
+        assert_eq!((e.machine, e.method.as_str()), (None, "card"));
+        // a machine that was taken away keeps its name on what it did
+        let mut s = two_machines();
+        s.machines[1].removed = true;
+        let (r, _) = add(&c, &ana, &s, EntryIn { machine: Some(2), ..entry("recharge", "", 500, "cash") }).unwrap();
+        assert_eq!(s.machine_name(r.machine.unwrap()), "Recargas");
+        // it never changes behind the owner's back
+        assert!(c.execute("UPDATE book SET machine_id = 1 WHERE id = ?1", [r.id]).is_err());
     }
 
     #[test]
@@ -665,9 +810,14 @@ mod tests {
         let b = edit(&c, &ana, &s, a.id, entry("expense", "Fundas iPhone", 1500, "card")).unwrap();
         assert_eq!((b.concept.as_str(), b.cents, b.method.as_str(), b.at.as_str()), ("Fundas iPhone", 1500, "card", a.at.as_str()));
         let e = edit(&c, &ana, &s, r.id, EntryIn { supplier: "Lebara".into(), ..entry("recharge", "", 2000, "card") }).unwrap();
-        assert_eq!((e.cost_cents, e.supplier.as_str(), e.concept.as_str()), (Some(2000), "Lebara", "Recarga Lebara"));
+        assert_eq!((e.cost_cents, e.supplier.as_str(), e.concept.as_str()), (Some(0), "Lebara", "Recarga Lebara"));
         let sum = summary(&rows_today(&c));
         assert_eq!((sum.purchase_cents, sum.recharge_cents, sum.drawer_cents), (1500, 2000, 0));
+        // moved to a machine it becomes an expense, and back to cash it stops being one
+        let e = edit(&c, &ana, &s, e.id, EntryIn { machine: Some(1), ..entry("recharge", "", 2000, "") }).unwrap();
+        assert_eq!((e.cost_cents, e.machine, e.method.as_str()), (Some(2000), Some(1), "card"));
+        let e = edit(&c, &ana, &s, e.id, entry("recharge", "", 2000, "cash")).unwrap();
+        assert_eq!((e.cost_cents, e.machine, e.method.as_str()), (Some(0), None, "cash"));
         // the old one is still there, marked, and cannot come back over the new one
         let kept = rows(&c, &today(), false, true).unwrap();
         assert!(kept.iter().any(|x| x.id == a.id && x.gone && x.delete_reason.as_deref() == Some(CORRECTED)));

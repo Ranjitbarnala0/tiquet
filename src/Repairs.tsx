@@ -9,6 +9,7 @@ import { BRANDS, DEVICES, FAULTS } from './devices';
 import { Paper } from './Paper';
 import { RepairWhatsApp } from './Share';
 import { useToast } from './toast';
+import { cardMachines } from './machines';
 import type { Logo, Method, PLine, Repair, RepairCreated, RepairData, RepairDetail, RepairEvent, RepairStatus, RepairSummary, Settings, User } from './types';
 import { Drawer, Empty, Field, Modal, Segmented } from './ui';
 import { printerLabel } from './usePrinter';
@@ -147,6 +148,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
   const [d, setD] = useState<Draft>(() => (repair ? toDraft(repair) : BLANK));
   const [opened] = useState(() => JSON.stringify(repair ? toDraft(repair) : BLANK));
   const [method, setMethod] = useState<Method>('cash');
+  const [machine, setMachine] = useState(settings.cardMachine);
   const [given, setGiven] = useState('');
   const [paper, setPaper] = useState<{ resguardo: PLine[]; slip: PLine[]; number: string } | null>(null);
   const [show, setShow] = useState<'resguardo' | 'slip'>('resguardo');
@@ -241,7 +243,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
       const r = await call<RepairCreated>('repairs.create', {
         ...data,
         depositCents,
-        payment: depositCents ? { method, tenderedCents: tendered ?? undefined } : undefined,
+        payment: depositCents ? { method, tenderedCents: tendered ?? undefined, machine: method === 'card' ? machine : undefined } : undefined,
         requestId: requestId.current,
         clockOk,
         print: print && !noPrinter,
@@ -409,6 +411,15 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
                   { value: 'bizum', label: 'Bizum' },
                 ]}
               />
+              {method === 'card' && cardMachines(settings).length > 1 && (
+                <div className="picks">
+                  {cardMachines(settings).map((m) => (
+                    <button key={m.id} type="button" className={`pick${machine === m.id ? ' on' : ''}`} onClick={() => setMachine(m.id)}>
+                      {m.name}
+                    </button>
+                  ))}
+                </div>
+              )}
               {method === 'cash' && (
                 <Field
                   label={tr('Entregado por el cliente', 'Received from the customer')}

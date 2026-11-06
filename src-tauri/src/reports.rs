@@ -410,9 +410,9 @@ mod tests {
         let user = SessionUser { id: 1, name: "Ana".into(), role: "admin".into() };
         let s = Settings::default();
         let line = |name: &str, qty, unit_cents| SaleLine { name: name.into(), qty, unit_cents, vat_bp: 2100, ..SaleLine::default() };
-        let cash = PaymentIn { method: "cash".into(), tendered_cents: None };
+        let cash = PaymentIn { method: "cash".into(), tendered_cents: None, machine: None };
         let sale = finalize(&mut conn, &user, &s, vec![line("Cable", 2, 690), line("=cmd|' /C calc'!A0", 1, 1000)], &cash).unwrap();
-        finalize(&mut conn, &user, &s, vec![line("Funda", 1, 995)], &PaymentIn { method: "card".into(), tendered_cents: None }).unwrap();
+        finalize(&mut conn, &user, &s, vec![line("Funda", 1, 995)], &PaymentIn { method: "card".into(), tendered_cents: None, machine: None }).unwrap();
         let back = RefundIn {
             id: sale.id,
             lines: vec![RefundLine { line_id: sale.lines[0].id.unwrap(), qty: 1 }],
@@ -458,7 +458,7 @@ mod tests {
         .unwrap();
         let user = SessionUser { id: 1, name: "Jordi".into(), role: "cashier".into() };
         let line = |name: &str, qty, unit_cents, product_id| SaleLine { product_id, name: name.into(), qty, unit_cents, vat_bp: 2100, ..SaleLine::default() };
-        let cash = PaymentIn { method: "cash".into(), tendered_cents: None };
+        let cash = PaymentIn { method: "cash".into(), tendered_cents: None, machine: None };
         let t = finalize(&mut conn, &user, &Settings::default(), vec![line("Cable", 2, 500, Some(1)), line("Descuento", 1, -100, None)], &cash).unwrap();
         let day = t.issued_at[..10].to_string();
         let sum = summary(&conn, &Range { from: day.clone(), to: day }).unwrap();

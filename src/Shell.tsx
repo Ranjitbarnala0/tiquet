@@ -17,7 +17,7 @@ import { UpdateBar, useUpdate } from './Update';
 import { sendError, stuck } from './Verifactu';
 
 type Screen = 'sale' | 'day' | 'repairs' | 'products' | 'settings';
-export type SettingsTab = 'shop' | 'sale' | 'ticket' | 'printer' | 'mail' | 'users' | 'data' | 'verifactu';
+export type SettingsTab = 'shop' | 'sale' | 'machines' | 'ticket' | 'printer' | 'mail' | 'users' | 'data' | 'verifactu';
 
 const VERSION_KEY = 'tiquet.version';
 
@@ -283,8 +283,8 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const nav: { id: Screen; label: string; icon: typeof ShoppingBag }[] = [
     { id: 'sale', label: tr('Venta', 'Sale'), icon: ShoppingBag },
     { id: 'day', label: tr('Hoy', 'Today'), icon: CalendarDays },
-    { id: 'repairs', label: tr('Reparaciones', 'Repairs'), icon: Wrench },
   ];
+  if (settings.showRepairs) nav.push({ id: 'repairs', label: tr('Reparaciones', 'Repairs'), icon: Wrench });
   if (admin) {
     nav.push({ id: 'products', label: tr('Productos', 'Products'), icon: Package }, { id: 'settings', label: tr('Ajustes', 'Settings'), icon: SettingsIcon });
   }

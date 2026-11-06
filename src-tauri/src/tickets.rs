@@ -97,6 +97,9 @@ pub struct PaymentIn {
     pub method: String,
     #[serde(default)]
     pub tendered_cents: Option<i64>,
+    // the machine a card went through, when the shop has more than one
+    #[serde(default)]
+    pub machine: Option<i64>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -105,6 +108,7 @@ pub struct Payment {
     pub method: String,
     pub tendered_cents: i64,
     pub change_cents: i64,
+    pub machine: Option<i64>,
 }
 
 fn method(m: &str) -> Result<String> {
@@ -117,7 +121,7 @@ fn method(m: &str) -> Result<String> {
 pub fn resolve_payment(p: &PaymentIn, total: i64) -> Result<Payment> {
     let m = method(&p.method)?;
     if m != "cash" {
-        return Ok(Payment { method: m, tendered_cents: total, change_cents: 0 });
+        return Ok(Payment { method: m, tendered_cents: total, change_cents: 0, machine: p.machine });
     }
     let tendered = p.tendered_cents.unwrap_or(total);
     if tendered < total || tendered > 100 * MAX_PRICE {
@@ -128,7 +132,7 @@ pub fn resolve_payment(p: &PaymentIn, total: i64) -> Result<Payment> {
     if tendered - total > MAX_CHANGE {
         return fail("E_TENDERED_HIGH");
     }
-    Ok(Payment { method: m, tendered_cents: tendered, change_cents: tendered - total })
+    Ok(Payment { method: m, tendered_cents: tendered, change_cents: tendered - total, machine: None })
 }
 
 // what the ticket looked like when it was issued, so a reprint next year
@@ -328,6 +332,8 @@ pub struct PaymentChange {
     pub by_name: String,
     pub from: String,
     pub to: String,
+    pub from_machine: Option<i64>,
+    pub to_machine: Option<i64>,
 }
 
 #[derive(Serialize, Debug)]
@@ -584,11 +590,13 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
     let (series, seq, number) = next_number(tx, &s.ticket_prefix, &tag, &issued_at)?;
     let (totals, payment) = (t.totals, t.payment);
     let c = t.customer;
+    let machine = s.paid_on(&payment.method, payment.machine);
     tx.execute(
         "INSERT INTO tickets (number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
                               payment_method, tendered_cents, change_cents, shop, kind, refund_of, refund_reason,
-                              client_id, sealed, customer_name, customer_nif, customer_address, training)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20)",
+                              client_id, sealed, customer_name, customer_nif, customer_address, training,
+                              machine_id, machine_cost_cents)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20, ?21, ?22)",
         params![
             number,
             series,
@@ -609,7 +617,9 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
             c.map(|c| c.name.as_str()),
             c.map(|c| c.nif.as_str()),
             c.map(|c| c.address.as_str()),
-            t.training
+            t.training,
+            machine.map(|m| m.id),
+            machine.map_or(0, |m| m.sale_cost(totals.total_cents)),
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -805,7 +815,9 @@ pub fn plan_refund(conn: &Connection, a: &RefundIn) -> Result<RefundPlan> {
     if totals.total_cents >= 0 {
         return fail("E_REFUND_INVALID");
     }
-    let payment = Payment { method: method(&a.method)?, tendered_cents: totals.total_cents, change_cents: 0 };
+    // a card goes back through the machine that charged it
+    let machine = original.payment.machine.filter(|_| a.method == "card");
+    let payment = Payment { method: method(&a.method)?, tendered_cents: totals.total_cents, change_cents: 0, machine };
     let reason = a.reason.trim().chars().take(200).collect();
     Ok(RefundPlan { original, lines, totals, payment, reason })
 }
@@ -851,7 +863,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
         .query_row(
             "SELECT id, number, issued_at, user_name, total_cents, item_count, payment_method,
                     tendered_cents, change_cents, voided_at, voided_by, void_reason, shop, kind, refund_of, refund_reason,
-                    customer_name, customer_nif, customer_address, training
+                    customer_name, customer_nif, customer_address, training, machine_id
              FROM tickets WHERE id = ?1",
             [id],
             |r| {
@@ -863,7 +875,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                         user_name: r.get(3)?,
                         total_cents: r.get(4)?,
                         item_count: r.get(5)?,
-                        payment: Payment { method: r.get(6)?, tendered_cents: r.get(7)?, change_cents: r.get(8)? },
+                        payment: Payment { method: r.get(6)?, tendered_cents: r.get(7)?, change_cents: r.get(8)?, machine: r.get(20)? },
                         voided_at: r.get(9)?,
                         voided_by: r.get(10)?,
                         void_reason: r.get(11)?,
@@ -936,9 +948,9 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
     rec.prints = stmt
         .query_map([id], |r| Ok(PrintRow { at: r.get(0)?, copy: r.get(1)?, status: r.get(2)?, detail: r.get(3)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut stmt = conn.prepare("SELECT at, by_name, from_method, to_method FROM ticket_payments WHERE ticket_id = ?1 ORDER BY id")?;
+    let mut stmt = conn.prepare("SELECT at, by_name, from_method, to_method, from_machine, to_machine FROM ticket_payments WHERE ticket_id = ?1 ORDER BY id")?;
     rec.payment_changes = stmt
-        .query_map([id], |r| Ok(PaymentChange { at: r.get(0)?, by_name: r.get(1)?, from: r.get(2)?, to: r.get(3)? }))?
+        .query_map([id], |r| Ok(PaymentChange { at: r.get(0)?, by_name: r.get(1)?, from: r.get(2)?, to: r.get(3)?, from_machine: r.get(4)?, to_machine: r.get(5)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     rec.qr = verifactu::qr_of(conn, id)?;
     rec.aeat = verifactu::ticket_state(conn, id)?;
@@ -988,23 +1000,28 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<TicketSummary>> {
 
 // A sale charged the wrong way: how it was paid is in no billing record, so it
 // is put right on the ticket itself, with who changed it and when.
-pub fn set_payment(conn: &mut Connection, id: i64, to: &str, by: &str) -> Result<()> {
+pub fn set_payment(conn: &mut Connection, s: &Settings, id: i64, to: &str, asked: Option<i64>, by: &str) -> Result<()> {
     let to = method(to)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let row: Option<(String, i64)> = tx
-        .query_row("SELECT payment_method, total_cents FROM tickets WHERE id = ?1 AND voided_at IS NULL", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+    let row: Option<(String, Option<i64>, i64)> = tx
+        .query_row("SELECT payment_method, machine_id, total_cents FROM tickets WHERE id = ?1 AND voided_at IS NULL", [id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .optional()?;
-    let Some((from, total)) = row else {
+    let Some((from, from_machine, total)) = row else {
         return fail("E_NOT_FOUND");
     };
-    if from == to {
+    let machine = s.paid_on(&to, asked);
+    let to_machine = machine.map(|m| m.id);
+    if from == to && from_machine == to_machine {
         return Ok(());
     }
     tx.execute(
-        "INSERT INTO ticket_payments (ticket_id, at, by_name, from_method, to_method) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, now(), by, from, to],
+        "INSERT INTO ticket_payments (ticket_id, at, by_name, from_method, to_method, from_machine, to_machine) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![id, now(), by, from, to, from_machine, to_machine],
     )?;
-    tx.execute("UPDATE tickets SET payment_method = ?1, tendered_cents = ?2, change_cents = 0 WHERE id = ?3", params![to, total, id])?;
+    tx.execute(
+        "UPDATE tickets SET payment_method = ?1, tendered_cents = ?2, change_cents = 0, machine_id = ?3, machine_cost_cents = ?4 WHERE id = ?5",
+        params![to, total, to_machine, machine.map_or(0, |m| m.sale_cost(total)), id],
+    )?;
     tx.commit()?;
     Ok(())
 }
@@ -1159,7 +1176,7 @@ mod tests {
     }
 
     fn cash(t: Option<i64>) -> PaymentIn {
-        PaymentIn { method: "cash".into(), tendered_cents: t }
+        PaymentIn { method: "cash".into(), tendered_cents: t, machine: None }
     }
 
     fn back(id: i64, lines: &[(i64, i64)]) -> RefundIn {
@@ -1250,7 +1267,7 @@ mod tests {
         assert_eq!(err(vec![line("  ", 1, 500)], cash(None)), "E_INVALID:name");
         assert_eq!(err(vec![line("x", 1, -500)], cash(None)), "E_NEGATIVE");
         assert_eq!(err(vec![line("x", 1, MAX_PRICE + 1)], cash(None)), "E_INVALID:price");
-        assert_eq!(err(vec![line("x", 1, 500)], PaymentIn { method: "gold".into(), tendered_cents: None }), "E_INVALID:method");
+        assert_eq!(err(vec![line("x", 1, 500)], PaymentIn { method: "gold".into(), tendered_cents: None, machine: None }), "E_INVALID:method");
         assert_eq!(err(vec![line("x", 1, 0)], cash(None)), "E_ZERO_PRICE");
         // an EAN typed into the cash field as euros
         assert_eq!(err(vec![line("x", 1, 500)], cash(Some(4_006_381))), "E_TENDERED_HIGH");
@@ -1282,7 +1299,7 @@ mod tests {
     fn product_sales_counted_and_unwound_on_void() {
         let (mut conn, user, s) = setup();
         let l = SaleLine { product_id: Some(1), ..line("Cable", 3, 690) };
-        let t = finalize(&mut conn, &user, &s, vec![l], &PaymentIn { method: "card".into(), tendered_cents: None }).unwrap();
+        let t = finalize(&mut conn, &user, &s, vec![l], &PaymentIn { method: "card".into(), tendered_cents: None, machine: None }).unwrap();
         let sold = |c: &Connection| c.query_row("SELECT sold_qty FROM products WHERE id = 1", [], |r| r.get::<_, i64>(0)).unwrap();
         assert_eq!(sold(&conn), 3);
         void(&mut conn, t.id, "Ana", "error").unwrap();

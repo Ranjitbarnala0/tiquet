@@ -4,7 +4,7 @@ import { call, toError } from './api';
 import { dateTime, eur, fmt, parseMoney } from './format';
 import { errorText, tr, warningText } from './i18n';
 import { useToast } from './toast';
-import type { CashDrawer, CashSession, User } from './types';
+import type { CashDrawer, CashSession, Settings, User } from './types';
 import { Empty, Field, Segmented } from './ui';
 
 function Money({ value, onChange, autoFocus, placeholder }: { value: string; onChange: (v: string) => void; autoFocus?: boolean; placeholder?: string }) {
@@ -18,11 +18,12 @@ function Money({ value, onChange, autoFocus, placeholder }: { value: string; onC
 
 const MAX = 999_999_999;
 
-export function Cash({ user }: { user: User }) {
+export function Cash({ user, settings }: { user: User; settings: Settings }) {
   const toast = useToast();
   const [d, setD] = useState<CashDrawer | null>(null);
   const [history, setHistory] = useState<CashSession[] | null>(null);
-  const [float, setFloat] = useState('');
+  const usualFloat = settings.floatCents ? fmt(settings.floatCents) : '';
+  const [float, setFloat] = useState(usualFloat);
   const [dir, setDir] = useState<'out' | 'in'>('out');
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
@@ -68,7 +69,7 @@ export function Cash({ user }: { user: User }) {
   const open = async (e: FormEvent) => {
     e.preventDefault();
     if (floatCents === null || floatCents < 0) return;
-    if (await run('cash.open', { floatCents }, tr('Caja abierta', 'Till opened'))) setFloat('');
+    if (await run('cash.open', { floatCents }, tr('Caja abierta', 'Till opened'))) setFloat(usualFloat);
   };
 
   const moveCents = parseMoney(amount, MAX);

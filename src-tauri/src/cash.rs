@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(open(&conn, "Ana", 0).unwrap_err().0, "E_CASH_OPEN");
         let user = SessionUser { id: 1, name: "Ana".into(), role: "admin".into() };
         let line = SaleLine { name: "Cable".into(), qty: 1, unit_cents: 690, vat_bp: 2100, ..SaleLine::default() };
-        let pay = |m: &str| PaymentIn { method: m.into(), tendered_cents: None };
+        let pay = |m: &str| PaymentIn { method: m.into(), tendered_cents: None, machine: None };
         finalize(&mut conn, &user, &Settings::default(), vec![line.clone()], &pay("cash")).unwrap();
         finalize(&mut conn, &user, &Settings::default(), vec![line.clone()], &pay("card")).unwrap();
         finalize(&mut conn, &user, &Settings { training: true, ..Settings::default() }, vec![line], &pay("cash")).unwrap();

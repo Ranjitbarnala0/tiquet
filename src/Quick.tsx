@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
-import { call } from './api';
+import { Banknote, CreditCard, Smartphone, SmartphoneCharging, type LucideIcon } from 'lucide-react';
+import { call, toError } from './api';
 import { eur, fmt, isoDate, parseMoney, rate, VAT_RATES } from './format';
 import { errorText, tr } from './i18n';
+import { machineName, rechargeMachines } from './machines';
 import { useToast } from './toast';
 import type { BookMethod, DayRow, Settings } from './types';
 import { Field, Modal, Segmented } from './ui';
@@ -14,6 +16,8 @@ export interface EntryDraft {
   concept?: string;
   cents: number;
   method: BookMethod;
+  // the machine a recharge was made on
+  machine?: number;
   supplier?: string;
   supplierNif?: string;
   invoiceRef?: string;
@@ -47,9 +51,10 @@ export function useEntrySave(onChanged: () => void) {
       if (busy.current || (last.current.key === key && Date.now() - last.current.at < 1500)) return false;
       busy.current = true;
       try {
-        const r = await call<{ entry: { id: number; concept: string; cents: number } }>('book.add', { ...entry, clientId: newId() });
+        const r = await call<{ entry: { id: number; concept: string; cents: number }; printError: string | null }>('book.add', { ...entry, clientId: newId() });
         last.current = { key, at: Date.now() };
         const id = r.entry.id;
+        if (r.printError) toast.error(`${tr('Guardado, pero el justificante no se imprimió', 'Saved, but the receipt did not print')}: ${errorText(toError(r.printError))}`);
         toast.ok(`${r.entry.concept} · ${eur(r.entry.cents)}`, {
           action: {
             label: tr('Deshacer', 'Undo'),
@@ -79,8 +84,41 @@ const pays = (now: BookMethod = 'cash'): { value: BookMethod; label: string }[] 
   ...(now === 'bizum' ? [{ value: now, label: 'Bizum' }] : now === 'transfer' ? [{ value: now, label: tr('Transferencia', 'Transfer') }] : []),
 ];
 
-// Tap an amount and it is done: the money counts as a sale and, because it
-// belongs to the operator, as an expense too.
+// the ways a recharge can be done: in cash, or on each machine that does them
+interface Way {
+  key: string;
+  label: string;
+  icon: LucideIcon;
+  method: BookMethod;
+  machine?: number;
+}
+
+const wayKey = (method: BookMethod, machine?: number | null) => (machine ? `m${machine}` : method);
+
+function ways(s: Settings, entry?: DayRow): Way[] {
+  const out: Way[] = [{ key: 'cash', label: tr('Efectivo', 'Cash'), icon: Banknote, method: 'cash' }];
+  for (const m of rechargeMachines(s)) out.push({ key: `m${m.id}`, label: m.name, icon: m.card ? CreditCard : SmartphoneCharging, method: m.card && !m.rechargeCash ? 'card' : 'cash', machine: m.id });
+  if (s.payBizum) out.push({ key: 'bizum', label: 'Bizum', icon: Smartphone, method: 'bizum' });
+  // what the recharge being corrected was done with stays on offer
+  if (entry && !out.some((w) => w.key === wayKey(entry.method, entry.machine))) {
+    const label = entry.machine ? machineName(s, entry.machine) : entry.method === 'card' ? tr('Tarjeta', 'Card') : entry.method === 'bizum' ? 'Bizum' : tr('Transferencia', 'Transfer');
+    out.push({ key: wayKey(entry.method, entry.machine), label, icon: CreditCard, method: entry.method, machine: entry.machine ?? undefined });
+  }
+  return out;
+}
+
+// what a recharge done this way counts as an expense
+function wayCost(s: Settings, w: Way, cents: number): number {
+  const spent = (bp: number) => cents - Math.round((cents * bp) / 10_000);
+  if (w.machine) {
+    const m = s.machines.find((x) => x.id === w.machine);
+    return m?.rechargeExpense ? spent(m.commissionBp) : 0;
+  }
+  return s.rechargeCashExpense ? spent(s.rechargeCommissionBp) : 0;
+}
+
+// Tap how it is done, tap an amount and it is saved. It always counts in the
+// recharges; on a machine it counts as an expense too, as the shop has set.
 export function RechargeModal({
   settings,
   cents,
@@ -102,7 +140,9 @@ export function RechargeModal({
   }, [settings.rechargeOperators, entry]);
   const [text, setText] = useState(cents > 0 ? fmt(cents) : '');
   const [operator, setOperator] = useState(entry?.supplier ?? '');
-  const [method, setMethod] = useState<BookMethod>(entry?.method ?? 'cash');
+  const options = useMemo(() => ways(settings, entry), [settings, entry]);
+  const [way, setWay] = useState(() => (entry ? wayKey(entry.method, entry.machine) : wayKey('cash', settings.rechargeMachine)));
+  const chosen = options.find((w) => w.key === way) ?? options[0];
   const typed = parseMoney(text);
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -110,8 +150,25 @@ export function RechargeModal({
     ref.current?.select();
   }, []);
 
+  // F9 is cash and F10 the machines, one after the other, as on the sale page
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => {
+      if (e.key !== 'F9' && e.key !== 'F10') return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key === 'F9') {
+        setWay('cash');
+        return;
+      }
+      const machines = options.filter((w) => w.machine);
+      if (machines.length) setWay((cur) => machines[(machines.findIndex((w) => w.key === cur) + 1) % machines.length].key);
+    };
+    window.addEventListener('keydown', k, true);
+    return () => window.removeEventListener('keydown', k, true);
+  }, [options]);
+
   const save = async (amount: number) => {
-    if (await onSave({ kind: 'recharge', cents: amount, method, supplier: operator })) onClose(true);
+    if (await onSave({ kind: 'recharge', cents: amount, method: chosen.method, machine: chosen.machine, supplier: operator })) onClose(true);
   };
   const submit = (e: FormEvent) => {
     e.preventDefault();
@@ -121,10 +178,38 @@ export function RechargeModal({
   return (
     <Modal title={entry ? tr('Corregir la recarga', 'Correct the recharge') : tr('Recarga', 'Phone recharge')} onClose={() => onClose(false)}>
       <form className="quick-form" onSubmit={submit}>
+        {options.length > 1 && (
+          <div className="ways" role="radiogroup" aria-label={tr('Cómo se hace', 'How it is done')}>
+            {options.map((w) => (
+              <button
+                key={w.key}
+                type="button"
+                role="radio"
+                aria-checked={chosen.key === w.key}
+                className={`way${chosen.key === w.key ? ' on' : ''}`}
+                onClick={() => {
+                  setWay(w.key);
+                  ref.current?.focus();
+                }}
+              >
+                <w.icon size={18} />
+                <span>{w.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
         {operators.length > 0 && (
           <div className="picks">
             {operators.map((o) => (
-              <button key={o} type="button" className={`pick${operator === o ? ' on' : ''}`} onClick={() => setOperator(operator === o ? '' : o)}>
+              <button
+                key={o}
+                type="button"
+                className={`pick${operator === o ? ' on' : ''}`}
+                onClick={() => {
+                  setOperator(operator === o ? '' : o);
+                  ref.current?.focus();
+                }}
+              >
                 {o}
               </button>
             ))}
@@ -137,18 +222,19 @@ export function RechargeModal({
             </button>
           ))}
         </div>
-        <div className="quick-line">
-          <div className="money-input big">
-            <input ref={ref} value={text} onChange={(e) => setText(e.target.value)} inputMode="decimal" placeholder={tr('Otro importe', 'Other amount')} aria-label={tr('Importe', 'Amount')} />
-            <span>€</span>
-          </div>
-          <Segmented value={method} onChange={setMethod} options={pays(entry?.method)} />
+        <div className="money-input big">
+          <input ref={ref} value={text} onChange={(e) => setText(e.target.value)} inputMode="decimal" placeholder={tr('Otro importe', 'Other amount')} aria-label={tr('Importe', 'Amount')} />
+          <span>€</span>
         </div>
         <button className="btn btn-recharge btn-xl" disabled={!typed || typed <= 0}>
           {typed && typed > 0 ? `${entry ? tr('Guardar', 'Save') : tr('Apuntar recarga', 'Save recharge')} · ${eur(typed)}` : tr('Toca un importe', 'Tap an amount')}
           <kbd className="on-dark">Enter</kbd>
         </button>
-        <p className="field-hint">{tr('Cuenta en las recargas del día y, a la vez, en los gastos.', 'It counts in the day’s recharges and, at the same time, in the expenses.')}</p>
+        <p className="field-hint">
+          {wayCost(settings, chosen, 100)
+            ? tr('Cuenta en las recargas del día y, a la vez, en los gastos.', 'It counts in the day’s recharges and, at the same time, in the expenses.')
+            : tr('Cuenta en las recargas del día. No es un gasto.', 'It counts in the day’s recharges. It is not an expense.')}
+        </p>
       </form>
     </Modal>
   );
@@ -181,7 +267,7 @@ export function ExpenseModal({
 }) {
   const [concept, setConcept] = useState(entry?.concept ?? initial);
   const [text, setText] = useState(entry ? fmt(Math.abs(entry.cents)) : '');
-  const [method, setMethod] = useState<BookMethod>(entry?.method ?? 'cash');
+  const [method, setMethod] = useState<BookMethod>(entry?.method ?? settings.expenseMethod);
   const [more, setMore] = useState(!!entry && !!(entry.supplier || entry.invoiceRef || entry.supplierNif));
   const [supplier, setSupplier] = useState(entry?.supplier ?? '');
   const [supplierNif, setSupplierNif] = useState(entry?.supplierNif ?? '');
@@ -200,6 +286,7 @@ export function ExpenseModal({
 
   const typed = parseMoney(text);
   const parsed = typed && typed > 0 ? { concept: concept.trim(), cents: typed } : split(concept);
+  const usual = useMemo(() => list(settings.expenseConcepts), [settings.expenseConcepts]);
 
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
@@ -231,9 +318,22 @@ export function ExpenseModal({
             maxLength={120}
           />
         </Field>
-        {recent.length > 0 && !concept && (
+        {(recent.length > 0 || usual.length > 0) && !concept && (
           <div className="picks">
-            {recent.map((q) => (
+            {usual.map((c) => (
+              <button
+                key={c}
+                type="button"
+                className="pick"
+                onClick={() => {
+                  setConcept(c);
+                  amountRef.current?.focus();
+                }}
+              >
+                {c}
+              </button>
+            ))}
+            {recent.filter((q) => !usual.some((c) => c.toLowerCase() === q.concept.toLowerCase())).map((q) => (
               <button
                 key={q.concept}
                 type="button"

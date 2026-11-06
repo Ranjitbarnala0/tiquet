@@ -4,8 +4,9 @@ import { call } from './api';
 import { addDays, dateTime, eur, fmt, isoDate, rate, shortDate } from './format';
 import { errorText, getLang, tr, warningText } from './i18n';
 import { MethodIcon, methodName } from './Day';
+import { machineName } from './machines';
 import { useToast } from './toast';
-import type { Summary } from './types';
+import type { Settings, Summary } from './types';
 import { Empty } from './ui';
 
 type Preset = 'today' | 'yesterday' | 'week' | 'month' | 'lastMonth' | 'custom';
@@ -121,7 +122,7 @@ function DayChart({ days }: { days: Summary['byDay'] }) {
   );
 }
 
-export function Reports() {
+export function Reports({ settings }: { settings: Settings }) {
   const toast = useToast();
   const [preset, setPreset] = useState<Preset>('today');
   const [range, setRange] = useState(() => presetRange('today')!);
@@ -149,6 +150,7 @@ export function Reports() {
   }, [range, backwards, toast]);
 
   const methodMax = useMemo(() => Math.max(1, ...(sum?.byMethod ?? []).map((m) => m.totalCents)), [sum]);
+  const machineMax = useMemo(() => Math.max(1, ...(sum?.day.machines ?? []).map((m) => m.salesCents + m.rechargeCents)), [sum]);
 
   const run = async (cmd: 'reports.print' | 'reports.export', kind?: 'vat') => {
     if (busy) return;
@@ -332,6 +334,28 @@ export function Reports() {
                   ))}
                 </div>
               </div>
+
+              {sum.day.machines.length > 1 && (
+                <div className="card">
+                  <div className="card-head">
+                    <h2>{tr('Por máquina', 'By machine')}</h2>
+                  </div>
+                  <div className="hbars">
+                    {sum.day.machines.map((m) => (
+                      <div key={m.id} className="hbar">
+                        <div className="hbar-label">
+                          <span>{machineName(settings, m.id)}</span>
+                          <small className="muted">{m.count}</small>
+                        </div>
+                        <div className="hbar-track">
+                          {m.salesCents + m.rechargeCents > 0 && <div className="hbar-fill" style={{ width: `${((m.salesCents + m.rechargeCents) / machineMax) * 100}%` }} />}
+                        </div>
+                        <b className="hbar-value">{eur(m.salesCents + m.rechargeCents)}</b>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               <div className="card">
                 <div className="card-head">

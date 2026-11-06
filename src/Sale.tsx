@@ -30,12 +30,13 @@ import { eur, fmt, norm, parseMoney, rate } from './format';
 import { errorText, isPrinterSetup, isTransient, printerStateText, tr, warningText } from './i18n';
 import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
+import { cardMachines, machineName, payOptions, payValue, type PayOption } from './machines';
 import { customerNif } from './nif';
 import { Paper } from './Paper';
 import { BIG, ExpenseModal, RechargeModal, useEntrySave } from './Quick';
 import { ShareDialog } from './Share';
 import { useToast } from './toast';
-import type { CartLine, CashDrawer, CashSession, Customer, DaySummary, Finalized, Logo, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
+import type { CartLine, CashDrawer, CashSession, Customer, DaySummary, Finalized, Logo, Machine, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
 
 type Shown = Preview & { forLines: string };
 import { printerLabel, usePrinterStatus } from './usePrinter';
@@ -284,7 +285,7 @@ interface Props {
   onDay: () => void;
 }
 
-type Charge = { method: Method; tendered: number | null; print: boolean; invoice: boolean };
+type Charge = { method: Method; machine: number | null; tendered: number | null; print: boolean; invoice: boolean };
 
 function Cell({ label, cents, dot, strong, minus }: { label: string; cents: number; dot?: 'cash' | 'card' | 'bizum' | 'recharge' | 'expense'; strong?: boolean; minus?: boolean }) {
   return (
@@ -300,17 +301,80 @@ function Cell({ label, cents, dot, strong, minus }: { label: string; cents: numb
 
 // The day at a glance, under the products: each way of paying apart, the
 // total of all, what went out and what is left. A tap opens the whole day.
-function DayStrip({ s, onOpen }: { s: DaySummary; onOpen: () => void }) {
+function DayStrip({ s, settings, onOpen }: { s: DaySummary; settings: Settings; onOpen: () => void }) {
+  const on = settings.dayCells.split(',').filter((c) => c && (c !== 'recharge' || settings.showRecharge));
+  if (!on.length) return null;
   return (
     <button className="strip" onMouseDown={keep} onClick={onOpen} title={tr('Ver las ventas y gastos de hoy', 'See today’s sales and expenses')}>
-      <Cell label={tr('Efectivo', 'Cash')} cents={s.cashCents} dot="cash" />
-      <Cell label={tr('Tarjeta', 'Card')} cents={s.cardCents} dot="card" />
-      {s.bizumCents !== 0 && <Cell label="Bizum" cents={s.bizumCents} dot="bizum" />}
-      <Cell label={tr('Recargas', 'Recharges')} cents={s.rechargeCents} dot="recharge" />
-      <Cell label={tr('Total', 'Total')} cents={s.totalCents} strong />
-      <Cell label={tr('Gastos', 'Expenses')} cents={s.expenseCents} dot="expense" minus />
-      <Cell label={tr('Queda', 'Left')} cents={s.netCents} strong />
+      {on.includes('cash') && <Cell label={tr('Efectivo', 'Cash')} cents={s.cashCents} dot="cash" />}
+      {on.includes('card') && <Cell label={tr('Tarjeta', 'Card')} cents={s.cardCents} dot="card" />}
+      {s.bizumCents !== 0 && on.includes('card') && <Cell label="Bizum" cents={s.bizumCents} dot="bizum" />}
+      {on.includes('recharge') && <Cell label={tr('Recargas', 'Recharges')} cents={s.rechargeCents} dot="recharge" />}
+      {on.includes('total') && <Cell label={tr('Total', 'Total')} cents={s.totalCents} strong />}
+      {on.includes('expense') && <Cell label={tr('Gastos', 'Expenses')} cents={s.expenseCents} dot="expense" minus />}
+      {on.includes('net') && <Cell label={tr('Queda', 'Left')} cents={s.netCents} strong />}
     </button>
+  );
+}
+
+// Which machine, right where the hand already is: a big button for each, a
+// number or Enter for the keyboard.
+function MachinePick({ machines, first, cents, onPick, onClose }: { machines: Machine[]; first: number; cents: number; onPick: (id: number) => void; onClose: () => void }) {
+  const box = useRef<HTMLDivElement>(null);
+  const pick = useRef(onPick);
+  pick.current = onPick;
+  useTrap(box);
+  useEffect(() => {
+    let last = 0;
+    let waiting = 0;
+    const k = (e: KeyboardEvent) => {
+      const stop = () => {
+        e.preventDefault();
+        e.stopPropagation();
+      };
+      if (e.key === 'Escape') {
+        stop();
+        onClose();
+      } else if (e.key === 'F10') {
+        stop();
+        pick.current(first);
+      } else if (/^\d$/.test(e.key)) {
+        // a scanner types a whole code in a few milliseconds: only a key on
+        // its own picks, so a code scanned here never charges the sale
+        stop();
+        const now = performance.now();
+        const alone = now - last > SCAN_GAP;
+        last = now;
+        clearTimeout(waiting);
+        const m = machines[Number(e.key) - 1];
+        if (alone && m) waiting = window.setTimeout(() => pick.current(m.id), SCAN_GAP);
+      } else if (e.key === 'Enter' && performance.now() - last < SCAN_GAP * 2) {
+        stop();
+      }
+    };
+    window.addEventListener('keydown', k, true);
+    return () => {
+      clearTimeout(waiting);
+      window.removeEventListener('keydown', k, true);
+    };
+  }, [machines, first, onClose]);
+  return (
+    <div className="modal-back machine-back" onMouseDown={onClose}>
+      <div ref={box} className="machine-pick" role="dialog" aria-modal="true" aria-label={tr('¿Con qué máquina?', 'Which machine?')} onMouseDown={(e) => e.stopPropagation()}>
+        <div className="machine-pick-head">
+          <h3>{tr('¿Con qué máquina?', 'Which machine?')}</h3>
+          <strong>{eur(cents)}</strong>
+        </div>
+        {machines.map((m, i) => (
+          <button key={m.id} autoFocus={m.id === first} className="machine-btn" onClick={() => onPick(m.id)}>
+            <CreditCard size={22} />
+            <span>{m.name}</span>
+            {m.id === first && <small>Enter</small>}
+            <kbd>{i + 1}</kbd>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -329,6 +393,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [flash, setFlash] = useState<{ key: string; n: number } | null>(null);
   const [paying, setPaying] = useState(false);
   const [method, setMethod] = useState<Method>('cash');
+  const [machine, setMachine] = useState(settings.cardMachine);
+  const [choosing, setChoosing] = useState(false);
   const [given, setGiven] = useState('');
   // a full invoice: the customer's details
   const [invoice, setInvoice] = useState(false);
@@ -362,7 +428,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const { status: printer, refresh: refreshPrinter } = usePrinterStatus(active, printerLabel(settings));
   // the till: undefined until known, null while closed
   const [till, setTill] = useState<CashSession | null | undefined>(undefined);
-  const [float, setFloat] = useState('');
+  const usualFloat = settings.floatCents ? fmt(settings.floatCents) : '';
+  const [float, setFloat] = useState(usualFloat);
+  useEffect(() => setFloat(usualFloat), [usualFloat]);
   const [opening, setOpening] = useState(false);
 
   const loadDay = useCallback(() => {
@@ -430,6 +498,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   useEffect(() => onBusy(lines.length > 0 || paying || busy), [lines.length, paying, busy, onBusy]);
 
+  const cards = useMemo(() => cardMachines(settings), [settings]);
+  const several = cards.length > 1;
+  // the card machine used unless someone says otherwise
+  const firstCard = cards.some((m) => m.id === settings.cardMachine) ? settings.cardMachine : (cards[0]?.id ?? 0);
+
   useEffect(() => {
     try {
       localStorage.setItem(TAB_KEY, tab);
@@ -448,8 +521,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       const off = Math.round((sum * Number(pct[1].replace(',', '.'))) / 100);
       return off > 0 ? [{ kind: 'custom' as const, name: `Descuento ${pct[1]}%`, cents: -off, qty: 1 }] : [];
     }
-    return search(catalogue, query);
-  }, [catalogue, query, lines]);
+    return search(catalogue, query).filter((o) => (o.kind !== 'recharge' || settings.showRecharge) && (o.kind !== 'expense' || settings.showExpense));
+  }, [catalogue, query, lines, settings.showRecharge, settings.showExpense]);
   useEffect(() => setHi(0), [query]);
 
   const tendered = method === 'cash' ? parseMoney(given, 999_999_999) : null;
@@ -652,7 +725,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         return;
       }
       sureBig.current = '';
-      saveEntry(o.kind === 'expense' ? { kind: 'expense', concept: o.concept, cents: o.cents, method: 'cash' } : { kind: 'recharge', cents: o.cents, method: 'cash' });
+      saveEntry(
+        o.kind === 'expense'
+          ? { kind: 'expense', concept: o.concept, cents: o.cents, method: settings.expenseMethod }
+          : { kind: 'recharge', cents: o.cents, method: 'cash', machine: settings.rechargeMachine || undefined },
+      );
     } else if (o.kind === 'product') {
       addProduct(o.product, o.qty);
     } else {
@@ -746,11 +823,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     return true;
   };
 
-  const openPay = () => {
+  const openPay = (m: Method = 'cash') => {
     if (!ready()) return;
     searchRef.current?.blur();
     setQuery('');
-    setMethod('cash');
+    setMethod(m);
+    setMachine(firstCard);
     setGiven('');
     openedAt.current = performance.now();
     burst.current = { text: '', last: 0, fast: 0, given: '' };
@@ -764,9 +842,21 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   // the customer's details, so the window opens.
   const payNow = (m: Method, tenderedCents?: number) => {
     if (!ready()) return;
-    if (overLimit) openPay();
-    else finish({ method: m, tendered: tenderedCents ?? null, print: printOn && !noPrinter, invoice: false });
+    if (overLimit) openPay(m);
+    else if (m === 'card' && several && settings.machineAsk) setChoosing(true);
+    else finish({ method: m, machine: m === 'card' ? firstCard || null : null, tendered: tenderedCents ?? null, print: printOn && !noPrinter, invoice: false });
   };
+
+  const pickMachine = (id: number) => {
+    setChoosing(false);
+    searchRef.current?.focus();
+    finish({ method: 'card', machine: id, tendered: null, print: printOn && !noPrinter, invoice: false });
+  };
+
+  const noPick = useCallback(() => {
+    setChoosing(false);
+    searchRef.current?.focus();
+  }, []);
 
   const openRecharge = () => {
     const typed = parseMoney(query.trim());
@@ -815,7 +905,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     try {
       const d = await call<CashDrawer>('cash.open', { floatCents });
       setTill(d.session);
-      setFloat('');
+      setFloat(usualFloat);
       toast.ok(tr('Caja abierta', 'Till opened'));
       givenRef.current?.focus();
     } catch (e) {
@@ -832,7 +922,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     try {
       const r = await call<Finalized>('sale.finalize', {
         lines: payload,
-        payment: { method: c.method, tenderedCents: c.tendered ?? undefined },
+        payment: { method: c.method, tenderedCents: c.tendered ?? undefined, machine: c.machine ?? undefined },
         print: c.print && !noPrinter,
         saleId: saleId.current,
         clockOk,
@@ -877,10 +967,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   // charged the wrong way: it is noticed right here, and put right on the
   // same ticket with one tap
-  const changePay = async (m: Method) => {
-    if (!last || last.ticket.payment.method === m) return;
+  const changePay = async (o: PayOption) => {
+    if (!last || payValue(last.ticket.payment) === o.value) return;
     try {
-      const r = await call<{ ticket: TicketRecord }>('tickets.payment', { id: last.ticket.id, method: m });
+      const r = await call<{ ticket: TicketRecord }>('tickets.payment', { id: last.ticket.id, method: o.method, machine: o.machine ?? undefined });
       setLast((cur) => (cur ? { ...cur, ticket: r.ticket } : cur));
       loadDay();
     } catch (e) {
@@ -890,7 +980,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   // the window's Enter and its buttons, once everything in it adds up
   const confirmPay = (print: boolean) => {
-    if (!blocked) finish({ method, tendered, print, invoice });
+    if (!blocked) finish({ method, machine: method === 'card' ? machine || null : null, tendered, print, invoice });
   };
 
   const onSearchKey = (e: ReactKey<HTMLInputElement>) => {
@@ -985,6 +1075,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         } else if (e.key === 'F1' || e.key === 'F2' || e.key === 'F3') {
           e.preventDefault();
           setMethod(e.key === 'F1' ? 'cash' : e.key === 'F2' ? 'card' : 'bizum');
+        } else if (method === 'card' && several && cards[Number(e.key) - 1]) {
+          e.preventDefault();
+          setMachine(cards[Number(e.key) - 1].id);
         } else if (method === 'cash' && !(e.target as HTMLElement).closest?.('input, textarea') && /^[\d.,]$/.test(e.key)) {
           givenRef.current?.focus();
         }
@@ -1007,12 +1100,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       }
       if (e.key === 'F7') {
         e.preventDefault();
-        openRecharge();
+        if (settings.showRecharge) openRecharge();
         return;
       }
       if (e.key === 'F8') {
         e.preventDefault();
-        openExpense();
+        if (settings.showExpense) openExpense();
         return;
       }
       if (e.key === 'F9' || e.key === 'F10') {
@@ -1069,7 +1162,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                 aria-controls="search-options"
                 aria-activedescendant={query.trim() && options[hi] ? `opt-${hi}` : undefined}
                 aria-autocomplete="list"
-                placeholder={tr('Escribe o escanea:  funda 10  ·  -pantalla 45  ·  recarga 10', 'Type or scan:  case 10  ·  -screen 45  ·  recarga 10')}
+                placeholder={`${tr('Escribe o escanea:  funda 10', 'Type or scan:  case 10')}${settings.showExpense ? `  ·  ${tr('-pantalla 45', '-screen 45')}` : ''}${settings.showRecharge ? '  ·  recarga 10' : ''}`}
                 spellCheck={false}
                 autoComplete="off"
                 aria-label={tr('Buscar producto', 'Search product')}
@@ -1138,7 +1231,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                         <span className="opt-plus recharge">
                           <SmartphoneCharging size={14} />
                         </span>
-                        <span className="opt-name">{tr('Recarga en efectivo', 'Recharge in cash')}</span>
+                        <span className="opt-name">
+                          {tr('Recarga', 'Recharge')}: {settings.rechargeMachine ? machineName(settings, settings.rechargeMachine) : tr('efectivo', 'cash')}
+                        </span>
                         <span className="opt-price">{eur(o.cents)}</span>
                       </>
                     )}
@@ -1202,7 +1297,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           </div>
         </div>
 
-        {day && <DayStrip s={day} onOpen={onDay} />}
+        {day && <DayStrip s={day} settings={settings} onOpen={onDay} />}
       </section>
 
       <aside className="till">
@@ -1294,9 +1389,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
               <strong>{eur(paid.totalCents)}</strong>
               <span className="muted mono">{paid.number}</span>
               <div className="done-pay" role="radiogroup" aria-label={tr('Pagado con', 'Paid with')}>
-                {METHODS.filter((m) => m.id !== 'bizum' || settings.payBizum || paid.payment.method === 'bizum').map((m) => (
-                  <button key={m.id} role="radio" aria-checked={paid.payment.method === m.id} className={paid.payment.method === m.id ? 'on' : ''} onMouseDown={keep} onClick={() => changePay(m.id)}>
-                    {m.label()}
+                {payOptions(settings, paid.payment).map((o) => (
+                  <button key={o.value} role="radio" aria-checked={payValue(paid.payment) === o.value} className={payValue(paid.payment) === o.value ? 'on' : ''} onMouseDown={keep} onClick={() => changePay(o)}>
+                    {o.label}
                   </button>
                 ))}
               </div>
@@ -1365,7 +1460,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                 {fmt(c).replace(',00', '')} €
               </button>
             ))}
-            <button className="tender-more" onMouseDown={keep} onClick={openPay} disabled={!lines.length || busy || negative} title={tr('Otra cantidad, factura con datos del cliente…', 'Another amount, invoice with customer details…')}>
+            <button className="tender-more" onMouseDown={keep} onClick={() => openPay()} disabled={!lines.length || busy || negative} title={tr('Otra cantidad, factura con datos del cliente…', 'Another amount, invoice with customer details…')}>
               {tr('Más', 'More')}
               <kbd>F12</kbd>
             </button>
@@ -1389,18 +1484,24 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
               </button>
             )}
           </div>
-          <div className="pay-grid low">
-            <button className="pay-btn pay-recharge" onMouseDown={keep} onClick={openRecharge}>
-              <SmartphoneCharging size={21} />
-              <span>{tr('Recarga', 'Recharge')}</span>
-              <kbd>F7</kbd>
-            </button>
-            <button className="pay-btn pay-expense" onMouseDown={keep} onClick={openExpense}>
-              <ShoppingCart size={21} />
-              <span>{tr('Gasto', 'Expense')}</span>
-              <kbd>F8</kbd>
-            </button>
-          </div>
+          {(settings.showRecharge || settings.showExpense) && (
+            <div className={`pay-grid low${settings.showRecharge && settings.showExpense ? '' : ' one'}`}>
+              {settings.showRecharge && (
+                <button className="pay-btn pay-recharge" onMouseDown={keep} onClick={openRecharge}>
+                  <SmartphoneCharging size={21} />
+                  <span>{tr('Recarga', 'Recharge')}</span>
+                  <kbd>F7</kbd>
+                </button>
+              )}
+              {settings.showExpense && (
+                <button className="pay-btn pay-expense" onMouseDown={keep} onClick={openExpense}>
+                  <ShoppingCart size={21} />
+                  <span>{tr('Gasto', 'Expense')}</span>
+                  <kbd>F8</kbd>
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </aside>
 
@@ -1484,11 +1585,24 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                   )}
                 </div>
               ) : (
-                <p className="pay-note">
-                  {method === 'card'
-                    ? tr('Cobra en el datáfono y confirma aquí.', 'Take the payment on the card terminal, then confirm here.')
-                    : tr('Comprueba que el Bizum ha llegado y confirma.', 'Check that the Bizum payment has arrived, then confirm.')}
-                </p>
+                <>
+                  <p className="pay-note">
+                    {method === 'card'
+                      ? tr('Cobra en el datáfono y confirma aquí.', 'Take the payment on the card terminal, then confirm here.')
+                      : tr('Comprueba que el Bizum ha llegado y confirma.', 'Check that the Bizum payment has arrived, then confirm.')}
+                  </p>
+                  {method === 'card' && several && (
+                    <div className="ways" role="radiogroup" aria-label={tr('¿Con qué máquina?', 'Which machine?')}>
+                      {cards.map((m, i) => (
+                        <button key={m.id} role="radio" aria-checked={machine === m.id} className={`way${machine === m.id ? ' on' : ''}`} onMouseDown={keep} onClick={() => setMachine(m.id)}>
+                          <CreditCard size={18} />
+                          <span>{m.name}</span>
+                          <kbd>{i + 1}</kbd>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
               {invoice ? (
                 <div className="customer">
@@ -1563,6 +1677,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         </div>
       )}
 
+      {choosing && <MachinePick machines={cards} first={firstCard} cents={total} onPick={pickMachine} onClose={noPick} />}
       {sharing && <ShareDialog ticketId={sharing.id} number={sharing.number} onClose={() => setSharing(null)} />}
       {seeTicket && preview && (
         <Modal title={tr('Así saldrá el ticket', 'This is how the ticket will look')} onClose={() => setSeeTicket(false)}>

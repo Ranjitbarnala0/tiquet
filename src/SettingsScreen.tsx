@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BadgeCheck, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Printer, ReceiptText, RefreshCw, ScanSearch, ShoppingBag, Store, Trash2, Users as UsersIcon } from 'lucide-react';
+import { BadgeCheck, CreditCard, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Printer, ReceiptText, RefreshCw, ScanSearch, ShoppingBag, Store, Trash2, Users as UsersIcon } from 'lucide-react';
 import { call, native } from './api';
-import { dateTime, rate, VAT_RATES } from './format';
+import { dateTime, fmt, parseMoney, rate, VAT_RATES } from './format';
 import { errorText, printerStateText, tr, warningText, type Lang } from './i18n';
 import { loadImage, rasterize, type LogoMode } from './logo';
+import { DayCells, MachinesTab } from './MachinesTab';
 import { Paper } from './Paper';
 import { useToast } from './toast';
 import type { SettingsTab } from './Shell';
@@ -83,6 +84,10 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
   const [logoSize, setLogoSize] = useState(55);
   const [logoMode, setLogoMode] = useState<LogoMode>('logo');
   const [logoLight, setLogoLight] = useState(0);
+  const [floatText, setFloatText] = useState(settings.floatCents ? fmt(settings.floatCents) : '');
+  useEffect(() => {
+    if (parseMoney(floatText || '0', 999_999_999) !== d.floatCents) setFloatText(d.floatCents ? fmt(d.floatCents) : '');
+  }, [d.floatCents]);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const dirty = JSON.stringify(d) !== JSON.stringify(settings);
@@ -302,6 +307,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
   const tabs: { id: SettingsTab; label: string; icon: typeof Store }[] = [
     { id: 'shop', label: tr('Comercio', 'Shop'), icon: Store },
     { id: 'sale', label: tr('Venta', 'Sale'), icon: ShoppingBag },
+    { id: 'machines', label: tr('Máquinas', 'Machines'), icon: CreditCard },
     { id: 'ticket', label: tr('Ticket', 'Ticket'), icon: ReceiptText },
     { id: 'printer', label: tr('Impresora', 'Printer'), icon: Printer },
     { id: 'mail', label: tr('Enviar tickets', 'Send tickets'), icon: Mail },
@@ -340,8 +346,67 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
         <div className="settings-body">
           {tab === 'users' && <Users me={me} onMe={onMe} />}
 
+          {tab === 'machines' && <MachinesTab d={d} set={set} />}
+
           {tab === 'sale' && (
             <div className="stack">
+              <h3 className="settings-title first">{tr('Pantalla de venta', 'Sale page')}</h3>
+              <Toggle
+                checked={d.payBizum}
+                onChange={(v) => set('payBizum', v)}
+                label={tr('Botón de Bizum', 'Bizum button')}
+                hint={tr('Junto a Efectivo y Tarjeta. Sin él, Bizum sigue en Más.', 'Beside Cash and Card. Without it, Bizum stays under More.')}
+              />
+              <Toggle
+                checked={d.showExpense}
+                onChange={(v) => set('showExpense', v)}
+                label={tr('Botón de Gasto', 'Expense button')}
+                hint={tr('Para apuntar lo que se compra. Apagado, solo no se ve: lo apuntado sigue contando.', 'To note what is bought. Off, it just is not shown: what was noted still counts.')}
+              />
+              <Toggle
+                checked={d.showRepairs}
+                onChange={(v) => set('showRepairs', v)}
+                label={tr('Reparaciones', 'Repairs')}
+                hint={tr('Apagado, desaparece de la barra de la izquierda, para tiendas que solo venden.', 'Off, it leaves the bar on the left, for shops that only sell.')}
+              />
+              <Field label={tr('Totales que se ven abajo', 'Totals shown at the bottom')} hint={tr('Toca para poner o quitar. Sin ninguno, la barra desaparece.', 'Tap to add or remove. With none, the bar goes away.')}>
+                <DayCells value={d.dayCells} onChange={(v) => set('dayCells', v)} />
+              </Field>
+
+              <h3 className="settings-title">{tr('Gastos y caja', 'Expenses and till')}</h3>
+              <Field label={tr('Compras habituales (opcional)', 'Usual purchases (optional)')} hint={tr('Botones en la ventana de Gasto, separados por comas', 'Buttons in the Expense window, separated by commas')}>
+                <input value={d.expenseConcepts} onChange={(e) => set('expenseConcepts', e.target.value)} placeholder={tr('Pantallas, Baterías, Fundas, Cables', 'Screens, Batteries, Cases, Cables')} maxLength={200} />
+              </Field>
+              <div className="grid2">
+                <Field label={tr('Las compras se pagan normalmente', 'Purchases are usually paid')} hint={tr('Con lo que empieza la ventana de Gasto', 'What the Expense window starts on')}>
+                  <Segmented
+                    value={d.expenseMethod}
+                    onChange={(v) => set('expenseMethod', v)}
+                    options={[
+                      { value: 'cash', label: tr('Efectivo', 'Cash') },
+                      { value: 'card', label: tr('Tarjeta', 'Card') },
+                    ]}
+                  />
+                </Field>
+                <Field label={tr('Fondo de caja habitual', 'Usual till float')} hint={tr('Ya escrito al abrir la caja', 'Already typed when opening the till')}>
+                  <div className="money-input">
+                    <input
+                      value={floatText}
+                      onChange={(e) => {
+                        setFloatText(e.target.value);
+                        const c = parseMoney(e.target.value || '0', 999_999_999);
+                        if (c !== null && c >= 0) set('floatCents', c);
+                      }}
+                      onBlur={() => setFloatText(d.floatCents ? fmt(d.floatCents) : '')}
+                      inputMode="decimal"
+                      placeholder="0,00"
+                    />
+                    <span>€</span>
+                  </div>
+                </Field>
+              </div>
+
+              <h3 className="settings-title">{tr('Cajeros', 'Cashiers')}</h3>
               <Toggle
                 checked={d.bookStaffDelete}
                 onChange={(v) => set('bookStaffDelete', v)}
@@ -355,27 +420,11 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 hint={tr('Efectivo, tarjeta, recargas, gastos y lo que queda.', 'Cash, card, recharges, expenses and what is left.')}
               />
               <Toggle
-                checked={d.payBizum}
-                onChange={(v) => set('payBizum', v)}
-                label={tr('Botón de Bizum en la venta', 'Bizum button on the sale page')}
-                hint={tr('Junto a Efectivo y Tarjeta. Sin él, Bizum sigue en Más.', 'Beside Cash and Card. Without it, Bizum stays under More.')}
+                checked={d.staffRefund}
+                onChange={(v) => set('staffRefund', v)}
+                label={tr('Los cajeros pueden hacer devoluciones', 'Cashiers can give returns')}
+                hint={tr('Apagado, solo el administrador.', 'Off, only the administrator.')}
               />
-              <Field label={tr('Importes de recarga', 'Recharge amounts')} hint={tr('Un botón por importe, separados por comas', 'One button per amount, separated by commas')}>
-                <input value={d.rechargeAmounts} onChange={(e) => set('rechargeAmounts', e.target.value)} placeholder="5, 10, 15, 20, 30, 50" maxLength={120} />
-              </Field>
-              <Field label={tr('Operadores de recarga (opcional)', 'Recharge operators (optional)')} hint={tr('Para saber cuánto se recargó de cada uno, separados por comas', 'To know how much was recharged with each, separated by commas')}>
-                <input value={d.rechargeOperators} onChange={(e) => set('rechargeOperators', e.target.value)} placeholder="Vodafone, Orange, Movistar, Lycamobile, Lebara, Digi" maxLength={200} />
-              </Field>
-              <Field label={tr('Comisión de recargas', 'Recharge commission')} hint={tr('Lo que gana la tienda en cada recarga. El resto cuenta como gasto.', 'What the shop earns on each recharge. The rest counts as an expense.')}>
-                <select value={d.rechargeCommissionBp} onChange={(e) => set('rechargeCommissionBp', Number(e.target.value))}>
-                  {[0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1500, 2000].map((bp) => (
-                    <option key={bp} value={bp}>
-                      {rate(bp)}
-                    </option>
-                  ))}
-                  {![0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1500, 2000].includes(d.rechargeCommissionBp) && <option value={d.rechargeCommissionBp}>{rate(d.rechargeCommissionBp)}</option>}
-                </select>
-              </Field>
             </div>
           )}
 

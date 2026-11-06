@@ -273,7 +273,7 @@ mod tests {
             let s = Settings { codepage: cp.into(), ..Settings::default() };
             let lines = sample_lines(2100);
             let totals = compute(&lines);
-            let pay = Payment { method: "cash".into(), tendered_cents: 3000, change_cents: 825 };
+            let pay = Payment { method: "cash".into(), tendered_cents: 3000, change_cents: 825, machine: None };
             let shop = ShopInfo { name: "Óptica Ñandú".into(), footer: "¡Gracias! 5 € de descuento".into(), ..Default::default() };
             let v = TicketView {
                 shop: &shop,

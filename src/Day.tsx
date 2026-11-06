@@ -23,6 +23,7 @@ import { Cash } from './Cash';
 import { addDays, dateTime, eur, isoDate, shortDate } from './format';
 import { errorText, getLang, isPrinterSetup, isTransient, printText, tr, warningText } from './i18n';
 import { Paper } from './Paper';
+import { machineName, payOptions, payValue, type PayOption } from './machines';
 import { ExpenseModal, RechargeModal, type EntryDraft } from './Quick';
 import { RefundModal } from './Refund';
 import { Reports } from './Reports';
@@ -46,6 +47,13 @@ export function methodName(m: string): string {
 export function MethodIcon({ m }: { m: Method }) {
   const Icon = m === 'cash' ? Banknote : m === 'card' ? CreditCard : Smartphone;
   return <Icon size={16} className="method-icon" aria-label={methodName(m)} />;
+}
+
+// how a line was paid, with its machine where that tells something
+function payLabel(s: Settings, r: DayRow): string {
+  const show = r.machine && (r.source === 'recharge' || r.method !== 'card' || s.machines.length > 1);
+  if (!show) return methodName(r.method);
+  return r.method === 'card' && r.source !== 'recharge' ? machineName(s, r.machine) : `${methodName(r.method)} · ${machineName(s, r.machine)}`;
 }
 
 const rowKey = (r: DayRow) => `${r.source}-${r.id}`;
@@ -104,8 +112,8 @@ export function Day(props: {
       </div>
       <div className="day-body">
         {view === 'moves' && <Moves {...props} />}
-        {view === 'cash' && <Cash user={props.user} />}
-        {view === 'reports' && admin && <Reports />}
+        {view === 'cash' && <Cash user={props.user} settings={props.settings} />}
+        {view === 'reports' && admin && <Reports settings={props.settings} />}
       </div>
     </div>
   );
@@ -118,6 +126,8 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const [preset, setPreset] = useState<Preset>('day');
   const [range, setRange] = useState(() => presetRange('day'));
   const [filter, setFilter] = useState<Filter>('all');
+  // only what went through this machine; 0 is cards from before there were any
+  const [onMachine, setOnMachine] = useState<number | null>(null);
   const [q, setQ] = useState('');
   const [data, setData] = useState<DayList | null>(null);
   const [sel, setSel] = useState<string | null>(null);
@@ -146,16 +156,16 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   }, [load]);
 
   const rows = data?.rows ?? [];
-  const live = useMemo(() => rows.filter((r) => !r.gone), [rows]);
+  const alive = useMemo(() => rows.filter((r) => !r.gone), [rows]);
   const counts = useMemo(
     () => ({
-      all: live.length,
-      sales: live.filter((r) => isTicket(r) || r.source === 'sale').length,
-      recharges: live.filter((r) => r.source === 'recharge').length,
-      expenses: live.filter((r) => r.source === 'expense' || r.source === 'recharge').length,
-      unprinted: live.filter((r) => isTicket(r) && unprinted(r)).length,
+      all: alive.length,
+      sales: alive.filter((r) => isTicket(r) || r.source === 'sale').length,
+      recharges: alive.filter((r) => r.source === 'recharge').length,
+      expenses: alive.filter((r) => r.source === 'expense' || r.costCents !== 0).length,
+      unprinted: alive.filter((r) => isTicket(r) && unprinted(r)).length,
     }),
-    [live],
+    [alive],
   );
 
   const shown = useMemo(() => {
@@ -165,15 +175,16 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
         all: !r.gone,
         sales: !r.gone && (isTicket(r) || r.source === 'sale'),
         recharges: !r.gone && r.source === 'recharge',
-        expenses: !r.gone && (r.source === 'expense' || r.source === 'recharge'),
+        expenses: !r.gone && (r.source === 'expense' || r.costCents !== 0),
         unprinted: !r.gone && isTicket(r) && unprinted(r),
         gone: r.gone,
       }[filter];
       if (!fits) return false;
+      if (onMachine !== null && (r.source === 'expense' || (r.machine ?? (r.method === 'card' ? 0 : null)) !== onMachine)) return false;
       if (!needle) return true;
       return `${r.concept} ${r.number ?? ''} ${r.supplier} ${r.byName} ${eur(Math.abs(r.cents))}`.toLowerCase().includes(needle);
     });
-  }, [rows, filter, q]);
+  }, [rows, filter, q, onMachine]);
 
   const row = shown.find((r) => rowKey(r) === sel) ?? null;
 
@@ -215,20 +226,20 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const mayDelete = (r: DayRow) => (admin ? !isTicket(r) || r.at.slice(0, 10) === today || !!data?.anyDay : own(r));
 
   // charged the wrong way: one tap on the same ticket, and one tap back
-  const setPayment = (id: number, method: Method) =>
-    call<Detail>('tickets.payment', { id, method }).then((d) => {
+  const setPayment = (id: number, method: Method, machine: number | null) =>
+    call<Detail>('tickets.payment', { id, method, machine: machine ?? undefined }).then((d) => {
       setDetail((cur) => (cur?.ticket.id === id ? d : cur));
       load();
     });
 
-  const changePay = async (t: TicketRecord, method: Method) => {
-    const was = t.payment.method;
-    if (busy || was === method) return;
+  const changePay = async (t: TicketRecord, o: PayOption) => {
+    const was = t.payment;
+    if (busy || payValue(was) === o.value) return;
     setBusy(true);
     try {
-      await setPayment(t.id, method);
-      toast.ok(`${t.number}: ${methodName(method)}`, {
-        action: { label: tr('Deshacer', 'Undo'), run: () => setPayment(t.id, was).catch((e) => toast.error(errorText(e))) },
+      await setPayment(t.id, o.method, o.machine);
+      toast.ok(`${t.number}: ${o.label}`, {
+        action: { label: tr('Deshacer', 'Undo'), run: () => setPayment(t.id, was.method, was.machine).catch((e) => toast.error(errorText(e))) },
       });
     } catch (e) {
       toast.error(errorText(e));
@@ -357,9 +368,12 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   };
 
   const s = data?.summary;
+  // once there have been several, what was done on each still tells something
+  const several = settings.machines.length > 1;
   const title = oneDay ? (range.from === today ? tr('Hoy', 'Today') : range.from === isoDate(addDays(new Date(), -1)) ? tr('Ayer', 'Yesterday') : shortDate(range.from)) : `${shortDate(range.from)} – ${shortDate(range.to)}`;
 
   const t = detail && ticketId === detail.ticket.id ? detail.ticket : undefined;
+  const fixes = t ? payOptions({ ...settings, payBizum: true }, t.payment) : [];
   const returnable = t ? t.kind === 'sale' && !t.voidedAt && t.lines.some((l) => l.qty > (l.refunded ?? 0)) : false;
   // a sale of today is corrected in a new one that replaces it; a repair or a
   // return already made is tied to this ticket
@@ -377,7 +391,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const chips: { id: Filter; label: string; n?: number }[] = [
     { id: 'all', label: tr('Todo', 'All'), n: counts.all },
     { id: 'sales', label: tr('Ventas', 'Sales'), n: counts.sales },
-    { id: 'recharges', label: tr('Recargas', 'Recharges'), n: counts.recharges },
+    ...(settings.showRecharge || counts.recharges > 0 ? [{ id: 'recharges' as const, label: tr('Recargas', 'Recharges'), n: counts.recharges }] : []),
     { id: 'expenses', label: tr('Gastos', 'Expenses'), n: counts.expenses },
     { id: 'unprinted', label: tr('Sin imprimir', 'Not printed'), n: counts.unprinted },
   ];
@@ -490,14 +504,16 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
               <b>{eur(s.otherCents)}</b>
             </div>
           )}
-          <div className="day-stat">
-            <span>
-              <i className="dot dot-recharge" />
-              {tr('Recargas', 'Recharges')}
-            </span>
-            <b>{eur(s.rechargeCents)}</b>
-            {s.rechargeCount > 0 && <small>{s.rechargeCount}</small>}
-          </div>
+          {(settings.showRecharge || s.rechargeCount > 0) && (
+            <div className="day-stat">
+              <span>
+                <i className="dot dot-recharge" />
+                {tr('Recargas', 'Recharges')}
+              </span>
+              <b>{eur(s.rechargeCents)}</b>
+              {s.rechargeCount > 0 && <small>{s.rechargeCount}</small>}
+            </div>
+          )}
           <div className="day-stat hero">
             <span>{tr('Total', 'Total')}</span>
             <b>{eur(s.totalCents)}</b>
@@ -511,9 +527,15 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
               {tr('Gastos', 'Expenses')}
             </span>
             <b className="neg">{eur(-s.expenseCents)}</b>
-            {s.rechargeCostCents > 0 && (
+            {s.rechargeCostCents + s.machineCostCents !== 0 && (
               <small>
-                {eur(s.purchaseCents)} + {eur(s.rechargeCostCents)} {tr('recargas', 'recharges')}
+                {[
+                  s.purchaseCents !== 0 && `${eur(s.purchaseCents)} ${tr('compras', 'purchases')}`,
+                  s.rechargeCostCents !== 0 && `${eur(s.rechargeCostCents)} ${tr('recargas', 'recharges')}`,
+                  s.machineCostCents !== 0 && `${eur(s.machineCostCents)} ${tr('máquinas', 'machines')}`,
+                ]
+                  .filter(Boolean)
+                  .join(' + ')}
               </small>
             )}
           </div>
@@ -521,6 +543,19 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
             <span>{tr('Queda', 'Left')}</span>
             <b className={s.netCents < 0 ? 'neg' : ''}>{eur(s.netCents)}</b>
           </div>
+        </div>
+      )}
+
+      {s && several && s.machines.length > 0 && (
+        <div className="day-machines">
+          <span>{tr('Por máquina', 'By machine')}</span>
+          {s.machines.map((m) => (
+            <button key={m.id} className={`chip${onMachine === m.id ? ' on' : ''}`} onClick={() => setOnMachine(onMachine === m.id ? null : m.id)}>
+              {machineName(settings, m.id)}
+              <b>{eur(m.salesCents + m.rechargeCents)}</b>
+              <small>{m.count}</small>
+            </button>
+          ))}
         </div>
       )}
 
@@ -543,7 +578,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
           {data?.capped && <p className="cap-note">{tr('Se muestran los 1.500 más recientes; los totales cuentan todos.', 'Showing the 1,500 most recent; the totals count them all.')}</p>}
           <div className="list">
             {shown.map((r) => {
-              const asCost = filter === 'expenses' && r.source === 'recharge';
+              const asCost = filter === 'expenses' && r.source !== 'expense';
               const Icon = r.source === 'expense' ? ShoppingCart : r.source === 'recharge' ? SmartphoneCharging : ReceiptText;
               return (
                 <button key={rowKey(r)} className={`move${sel === rowKey(r) ? ' on' : ''}${r.gone ? ' gone' : ''}`} onClick={() => setSel(rowKey(r))}>
@@ -554,7 +589,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                   <span className="move-main">
                     <b>{r.concept}</b>
                     <small>
-                      {methodName(r.method)}
+                      {payLabel(settings, r)}
                       {r.number ? ` · ${r.number}` : ''} · {r.byName}
                     </small>
                   </span>
@@ -585,13 +620,13 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                 <dt>{tr('Fecha', 'Date')}</dt>
                 <dd>{dateTime(row.at)}</dd>
                 <dt>{tr('Pago', 'Paid with')}</dt>
-                <dd>{methodName(row.method)}</dd>
+                <dd>{payLabel(settings, row)}</dd>
                 <dt>{tr('Por', 'By')}</dt>
                 <dd>{row.byName}</dd>
                 {row.source === 'recharge' && (
                   <>
                     <dt>{tr('Cuenta como gasto', 'Counts as expense')}</dt>
-                    <dd>{eur(row.costCents)}</dd>
+                    <dd>{row.costCents ? eur(row.costCents) : tr('No', 'No')}</dd>
                   </>
                 )}
                 {row.supplier && (
@@ -664,7 +699,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                     </p>
                   )}
                   <p className="muted">
-                    {dateTime(t.issuedAt)} · {t.userName} · {methodName(t.payment.method)} · {eur(t.totalCents)}
+                    {dateTime(t.issuedAt)} · {t.userName} · {t.payment.machine && several ? machineName(settings, t.payment.machine) : methodName(t.payment.method)} · {eur(t.totalCents)}
                   </p>
                   {t.refundOf && (
                     <p className="ref-note">
@@ -695,7 +730,8 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                   )}
                   {t.paymentChanges.map((c) => (
                     <p key={c.at + c.to} className="print-note">
-                      {tr('Cambiado de', 'Changed from')} {methodName(c.from)} {tr('a', 'to')} {methodName(c.to)} · {c.byName} · {dateTime(c.at)}
+                      {tr('Cambiado de', 'Changed from')} {c.fromMachine && c.from === 'card' && several ? machineName(settings, c.fromMachine) : methodName(c.from)} {tr('a', 'to')}{' '}
+                      {c.toMachine && c.to === 'card' && several ? machineName(settings, c.toMachine) : methodName(c.to)} · {c.byName} · {dateTime(c.at)}
                     </p>
                   ))}
                   {t.aeat && <p className={`print-note${t.aeat.state === 'Incorrecto' ? ' bad' : ''}`}>{aeatText(t.aeat)}</p>}
@@ -710,13 +746,12 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                   <div className="pay-fix">
                     <span>{tr('Pagado con', 'Paid with')}</span>
                     <Segmented
-                      value={t.payment.method}
-                      onChange={(m) => changePay(t, m)}
-                      options={[
-                        { value: 'cash', label: tr('Efectivo', 'Cash') },
-                        { value: 'card', label: tr('Tarjeta', 'Card') },
-                        { value: 'bizum', label: 'Bizum' },
-                      ]}
+                      value={payValue(t.payment)}
+                      onChange={(v) => {
+                        const o = fixes.find((x) => x.value === v);
+                        if (o) changePay(t, o);
+                      }}
+                      options={fixes}
                     />
                   </div>
                 )}
@@ -741,7 +776,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                       {tr('Repetir', 'Repeat')}
                     </button>
                   )}
-                  {admin && returnable && (
+                  {(admin || settings.staffRefund) && returnable && (
                     <button className="btn" onClick={() => setRefunding(true)}>
                       <Undo2 size={16} />
                       {tr('Devolución', 'Return')}

@@ -107,6 +107,17 @@ pub fn method_label(m: &str) -> &'static str {
     }
 }
 
+// each machine apart, when the shop has more than one
+fn machine_lines(d: &mut Doc, s: &Settings, machines: &[book::MachineSum]) {
+    if machines.is_empty() || !(s.several_machines() || machines.len() > 1) {
+        return;
+    }
+    d.rule('-');
+    for m in machines {
+        d.pair(&format!("{} ({})", s.machine_name(m.id), m.count), &fmt(m.sales_cents + m.recharge_cents), false, Size::Normal);
+    }
+}
+
 fn refund_label(m: &str) -> &'static str {
     match m {
         "cash" => "Devuelto en efectivo",
@@ -655,6 +666,7 @@ pub fn summary(sum: &Summary, day: &book::Summary, from: &str, to: &str, s: &Set
             d.pair(&format!("{} ({})", method_label(&m.method), m.count), &fmt(m.total_cents), false, Size::Normal);
         }
     }
+    machine_lines(&mut d, s, &day.machines);
     d.rule('-');
     d.pair("TOTAL", &format!("{} €", fmt(sum.total_cents)), true, Size::Big);
     if !sum.vat.is_empty() {
@@ -690,6 +702,9 @@ pub fn recharge_slip(e: &book::Entry, s: &Settings) -> Vec<Line> {
         d.pair("Operador", &e.supplier, false, Size::Normal);
     }
     d.pair("Pago", method_label(&e.method), false, Size::Normal);
+    if let Some(m) = e.machine {
+        d.pair("Máquina", s.machine_name(m), false, Size::Normal);
+    }
     d.rule('-');
     d.pair("TOTAL", &format!("{} €", fmt(e.cents)), true, Size::Big);
     d.rule('-');
@@ -698,7 +713,7 @@ pub fn recharge_slip(e: &book::Entry, s: &Settings) -> Vec<Line> {
 }
 
 // the Z report: what the drawer should hold against what was counted
-pub fn cash_close(s: &Settings, session: &Session, drawer: &Drawer, sum: &Summary, user: &str) -> Vec<Line> {
+pub fn cash_close(s: &Settings, session: &Session, drawer: &Drawer, sum: &Summary, machines: &[book::MachineSum], user: &str) -> Vec<Line> {
     let mut d = Doc::new(s);
     if !s.shop_name.trim().is_empty() {
         d.center(s.shop_name.trim(), true, Size::Tall);
@@ -724,6 +739,7 @@ pub fn cash_close(s: &Settings, session: &Session, drawer: &Drawer, sum: &Summar
     for m in &sum.by_method {
         d.pair(&format!("{} ({})", method_label(&m.method), m.count), &fmt(m.total_cents), false, Size::Normal);
     }
+    machine_lines(&mut d, s, machines);
     d.rule('-');
     d.pair("TOTAL", &format!("{} €", fmt(sum.total_cents)), true, Size::Big);
     if !sum.vat.is_empty() {
@@ -844,7 +860,7 @@ mod tests {
     fn render(cols: u32, codepage: &str, lines: &[SaleLine]) -> Vec<Line> {
         let s = Settings { columns: cols, codepage: codepage.into(), ..Settings::default() };
         let totals = compute(lines);
-        let pay = Payment { method: "cash".into(), tendered_cents: 5000, change_cents: 5000 - totals.total_cents };
+        let pay = Payment { method: "cash".into(), tendered_cents: 5000, change_cents: 5000 - totals.total_cents, machine: None };
         let shop = shop();
         let v = TicketView {
             shop: &shop,
@@ -870,7 +886,7 @@ mod tests {
     fn render_refund(cols: u32, lines: &[SaleLine]) -> Vec<Line> {
         let s = Settings { columns: cols, ..Settings::default() };
         let totals = compute(lines);
-        let pay = Payment { method: "cash".into(), tendered_cents: totals.total_cents, change_cents: 0 };
+        let pay = Payment { method: "cash".into(), tendered_cents: totals.total_cents, change_cents: 0, machine: None };
         let shop = shop();
         let v = TicketView {
             shop: &shop,
@@ -898,7 +914,7 @@ mod tests {
         let s = Settings { show_vat: false, ..Settings::default() };
         let lines = sample_lines(2100);
         let totals = compute(&lines);
-        let pay = Payment { method: "card".into(), tendered_cents: totals.total_cents, change_cents: 0 };
+        let pay = Payment { method: "card".into(), tendered_cents: totals.total_cents, change_cents: 0, machine: None };
         let shop = ShopInfo { legal_name: "Juan Pérez García".into(), ..shop() };
         let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: "Rambla 5\n17001 Girona".into() };
         let v = TicketView {

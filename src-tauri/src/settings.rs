@@ -4,6 +4,57 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::{fail, Result};
+use crate::money::div_round;
+
+// the totals the main page can show
+pub const DAY_CELLS: [&str; 6] = ["cash", "card", "recharge", "total", "expense", "net"];
+const MAX_MACHINES: usize = 12;
+const FIRST_MACHINE: &str = "Datáfono";
+
+// A card terminal or a recharge machine, named by the shop. What is done on one
+// keeps its id, so renaming it changes nothing and taking it away leaves its
+// name on what it did.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Machine {
+    pub id: i64,
+    pub name: String,
+    // customers pay by card on it: that money goes to the bank, not the drawer
+    pub card: bool,
+    // recharges are made on it
+    pub recharge: bool,
+    // its recharges are paid in cash at the counter, even if it also takes cards
+    pub recharge_cash: bool,
+    // its recharges count as an expense, less what the shop earns on them
+    pub recharge_expense: bool,
+    pub commission_bp: i64,
+    // how much of the sales it takes counts as an expense: all of it when that
+    // money is someone else's, the bank's fee, or nothing
+    pub takings_bp: i64,
+    pub removed: bool,
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Machine { id: 0, name: String::new(), card: true, recharge: true, recharge_cash: false, recharge_expense: true, commission_bp: 0, takings_bp: 0, removed: false }
+    }
+}
+
+impl Machine {
+    // the part of a sale on it that counts as an expense
+    pub fn sale_cost(&self, total_cents: i64) -> i64 {
+        div_round(total_cents * self.takings_bp, 10_000)
+    }
+
+    // a machine that takes no cards only ever sees cash
+    pub fn recharge_method(&self) -> &'static str {
+        if self.card && !self.recharge_cash {
+            "card"
+        } else {
+            "cash"
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default, rename_all = "camelCase")]
@@ -59,13 +110,37 @@ pub struct Settings {
     pub auto_update: bool,
     // cashiers see the day's totals on the main page
     pub staff_totals: bool,
+    // cashiers may give returns too, not only the owner
+    pub staff_refund: bool,
     // a Bizum button beside cash and card on the main page
     pub pay_bizum: bool,
-    // the amounts and operators the recharge window offers, comma separated,
-    // and what the shop earns on each recharge, in basis points
+    // what the main page and the rail offer
+    pub show_recharge: bool,
+    pub show_expense: bool,
+    pub show_repairs: bool,
+    // the totals under the main page, comma separated (DAY_CELLS); none hides them
+    pub day_cells: String,
+    // one-tap purchases in the expense window, comma separated, and how
+    // purchases are usually paid
+    pub expense_concepts: String,
+    pub expense_method: String,
+    // what the drawer usually starts the day with, offered when opening it
+    pub float_cents: i64,
+    // the card terminals and recharge machines; there is always at least one
+    pub machines: Vec<Machine>,
+    // with more than one, the card button asks which; off, it uses card_machine
+    pub machine_ask: bool,
+    pub card_machine: i64,
+    // what the recharge window starts on: a machine, or 0 for cash
+    pub recharge_machine: i64,
+    // the amounts and operators the recharge window offers, comma separated
     pub recharge_amounts: String,
     pub recharge_operators: String,
+    // recharges in cash count as expenses too, less what the shop earns on them
+    pub recharge_cash_expense: bool,
     pub recharge_commission_bp: i64,
+    // a slip comes out with every recharge
+    pub recharge_print: bool,
     // practice mode: sales get their own series, print as not valid and
     // never count anywhere
     pub training: bool,
@@ -120,10 +195,24 @@ impl Default for Settings {
             book_staff_delete: true,
             auto_update: true,
             staff_totals: true,
+            staff_refund: false,
             pay_bizum: false,
+            show_recharge: true,
+            show_expense: true,
+            show_repairs: true,
+            day_cells: DAY_CELLS.join(","),
+            expense_concepts: String::new(),
+            expense_method: "cash".into(),
+            float_cents: 0,
+            machines: vec![Machine { id: 1, name: FIRST_MACHINE.into(), ..Machine::default() }],
+            machine_ask: true,
+            card_machine: 1,
+            recharge_machine: 0,
             recharge_amounts: "5, 10, 15, 20, 30, 50".into(),
             recharge_operators: String::new(),
+            recharge_cash_expense: false,
             recharge_commission_bp: 0,
+            recharge_print: false,
             training: false,
             verifactu: "off".into(),
             cert: String::new(),
@@ -188,6 +277,13 @@ impl Settings {
         self.recharge_amounts = self.recharge_amounts.trim().chars().take(120).collect();
         self.recharge_operators = self.recharge_operators.trim().chars().take(200).collect();
         self.recharge_commission_bp = self.recharge_commission_bp.clamp(0, 10_000);
+        self.expense_concepts = self.expense_concepts.trim().chars().take(200).collect();
+        if !["cash", "card"].contains(&self.expense_method.as_str()) {
+            self.expense_method = "cash".into();
+        }
+        self.float_cents = self.float_cents.clamp(0, 100 * crate::tickets::MAX_PRICE);
+        self.day_cells = DAY_CELLS.iter().filter(|c| self.day_cells.split(',').any(|x| x.trim() == **c)).copied().collect::<Vec<_>>().join(",");
+        self.clean_machines();
         if !["off", "test", "prod"].contains(&self.verifactu.as_str()) {
             self.verifactu = "off".into();
         }
@@ -198,6 +294,60 @@ impl Settings {
         self.cert = self.cert.chars().filter(char::is_ascii_hexdigit).take(40).collect::<String>().to_uppercase();
         self.repair_terms = self.repair_terms.trim().chars().take(600).collect();
         self
+    }
+
+    // there is always one, and a default is one that can do the job
+    fn clean_machines(&mut self) {
+        let mut next = self.machines.iter().map(|m| m.id).max().unwrap_or(0).max(0) + 1;
+        let mut out: Vec<Machine> = Vec::new();
+        for mut m in std::mem::take(&mut self.machines) {
+            if !m.removed && out.iter().filter(|o| !o.removed).count() == MAX_MACHINES {
+                continue;
+            }
+            if m.id <= 0 || out.iter().any(|o| o.id == m.id) {
+                m.id = next;
+                next += 1;
+            }
+            m.name = m.name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(30).collect();
+            if m.name.is_empty() {
+                m.name = format!("Máquina {}", m.id);
+            }
+            m.commission_bp = m.commission_bp.clamp(0, 10_000);
+            m.takings_bp = m.takings_bp.clamp(0, 10_000);
+            out.push(m);
+        }
+        if out.iter().all(|m| m.removed) {
+            out.push(Machine { id: next, name: FIRST_MACHINE.into(), ..Machine::default() });
+        }
+        if !out.iter().any(|m| m.id == self.card_machine && !m.removed && m.card) {
+            self.card_machine = out.iter().find(|m| !m.removed && m.card).map_or(0, |m| m.id);
+        }
+        if !out.iter().any(|m| m.id == self.recharge_machine && !m.removed && m.recharge) {
+            self.recharge_machine = 0;
+        }
+        self.machines = out;
+    }
+
+    // one that was taken away is still found: what it did keeps its name
+    pub fn machine(&self, id: Option<i64>) -> Option<&Machine> {
+        self.machines.iter().find(|m| Some(m.id) == id)
+    }
+
+    pub fn machine_name(&self, id: i64) -> &str {
+        self.machine(Some(id)).map_or("Sin máquina", |m| m.name.as_str())
+    }
+
+    // the machine a payment went through: a card's, the one asked for or the default
+    pub fn paid_on(&self, method: &str, asked: Option<i64>) -> Option<&Machine> {
+        if method != "card" {
+            return None;
+        }
+        self.machine(asked).filter(|m| m.card).or_else(|| self.machine(Some(self.card_machine)))
+    }
+
+    // the screens and the paper only tell machines apart when there are several
+    pub fn several_machines(&self) -> bool {
+        self.machines.iter().filter(|m| !m.removed).count() > 1
     }
 }
 
@@ -298,6 +448,17 @@ pub fn upgrade(conn: &Connection) -> Result<()> {
             }
         }
         put(conn, "paper171", "1")?;
+    }
+    // 1.9: recharges go by machine. The machine every shop starts with keeps
+    // the commission the shop had set.
+    if get(conn, "machines19")?.is_none() {
+        if get(conn, "settings")?.is_some() {
+            let mut s = load(conn)?;
+            let bp = s.recharge_commission_bp;
+            s.machines.iter_mut().for_each(|m| m.commission_bp = bp);
+            put(conn, "settings", &serde_json::to_string(&s)?)?;
+        }
+        put(conn, "machines19", "1")?;
     }
     Ok(())
 }
@@ -401,6 +562,54 @@ mod tests {
             let s = load(&conn).unwrap();
             assert_eq!((s.paper_auto, s.columns), (auto, columns), "{columns} {kind}");
         }
+    }
+
+    #[test]
+    fn a_shop_always_has_a_machine_and_its_defaults_can_do_the_job() {
+        // all taken away: one comes back, with an id none of them had
+        let gone = Machine { id: 4, name: "Vieja".into(), removed: true, ..Machine::default() };
+        let s = Settings { machines: vec![gone.clone()], card_machine: 4, recharge_machine: 4, ..Settings::default() }.clean();
+        assert_eq!(s.machines.len(), 2);
+        assert_eq!((s.machines[1].id, s.machines[1].name.as_str(), s.card_machine, s.recharge_machine), (5, "Datáfono", 5, 0));
+        assert_eq!(s.machine_name(4), "Vieja");
+        // a blank name, a repeated id, an amount that is no percentage
+        let a = Machine { id: 2, name: "   ".into(), commission_bp: 20_000, takings_bp: -1, ..Machine::default() };
+        let s = Settings { machines: vec![a.clone(), a], card_machine: 9, ..Settings::default() }.clean();
+        assert_eq!(s.machines.iter().map(|m| m.id).collect::<Vec<_>>(), [2, 3]);
+        assert_eq!((s.machines[0].name.as_str(), s.machines[0].commission_bp, s.machines[0].takings_bp), ("Máquina 2", 10_000, 0));
+        assert_eq!(s.card_machine, 2);
+        // a recharge machine cannot be the card default, nor a card one the recharges'
+        let cards = Machine { id: 1, name: "BBVA".into(), recharge: false, ..Machine::default() };
+        let tops = Machine { id: 2, name: "Recargas".into(), card: false, ..Machine::default() };
+        let s = Settings { machines: vec![cards, tops], card_machine: 2, recharge_machine: 1, ..Settings::default() }.clean();
+        assert_eq!((s.card_machine, s.recharge_machine), (1, 0));
+        assert!(s.several_machines());
+        assert_eq!(s.machine(Some(2)).unwrap().recharge_method(), "cash");
+        // a card goes on the machine asked for if it takes cards, or the default
+        assert_eq!(s.paid_on("card", Some(2)).map(|m| m.id), Some(1));
+        assert_eq!(s.paid_on("cash", Some(1)).map(|m| m.id), None);
+        // the totals are the known ones, and none at all is a choice
+        let s = Settings { day_cells: " net, oro ,cash".into(), ..Settings::default() }.clean();
+        assert_eq!(s.day_cells, "cash,net");
+        assert_eq!(Settings { day_cells: String::new(), ..Settings::default() }.clean().day_cells, "");
+    }
+
+    #[test]
+    fn the_first_machine_keeps_the_commission_the_shop_had() {
+        let n = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let conn = crate::db::open(&std::env::temp_dir().join(format!("tiquet-mach-{n}")).join("t.db")).unwrap();
+        // stored by 1.8, which had no machines
+        put(&conn, "settings", r#"{"shopName":"Mi Tienda","rechargeCommissionBp":350}"#).unwrap();
+        upgrade(&conn).unwrap();
+        let s = load(&conn).unwrap();
+        assert_eq!((s.machines.len(), s.machines[0].commission_bp, s.card_machine, s.shop_name.as_str()), (1, 350, 1, "Mi Tienda"));
+        assert!(s.machines[0].card && s.machines[0].recharge && s.machines[0].recharge_expense && !s.recharge_cash_expense);
+        // once: a commission changed later stays
+        let mut s = s;
+        s.machines[0].commission_bp = 100;
+        put(&conn, "settings", &serde_json::to_string(&s).unwrap()).unwrap();
+        upgrade(&conn).unwrap();
+        assert_eq!(load(&conn).unwrap().machines[0].commission_bp, 100);
     }
 
     #[test]

@@ -28,6 +28,21 @@ export interface Boot {
   autoUpdate: boolean;
 }
 
+// a card terminal or a recharge machine, named by the shop
+export interface Machine {
+  id: number;
+  name: string;
+  card: boolean;
+  recharge: boolean;
+  // its recharges are paid in cash at the counter, even if it also takes cards
+  rechargeCash: boolean;
+  rechargeExpense: boolean;
+  commissionBp: number;
+  // how much of the sales it takes counts as an expense
+  takingsBp: number;
+  removed: boolean;
+}
+
 export interface Settings {
   shopName: string;
   legalName: string;
@@ -65,10 +80,25 @@ export interface Settings {
   bookStaffDelete: boolean;
   autoUpdate: boolean;
   staffTotals: boolean;
+  staffRefund: boolean;
   payBizum: boolean;
+  showRecharge: boolean;
+  showExpense: boolean;
+  showRepairs: boolean;
+  dayCells: string;
+  expenseConcepts: string;
+  expenseMethod: 'cash' | 'card';
+  floatCents: number;
+  machines: Machine[];
+  machineAsk: boolean;
+  cardMachine: number;
+  // what the recharge window starts on: a machine, or 0 for cash
+  rechargeMachine: number;
   rechargeAmounts: string;
   rechargeOperators: string;
+  rechargeCashExpense: boolean;
   rechargeCommissionBp: number;
+  rechargePrint: boolean;
   training: boolean;
   verifactu: 'off' | 'test' | 'prod';
   cert: string;
@@ -213,6 +243,7 @@ export interface Payment {
   method: Method;
   tenderedCents: number;
   changeCents: number;
+  machine: number | null;
 }
 
 export interface Preview {
@@ -255,7 +286,7 @@ export interface TicketRecord {
   refunds: TicketRef[];
   lines: SaleLine[];
   prints: PrintRow[];
-  paymentChanges: { at: string; byName: string; from: Method; to: Method }[];
+  paymentChanges: { at: string; byName: string; from: Method; to: Method; fromMachine: number | null; toMachine: number | null }[];
   customer: Customer | null;
   training: boolean;
   qr: string | null;
@@ -406,6 +437,7 @@ export interface DayRow {
   supplierNif: string;
   invoiceRef: string;
   vatBp: number;
+  machine: number | null;
   costCents: number;
   number: string | null;
   refund: boolean;
@@ -430,9 +462,19 @@ export interface DaySummary {
   purchaseCents: number;
   purchaseCount: number;
   rechargeCostCents: number;
+  machineCostCents: number;
   expenseCents: number;
   netCents: number;
   drawerCents: number;
+  machines: MachineSum[];
+}
+
+// sales and recharges on one machine; id 0 is cards from before there were machines
+export interface MachineSum {
+  id: number;
+  salesCents: number;
+  rechargeCents: number;
+  count: number;
 }
 
 export interface DayList {
