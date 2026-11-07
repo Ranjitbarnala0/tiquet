@@ -1522,6 +1522,80 @@ input.machine-name {
   height: 34px;
 }
 
+.moves-tools {
+  display: flex;
+  flex: 1 1 320px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+
+.moves-tools .segmented {
+  flex: none;
+}
+
+.moves-tools .search-sm {
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 240px;
+}
+
+/* each way of paying in its own stack, its name staying in view */
+.move-stack + .move-stack {
+  margin-top: 10px;
+}
+
+.move-stack h3 {
+  position: sticky;
+  top: -8px;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 2px;
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font: 680 14px var(--display);
+}
+
+.move-stack h3 small {
+  padding: 1px 7px;
+  border-radius: 9px;
+  background: var(--hover);
+  color: var(--muted);
+  font: 600 12px var(--font);
+}
+
+.move-stack h3 b {
+  margin-left: auto;
+  font: 700 15px var(--display);
+  font-variant-numeric: tabular-nums;
+}
+
+.move-stack h3 b.neg {
+  color: var(--expense);
+}
+
+button.day-stat {
+  border: 0;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition:
+    box-shadow 0.1s,
+    transform 0.06s;
+}
+
+button.day-stat:hover {
+  box-shadow: inset 0 0 0 1.5px var(--line-2);
+}
+
+button.day-stat.on {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
 .move {
   display: flex;
   align-items: center;

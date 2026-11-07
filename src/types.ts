@@ -86,6 +86,7 @@ export interface Settings {
   showExpense: boolean;
   showRepairs: boolean;
   dayCells: string;
+  productOrder: 'new' | 'az';
   expenseConcepts: string;
   expenseMethod: 'cash' | 'card';
   floatCents: number;

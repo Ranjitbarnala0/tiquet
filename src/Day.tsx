@@ -36,7 +36,7 @@ import { aeatText } from './Verifactu';
 export type DayView = 'moves' | 'cash' | 'reports';
 
 type Preset = 'day' | 'week' | 'month' | 'year';
-type Filter = 'all' | 'sales' | 'recharges' | 'expenses' | 'unprinted' | 'gone';
+type Filter = 'all' | 'sales' | 'cash' | 'card' | 'recharges' | 'expenses' | 'unprinted' | 'gone';
 type DayPart = 'all' | 'sales' | 'recharges' | 'expenses';
 type Detail = { ticket: TicketRecord; lines: PLine[]; logo: Logo | null };
 
@@ -58,10 +58,57 @@ function payLabel(s: Settings, r: DayRow): string {
 
 const rowKey = (r: DayRow) => `${r.source}-${r.id}`;
 const isTicket = (r: DayRow) => r.source === 'ticket';
+const isSale = (r: DayRow) => isTicket(r) || r.source === 'sale';
 const unprinted = (r: DayRow) => r.printed === 'none' || r.printed === 'failed';
 
 // "1 venta", "3 ventas"
 const many = (n: number, one: string, more: string) => `${n} ${n === 1 ? one : more}`;
+
+// The day in separate stacks, cash apart from each card machine, recharges and
+// expenses, each with the newest on top as the rows already come.
+interface Stack {
+  key: string;
+  rank: number;
+  dot: string;
+  label: string;
+  rows: DayRow[];
+}
+
+function stacks(rows: DayRow[], s: Settings): Stack[] {
+  const several = s.machines.length > 1;
+  const found = new Map<string, Stack>();
+  for (const r of rows) {
+    const [key, rank, dot, label] =
+      r.source === 'expense'
+        ? ['expense', 900, 'expense', tr('Gastos', 'Expenses')]
+        : r.source === 'recharge'
+          ? ['recharge', 800, 'recharge', tr('Recargas', 'Recharges')]
+          : r.method === 'cash'
+            ? ['cash', 0, 'cash', tr('Efectivo', 'Cash')]
+            : r.method === 'card'
+              ? several && r.machine
+                ? [`card${r.machine}`, 100 + r.machine, 'card', `${tr('Tarjeta', 'Card')} · ${machineName(s, r.machine)}`]
+                : ['card', 100, 'card', tr('Tarjeta', 'Card')]
+              : r.method === 'bizum'
+                ? ['bizum', 700, 'bizum', 'Bizum']
+                : ['other', 750, '', tr('Otros', 'Other')];
+    const stack = found.get(key) ?? { key, rank, dot, label, rows: [] };
+    stack.rows.push(r);
+    found.set(key, stack);
+  }
+  return [...found.values()].sort((a, b) => a.rank - b.rank);
+}
+
+// separate stacks or one list by time, remembered on this PC
+const ORDER_KEY = 'tiquet.dayOrder';
+
+function storedOrder(): 'kind' | 'time' {
+  try {
+    return localStorage.getItem(ORDER_KEY) === 'time' ? 'time' : 'kind';
+  } catch {
+    return 'kind';
+  }
+}
 
 function longDate(iso: string): string {
   const d = new Date(`${iso}T12:00:00`);
@@ -128,6 +175,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const [filter, setFilter] = useState<Filter>('all');
   // only what went through this machine; 0 is cards from before there were any
   const [onMachine, setOnMachine] = useState<number | null>(null);
+  const [order, setOrder] = useState(storedOrder);
   const [q, setQ] = useState('');
   const [data, setData] = useState<DayList | null>(null);
   const [sel, setSel] = useState<string | null>(null);
@@ -160,7 +208,9 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const counts = useMemo(
     () => ({
       all: alive.length,
-      sales: alive.filter((r) => isTicket(r) || r.source === 'sale').length,
+      sales: alive.filter(isSale).length,
+      cash: alive.filter((r) => isSale(r) && r.method === 'cash').length,
+      card: alive.filter((r) => isSale(r) && r.method === 'card').length,
       recharges: alive.filter((r) => r.source === 'recharge').length,
       expenses: alive.filter((r) => r.source === 'expense' || r.costCents !== 0).length,
       unprinted: alive.filter((r) => isTicket(r) && unprinted(r)).length,
@@ -173,7 +223,9 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
     return rows.filter((r) => {
       const fits = {
         all: !r.gone,
-        sales: !r.gone && (isTicket(r) || r.source === 'sale'),
+        sales: !r.gone && isSale(r),
+        cash: !r.gone && isSale(r) && r.method === 'cash',
+        card: !r.gone && isSale(r) && r.method === 'card',
         recharges: !r.gone && r.source === 'recharge',
         expenses: !r.gone && (r.source === 'expense' || r.costCents !== 0),
         unprinted: !r.gone && isTicket(r) && unprinted(r),
@@ -187,10 +239,20 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   }, [rows, filter, q, onMachine]);
 
   const row = shown.find((r) => rowKey(r) === sel) ?? null;
+  const groups = useMemo(() => (order === 'kind' && !gone ? stacks(shown, settings) : null), [order, gone, shown, settings]);
 
   useEffect(() => {
-    setSel((cur) => (cur !== null && shown.some((r) => rowKey(r) === cur) ? cur : shown[0] ? rowKey(shown[0]) : null));
-  }, [shown]);
+    const first = groups ? groups[0]?.rows[0] : shown[0];
+    setSel((cur) => (cur !== null && shown.some((r) => rowKey(r) === cur) ? cur : first ? rowKey(first) : null));
+  }, [shown, groups]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ORDER_KEY, order);
+    } catch {
+      // it just will not be remembered
+    }
+  }, [order]);
 
   const ticketId = row && isTicket(row) ? row.id : null;
   useEffect(() => {
@@ -391,11 +453,44 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const chips: { id: Filter; label: string; n?: number }[] = [
     { id: 'all', label: tr('Todo', 'All'), n: counts.all },
     { id: 'sales', label: tr('Ventas', 'Sales'), n: counts.sales },
+    { id: 'cash', label: tr('Efectivo', 'Cash'), n: counts.cash },
+    { id: 'card', label: tr('Tarjeta', 'Card'), n: counts.card },
     ...(settings.showRecharge || counts.recharges > 0 ? [{ id: 'recharges' as const, label: tr('Recargas', 'Recharges'), n: counts.recharges }] : []),
     { id: 'expenses', label: tr('Gastos', 'Expenses'), n: counts.expenses },
     { id: 'unprinted', label: tr('Sin imprimir', 'Not printed'), n: counts.unprinted },
   ];
   if (admin) chips.push({ id: 'gone', label: tr('Borrados', 'Deleted') });
+
+  // the stat on top and the chip below are the same thing
+  const pick = (f: Filter) => setFilter(filter === f ? 'all' : f);
+  const stat = (f: Filter) => ({ className: `day-stat${filter === f ? ' on' : ''}`, onClick: () => pick(f), 'aria-pressed': filter === f });
+
+  // what a line adds up to here: among the expenses, what it counts as one
+  const worth = (r: DayRow) => (filter === 'expenses' && r.source !== 'expense' ? -r.costCents : r.cents);
+
+  const line = (r: DayRow) => {
+    const Icon = r.source === 'expense' ? ShoppingCart : r.source === 'recharge' ? SmartphoneCharging : ReceiptText;
+    return (
+      <button key={rowKey(r)} className={`move${sel === rowKey(r) ? ' on' : ''}${r.gone ? ' gone' : ''}`} onClick={() => setSel(rowKey(r))}>
+        <span className="move-time">{oneDay ? r.at.slice(11, 16) : `${r.at.slice(8, 10)}/${r.at.slice(5, 7)}`}</span>
+        <span className={`move-icon ${r.source}`}>
+          <Icon size={16} />
+        </span>
+        <span className="move-main">
+          <b>{r.concept}</b>
+          <small>
+            {payLabel(settings, r)}
+            {r.number ? ` · ${r.number}` : ''} · {r.byName}
+          </small>
+        </span>
+        {isTicket(r) && !r.gone && (r.printed === 'printed' ? <span className="badge blue">{tr('Impreso', 'Printed')}</span> : r.printed === 'unknown' ? <span className="badge amber">{tr('¿Impreso?', 'Printed?')}</span> : <span className="badge">{tr('Sin imprimir', 'Not printed')}</span>)}
+        {r.invoice && <span className="badge blue">{tr('Factura', 'Invoice')}</span>}
+        {r.refund && <span className="badge amber">{tr('Devolución', 'Return')}</span>}
+        {r.source === 'sale' && <span className="badge">{tr('Sin ticket', 'No ticket')}</span>}
+        <b className={`move-cents${worth(r) < 0 ? ' neg' : ''}`}>{eur(worth(r))}</b>
+      </button>
+    );
+  };
 
   return (
     <div className="moves">
@@ -475,20 +570,22 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
 
       {s && (
         <div className="day-stats">
-          <div className="day-stat">
+          <button {...stat('cash')}>
             <span>
               <i className="dot dot-cash" />
               {tr('Efectivo', 'Cash')}
             </span>
             <b>{eur(s.cashCents)}</b>
-          </div>
-          <div className="day-stat">
+            {counts.cash > 0 && <small>{counts.cash}</small>}
+          </button>
+          <button {...stat('card')}>
             <span>
               <i className="dot dot-card" />
               {tr('Tarjeta', 'Card')}
             </span>
             <b>{eur(s.cardCents)}</b>
-          </div>
+            {counts.card > 0 && <small>{counts.card}</small>}
+          </button>
           {s.bizumCents !== 0 && (
             <div className="day-stat">
               <span>
@@ -505,14 +602,14 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
             </div>
           )}
           {(settings.showRecharge || s.rechargeCount > 0) && (
-            <div className="day-stat">
+            <button {...stat('recharges')}>
               <span>
                 <i className="dot dot-recharge" />
                 {tr('Recargas', 'Recharges')}
               </span>
               <b>{eur(s.rechargeCents)}</b>
               {s.rechargeCount > 0 && <small>{s.rechargeCount}</small>}
-            </div>
+            </button>
           )}
           <div className="day-stat hero">
             <span>{tr('Total', 'Total')}</span>
@@ -521,7 +618,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
               {many(s.saleCount, tr('venta', 'sale'), tr('ventas', 'sales'))}
             </small>
           </div>
-          <div className="day-stat">
+          <button {...stat('expenses')}>
             <span>
               <i className="dot dot-expense" />
               {tr('Gastos', 'Expenses')}
@@ -538,7 +635,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                   .join(' + ')}
               </small>
             )}
-          </div>
+          </button>
           <div className="day-stat hero">
             <span>{tr('Queda', 'Left')}</span>
             <b className={s.netCents < 0 ? 'neg' : ''}>{eur(s.netCents)}</b>
@@ -570,37 +667,36 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                 </button>
               ))}
             </div>
-            <div className="search-sm">
-              <Search size={16} />
-              <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={tr('Buscar', 'Search')} aria-label={tr('Buscar', 'Search')} />
+            <div className="moves-tools">
+              <Segmented
+                value={order}
+                onChange={setOrder}
+                options={[
+                  { value: 'kind', label: tr('Separado', 'Separate') },
+                  { value: 'time', label: tr('Por hora', 'By time') },
+                ]}
+              />
+              <div className="search-sm">
+                <Search size={16} />
+                <input value={q} onChange={(e) => setQ(e.target.value)} placeholder={tr('Buscar', 'Search')} aria-label={tr('Buscar', 'Search')} />
+              </div>
             </div>
           </div>
           {data?.capped && <p className="cap-note">{tr('Se muestran los 1.500 más recientes; los totales cuentan todos.', 'Showing the 1,500 most recent; the totals count them all.')}</p>}
           <div className="list">
-            {shown.map((r) => {
-              const asCost = filter === 'expenses' && r.source !== 'expense';
-              const Icon = r.source === 'expense' ? ShoppingCart : r.source === 'recharge' ? SmartphoneCharging : ReceiptText;
-              return (
-                <button key={rowKey(r)} className={`move${sel === rowKey(r) ? ' on' : ''}${r.gone ? ' gone' : ''}`} onClick={() => setSel(rowKey(r))}>
-                  <span className="move-time">{oneDay ? r.at.slice(11, 16) : `${r.at.slice(8, 10)}/${r.at.slice(5, 7)}`}</span>
-                  <span className={`move-icon ${r.source}`}>
-                    <Icon size={16} />
-                  </span>
-                  <span className="move-main">
-                    <b>{r.concept}</b>
-                    <small>
-                      {payLabel(settings, r)}
-                      {r.number ? ` · ${r.number}` : ''} · {r.byName}
-                    </small>
-                  </span>
-                  {isTicket(r) && !r.gone && (r.printed === 'printed' ? <span className="badge blue">{tr('Impreso', 'Printed')}</span> : r.printed === 'unknown' ? <span className="badge amber">{tr('¿Impreso?', 'Printed?')}</span> : <span className="badge">{tr('Sin imprimir', 'Not printed')}</span>)}
-                  {r.invoice && <span className="badge blue">{tr('Factura', 'Invoice')}</span>}
-                  {r.refund && <span className="badge amber">{tr('Devolución', 'Return')}</span>}
-                  {r.source === 'sale' && <span className="badge">{tr('Sin ticket', 'No ticket')}</span>}
-                  <b className={`move-cents${r.cents < 0 || asCost ? ' neg' : ''}`}>{eur(asCost ? -r.costCents : r.cents)}</b>
-                </button>
-              );
-            })}
+            {groups
+              ? groups.map((g) => (
+                  <section key={g.key} className="move-stack">
+                    <h3>
+                      {g.dot && <i className={`dot dot-${g.dot}`} />}
+                      <span>{g.label}</span>
+                      <small>{g.rows.length}</small>
+                      {s && <b className={g.rows.reduce((sum, r) => sum + worth(r), 0) < 0 ? 'neg' : ''}>{eur(g.rows.reduce((sum, r) => sum + worth(r), 0))}</b>}
+                    </h3>
+                    {g.rows.map(line)}
+                  </section>
+                ))
+              : shown.map(line)}
             {data && shown.length === 0 && (
               <Empty
                 icon={<ReceiptText size={28} />}

@@ -44,6 +44,9 @@ export function rate(bp: number): string {
   return `${(bp / 100).toLocaleString('es-ES')}%`;
 }
 
+// products with the last one added first, or by name if the shop prefers that
+export const productOrder = (az: boolean) => (a: { id: number; name: string }, b: { id: number; name: string }) => (az ? a.name.localeCompare(b.name, 'es') : b.id - a.id);
+
 export function isoDate(d: Date): string {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;

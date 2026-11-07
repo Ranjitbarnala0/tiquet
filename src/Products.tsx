@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { Archive, FileSpreadsheet, Package, Plus, Search, Star, Trash2 } from 'lucide-react';
 import { call } from './api';
 import { parseCsv, toProducts, type ProductIn } from './csv';
-import { eur, fmt, norm, parseMoney, rate, VAT_RATES } from './format';
+import { eur, fmt, norm, parseMoney, productOrder, rate, VAT_RATES } from './format';
 import { errorText, tr } from './i18n';
 import { useToast } from './toast';
 import type { Product, Settings } from './types';
@@ -43,8 +43,8 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
 
   const shown = useMemo(() => {
     const tokens = norm(q).split(/\s+/).filter(Boolean);
-    return (all ?? []).filter((p) => p.active !== archived && tokens.every((t) => norm(p.name).includes(t) || p.barcode.includes(t)));
-  }, [all, q, archived]);
+    return (all ?? []).filter((p) => p.active !== archived && tokens.every((t) => norm(p.name).includes(t) || p.barcode.includes(t))).sort(productOrder(settings.productOrder === 'az'));
+  }, [all, q, archived, settings.productOrder]);
 
   const archivedCount = (all ?? []).filter((p) => !p.active).length;
 

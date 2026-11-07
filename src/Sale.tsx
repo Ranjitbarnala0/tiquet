@@ -26,7 +26,7 @@ import {
   X,
 } from 'lucide-react';
 import { ApiError, call, toError } from './api';
-import { eur, fmt, norm, parseMoney, rate } from './format';
+import { eur, fmt, norm, parseMoney, productOrder, rate } from './format';
 import { errorText, isPrinterSetup, isTransient, printerStateText, tr, warningText } from './i18n';
 import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
@@ -50,6 +50,10 @@ type Option =
 
 let seq = 0;
 const uid = () => `l${Date.now().toString(36)}${(seq++).toString(36)}`;
+
+// Lines stack by time: the one touched last goes to the end of the ticket, and
+// the screen shows the ticket from its end, so the newest is always on top.
+const toEnd = (lines: CartLine[], line: CartLine) => [...lines.filter((l) => l.key !== line.key), line];
 const newSaleId = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 
 // the sale this cart corrects: charging it replaces that ticket
@@ -513,6 +517,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   }, [tab, printOn]);
 
   const catalogue = useMemo(() => index(products), [products]);
+  const stacked = useMemo(() => [...lines].reverse(), [lines]);
   const options = useMemo(() => {
     // "-10%": that much off what is on the ticket
     const pct = query.trim().match(/^-\s*(\d{1,2}(?:[.,]\d)?)\s*%$/);
@@ -550,10 +555,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       .catch((e) => n === reqSeq.current && setPreviewErr(errorText(e)));
   }, [previewArgs, settings, logo]);
 
+  // whatever was just added is on top: that is where the eye goes
   useEffect(() => {
-    const el = linesRef.current;
-    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' });
-  }, [lines.length]);
+    linesRef.current?.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [flash]);
 
   useEffect(() => {
     if (!active) setPaying(false);
@@ -621,7 +626,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const addProduct = (p: Product, qty = 1) => {
     const same = p.priceCents !== 0 ? lines.find((l) => l.productId === p.id && l.unitCents === p.priceCents) : undefined;
     if (same) {
-      commit(lines.map((l) => (l.key === same.key ? { ...l, qty: Math.min(999, l.qty + qty) } : l)));
+      commit(toEnd(lines, { ...same, qty: Math.min(999, same.qty + qty) }));
       setSel(same.key);
       pulse(same.key);
       return;
@@ -647,7 +652,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       if (same && d.repairId) {
         lastKey = same.key;
       } else if (same) {
-        next = next.map((l) => (l.key === same.key ? { ...l, qty: Math.min(999, l.qty + d.qty) } : l));
+        next = toEnd(next, { ...same, qty: Math.min(999, same.qty + d.qty) });
         lastKey = same.key;
       } else {
         const line: CartLine = { key: uid(), name: d.name, qty: d.qty, unitCents: d.unitCents, vatBp: d.vatBp, productId: d.productId, repairId: d.repairId };
@@ -747,7 +752,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const remove = (key: string) => {
     const i = lines.findIndex((l) => l.key === key);
     commit(lines.filter((l) => l.key !== key));
-    setSel(lines[i + 1]?.key ?? lines[i - 1]?.key ?? null);
+    setSel(lines[i - 1]?.key ?? lines[i + 1]?.key ?? null);
   };
 
   const dropFix = () => {
@@ -802,9 +807,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   const moveSel = (d: number) => {
     if (!lines.length) return;
-    const i = lines.findIndex((l) => l.key === sel);
-    const j = i < 0 ? (d > 0 ? 0 : lines.length - 1) : Math.min(lines.length - 1, Math.max(0, i + d));
-    setSel(lines[j].key);
+    const i = stacked.findIndex((l) => l.key === sel);
+    const j = i < 0 ? (d > 0 ? 0 : stacked.length - 1) : Math.min(stacked.length - 1, Math.max(0, i + d));
+    setSel(stacked[j].key);
   };
 
   const ready = () => {
@@ -1131,9 +1136,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  // tiles keep their place between sales so cashiers can rely on muscle memory
-  const favs = useMemo(() => products.filter((p) => p.favorite).sort((a, b) => a.name.localeCompare(b.name, 'es')), [products]);
-  const everything = useMemo(() => [...products].sort((a, b) => a.name.localeCompare(b.name, 'es')), [products]);
+  // tiles keep their place between sales so cashiers can rely on muscle memory;
+  // only something new takes the first place
+  const everything = useMemo(() => [...products].sort(productOrder(settings.productOrder === 'az')), [products, settings.productOrder]);
+  const favs = useMemo(() => everything.filter((p) => p.favorite), [everything]);
   const tabs: { id: Tab; label: string; icon: typeof Star; count: number }[] = [
     { id: 'recent', label: tr('Recientes', 'Recent'), icon: History, count: recent.length },
     { id: 'fav', label: tr('Favoritos', 'Favourites'), icon: Star, count: favs.length },
@@ -1329,7 +1335,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         )}
 
         <div className="till-lines" ref={linesRef}>
-          {lines.map((l) => (
+          {stacked.map((l) => (
             <div key={l.key} className={`ln${sel === l.key ? ' sel' : ''}`} onMouseDown={() => setSel(l.key)}>
               {flash?.key === l.key && <i className="row-flash" key={flash.n} />}
               <button

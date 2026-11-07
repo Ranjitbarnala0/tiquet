@@ -1,10 +1,16 @@
-Download `Tiquet_1.9.1_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.9.2_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.9.1: **a ticket on the screen no longer stops an update.** Until now Tiquet did not even look for a new version while something was on the ticket, and a ticket left there stays after closing Tiquet, so a till could go without updates and say nothing. Now it always looks and downloads, the blue bar always shows, and a ticket forgotten on the screen comes back after the update. The version is shown at the bottom left.
+New in 1.9.2: **everything stacks by time, and Hoy keeps things apart.**
+
+- **On the ticket the last thing added is on top.** Adding the same item again moves its line to the top. The printed ticket keeps the order things were added.
+- **Products: the last added first,** in **Todos**, **Favoritos** and **Productos**. **Ajustes > Venta** can make them alphabetical.
+- **Hoy in separate stacks:** Efectivo, each card machine, Bizum, Recargas and Gastos, each with its total and the newest on top. **Por hora** shows one list by time. Tap a figure at the top to see only its lines.
+
+Also in 1.9.1: **a ticket on the screen no longer stops an update.** Until now Tiquet did not even look for a new version while something was on the ticket, and a ticket left there stays after closing Tiquet, so a till could go without updates and say nothing. Now it always looks and downloads, the blue bar always shows, and a ticket forgotten on the screen comes back after the update. The version is shown at the bottom left.
 
 Also new in 1.9: **your machines, and you decide what counts as an expense.**
 

@@ -120,6 +120,9 @@ pub struct Settings {
     pub show_repairs: bool,
     // the totals under the main page, comma separated (DAY_CELLS); none hides them
     pub day_cells: String,
+    // products on the main page and in Productos: "new", the last added first,
+    // or "az"
+    pub product_order: String,
     // one-tap purchases in the expense window, comma separated, and how
     // purchases are usually paid
     pub expense_concepts: String,
@@ -201,6 +204,7 @@ impl Default for Settings {
             show_expense: true,
             show_repairs: true,
             day_cells: DAY_CELLS.join(","),
+            product_order: "new".into(),
             expense_concepts: String::new(),
             expense_method: "cash".into(),
             float_cents: 0,
@@ -280,6 +284,9 @@ impl Settings {
         self.expense_concepts = self.expense_concepts.trim().chars().take(200).collect();
         if !["cash", "card"].contains(&self.expense_method.as_str()) {
             self.expense_method = "cash".into();
+        }
+        if !["new", "az"].contains(&self.product_order.as_str()) {
+            self.product_order = "new".into();
         }
         self.float_cents = self.float_cents.clamp(0, 100 * crate::tickets::MAX_PRICE);
         self.day_cells = DAY_CELLS.iter().filter(|c| self.day_cells.split(',').any(|x| x.trim() == **c)).copied().collect::<Vec<_>>().join(",");
@@ -592,6 +599,10 @@ mod tests {
         let s = Settings { day_cells: " net, oro ,cash".into(), ..Settings::default() }.clean();
         assert_eq!(s.day_cells, "cash,net");
         assert_eq!(Settings { day_cells: String::new(), ..Settings::default() }.clean().day_cells, "");
+        // products go newest first unless the shop chose the alphabet
+        assert_eq!(Settings::default().product_order, "new");
+        assert_eq!(Settings { product_order: "az".into(), ..Settings::default() }.clean().product_order, "az");
+        assert_eq!(Settings { product_order: "x".into(), ..Settings::default() }.clean().product_order, "new");
     }
 
     #[test]
