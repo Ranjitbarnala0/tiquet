@@ -195,7 +195,7 @@ export function ItemDialog({ line, products, defaultVat, admin, onDone, onRemove
             />
             {save && !same && (
               <div className="item-save-more">
-                <Toggle checked={favorite} onChange={setFavorite} label={tr('Botón rápido', 'Quick button')} hint={tr('En «Favoritos», abajo en la venta', 'Under "Favourites" on the sale screen')} />
+                <Toggle checked={favorite} onChange={setFavorite} label={tr('Favorito', 'Favourite')} hint={tr('Sale el primero al buscar', 'Comes first when searching')} />
                 <Field label={tr('Código de barras (opcional)', 'Barcode (optional)')}>
                   <input className="mono" value={barcode} onChange={(e) => setBarcode(e.target.value)} maxLength={40} onKeyDown={(e) => e.key === 'Enter' && e.preventDefault()} />
                 </Field>

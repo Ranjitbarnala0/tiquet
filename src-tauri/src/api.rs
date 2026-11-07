@@ -202,10 +202,6 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             st.admin()?;
             to(products::save(&st.conn(), parse(a)?)?)
         }
-        "products.recent" => {
-            st.user()?;
-            to(products::recent(&st.conn(), 24)?)
-        }
         "products.delete" => {
             let me = st.admin()?;
             let deleted = products::delete(&st.conn(), id(&a)?)?;
@@ -1851,16 +1847,11 @@ mod tests {
         let line = json!({ "productId": 1, "name": "Cable", "qty": 1, "unitCents": 690, "vatBp": 2100 });
         dispatch(&st, "sale.finalize", json!({ "lines": [line], "payment": { "method": "cash" } })).unwrap();
         dispatch(&st, "sale.finalize", json!({ "lines": [{ "name": "Pegatina", "qty": 2, "unitCents": 150, "vatBp": 2100 }], "payment": { "method": "card" } })).unwrap();
-        let recent = dispatch(&st, "products.recent", json!({})).unwrap();
-        assert_eq!(recent[0]["name"], "Pegatina");
-        assert_eq!(recent[1]["productId"], 1);
         assert_eq!(dispatch(&st, "products.delete", json!({ "id": 1 })).unwrap()["deleted"], false);
         assert_eq!(dispatch(&st, "products.delete", json!({ "id": 2 })).unwrap()["deleted"], true);
         let all = dispatch(&st, "products.list", json!({ "all": true })).unwrap();
         assert!(all.as_array().unwrap().iter().all(|p| p["id"] != 2));
         assert!(all.as_array().unwrap().iter().any(|p| p["id"] == 1 && p["active"] == false));
-        // the archived product no longer offers itself from the recent list
-        assert_eq!(dispatch(&st, "products.recent", json!({})).unwrap()[1]["productId"], Value::Null);
     }
 
     // what a network printer received, one entry per connection

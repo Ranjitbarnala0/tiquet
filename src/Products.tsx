@@ -219,7 +219,7 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
                         toggleFav(p);
                       }}
                       aria-label={tr('Favorito', 'Favorite')}
-                      title={tr('Botón rápido en Venta', 'Quick button on Sale')}
+                      title={tr('Favorito: sale el primero al buscar', 'Favourite: comes first when searching')}
                     >
                       <Star size={16} />
                     </button>
@@ -304,8 +304,8 @@ export function Products({ settings, onChanged }: { settings: Settings; onChange
             <Toggle
               checked={edit.favorite}
               onChange={(v) => setEdit({ ...edit, favorite: v })}
-              label={tr('Botón rápido', 'Quick button')}
-              hint={tr('Aparece en la pantalla de venta para añadirlo con un clic', 'Shows on the sale screen to add it with one click')}
+              label={tr('Favorito', 'Favourite')}
+              hint={tr('Sale el primero al buscar', 'Comes first when searching')}
             />
             <button type="submit" hidden />
           </form>

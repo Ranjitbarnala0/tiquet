@@ -6,12 +6,10 @@ import {
   CreditCard,
   Eye,
   History,
-  LayoutGrid,
   Minus,
   Pencil,
   Plus,
   Printer,
-  Repeat2,
   Save,
   ScanBarcode,
   Search,
@@ -26,7 +24,8 @@ import {
   X,
 } from 'lucide-react';
 import { ApiError, call, toError } from './api';
-import { eur, fmt, norm, parseMoney, productOrder, rate } from './format';
+import { Board } from './Board';
+import { eur, fmt, isoDate, norm, parseMoney, rate } from './format';
 import { errorText, isPrinterSetup, isTransient, printerStateText, tr, warningText } from './i18n';
 import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
@@ -36,7 +35,7 @@ import { Paper } from './Paper';
 import { BIG, ExpenseModal, RechargeModal, useEntrySave } from './Quick';
 import { ShareDialog } from './Share';
 import { useToast } from './toast';
-import type { CartLine, CashDrawer, CashSession, Customer, DaySummary, Finalized, Logo, Machine, Method, Preview, Product, Recent, Settings, TicketRecord } from './types';
+import type { CartLine, CashDrawer, CashSession, Customer, DayList, DaySummary, Finalized, Logo, Machine, Method, Preview, Product, Settings, TicketRecord } from './types';
 
 type Shown = Preview & { forLines: string };
 import { printerLabel, usePrinterStatus } from './usePrinter';
@@ -59,9 +58,10 @@ const newSaleId = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${M
 // the sale this cart corrects: charging it replaces that ticket
 type Fixing = { id: number; number: string };
 
-// what survives a crash: the lines, the sale they correct, and the id the core
-// uses to tell a retry of this same cart from a new sale
-function storedCart(key: string): { saleId: string; lines: CartLine[]; fixing?: Fixing | null } {
+// what survives a crash: the lines, the sale they correct, the moment they last
+// changed, and the id the core uses to tell a retry of this same cart from a
+// new sale
+function storedCart(key: string): { saleId: string; lines: CartLine[]; fixing?: Fixing | null; touched?: number; left?: string[] } {
   try {
     const v = JSON.parse(localStorage.getItem(key) ?? 'null');
     if (Array.isArray(v)) return { saleId: newSaleId(), lines: v };
@@ -153,11 +153,23 @@ function search(items: Indexed[], q: string): Option[] {
       scored.push([s, p]);
     }
     scored.sort((a, b) => b[0] - a[0] || a[1].name.localeCompare(b[1].name));
+    // what was typed as money is money: "10" is ten euros, not the first
+    // product with a 10 in its name
+    const custom = parseCustom(t);
+    if (custom) out.push({ kind: 'custom', qty, ...custom });
     for (const [, p] of scored.slice(0, code ? 6 : 7)) out.push({ kind: 'product', product: p, qty });
   }
-  const custom = parseCustom(t);
-  if (custom) out.push({ kind: 'custom', qty, ...custom });
   return entry ? [entry, ...out] : out;
+}
+
+// What Enter takes with nobody choosing, -1 for nothing: only what cannot be
+// the wrong thing. A word that fits several products is the cashier's to choose.
+function sure(options: Option[], q: string): number {
+  const first = options[0];
+  if (!first) return -1;
+  if (first.kind !== 'product' || options.length === 1) return 0;
+  const text = parseQuery(q.trim()).text.trim();
+  return options.findIndex((o) => o.kind === 'product' && (o.product.barcode === text || norm(o.product.name) === norm(text)));
 }
 
 function quick(total: number, most = 4): number[] {
@@ -168,6 +180,11 @@ function quick(total: number, most = 4): number[] {
   }
   return [...out].sort((a, b) => a - b).slice(0, most);
 }
+
+// Enter again this soon after adding something is the same press, not "charge"
+const AFTER_ADD = 700;
+// a ticket left this long is probably not this customer's
+const FORGOTTEN = 10 * 60_000;
 
 // A barcode scanner types the whole code in a few milliseconds and ends it
 // with Enter; a person cannot type six characters that fast.
@@ -218,8 +235,9 @@ function PriceInput({ cents, onDone }: { cents: number; onDone: (c: number | nul
   );
 }
 
-function QtyInput({ qty, onChange, onExit, disabled }: { qty: number; onChange: (n: number) => void; onExit: () => void; disabled?: boolean }) {
+function QtyInput({ qty, onChange, onExit, onElse, disabled }: { qty: number; onChange: (n: number) => void; onExit: () => void; onElse: (text: string) => void; disabled?: boolean }) {
   const [v, setV] = useState(String(qty));
+  const leaving = useRef(false);
   useEffect(() => setV(String(qty)), [qty]);
   return (
     <input
@@ -229,8 +247,22 @@ function QtyInput({ qty, onChange, onExit, disabled }: { qty: number; onChange: 
       inputMode="numeric"
       aria-label={tr('Cantidad', 'Quantity')}
       onFocus={(e) => e.target.select()}
-      onChange={(e) => setV(e.target.value.replace(/\D/g, '').slice(0, 3))}
+      onChange={(e) => {
+        const t = e.target.value;
+        // more than a quantity was meant for the box: a name, or a scanner
+        if (/\D/.test(t) || t.length > 3) {
+          leaving.current = true;
+          setV(String(qty));
+          onElse(t);
+        } else {
+          setV(t);
+        }
+      }}
       onBlur={() => {
+        if (leaving.current) {
+          leaving.current = false;
+          return;
+        }
         const n = Number(v);
         if (n >= 1 && n !== qty) onChange(n);
         else setV(String(qty));
@@ -247,8 +279,6 @@ function QtyInput({ qty, onChange, onExit, disabled }: { qty: number; onChange: 
   );
 }
 
-type Tab = 'recent' | 'fav' | 'all';
-const TAB_KEY = 'tiquet.saleTab';
 // printing is a switch by the pay buttons, remembered on this PC
 const PRINT_KEY = 'tiquet.print';
 
@@ -259,18 +289,6 @@ function storedPrint(): boolean {
     return true;
   }
 }
-// a long catalogue is found with the search box; the grid shows this many
-const ALL_SHOWN = 200;
-
-function storedTab(): Tab {
-  try {
-    const t = localStorage.getItem(TAB_KEY);
-    return t === 'recent' || t === 'fav' || t === 'all' ? t : 'fav';
-  } catch {
-    return 'fav';
-  }
-}
-
 interface Props {
   cartKey: string;
   active: boolean;
@@ -286,7 +304,6 @@ interface Props {
   onSetupPrinter?: () => void;
   // whether a ticket is on the screen or being charged
   onBusy: (busy: boolean) => void;
-  onDay: () => void;
 }
 
 type Charge = { method: Method; machine: number | null; tendered: number | null; print: boolean; invoice: boolean };
@@ -303,13 +320,13 @@ function Cell({ label, cents, dot, strong, minus }: { label: string; cents: numb
   );
 }
 
-// The day at a glance, under the products: each way of paying apart, the
-// total of all, what went out and what is left. A tap opens the whole day.
-function DayStrip({ s, settings, onOpen }: { s: DaySummary; settings: Settings; onOpen: () => void }) {
+// The day at a glance, over the box: each way of paying apart, the total of
+// all, what went out and what is left.
+function DayStrip({ s, settings }: { s: DaySummary; settings: Settings }) {
   const on = settings.dayCells.split(',').filter((c) => c && (c !== 'recharge' || settings.showRecharge));
   if (!on.length) return null;
   return (
-    <button className="strip" onMouseDown={keep} onClick={onOpen} title={tr('Ver las ventas y gastos de hoy', 'See today’s sales and expenses')}>
+    <div className="strip">
       {on.includes('cash') && <Cell label={tr('Efectivo', 'Cash')} cents={s.cashCents} dot="cash" />}
       {on.includes('card') && <Cell label={tr('Tarjeta', 'Card')} cents={s.cardCents} dot="card" />}
       {s.bizumCents !== 0 && on.includes('card') && <Cell label="Bizum" cents={s.bizumCents} dot="bizum" />}
@@ -317,7 +334,7 @@ function DayStrip({ s, settings, onOpen }: { s: DaySummary; settings: Settings; 
       {on.includes('total') && <Cell label={tr('Total', 'Total')} cents={s.totalCents} strong />}
       {on.includes('expense') && <Cell label={tr('Gastos', 'Expenses')} cents={s.expenseCents} dot="expense" minus />}
       {on.includes('net') && <Cell label={tr('Queda', 'Left')} cents={s.netCents} strong />}
-    </button>
+    </div>
   );
 }
 
@@ -382,10 +399,12 @@ function MachinePick({ machines, first, cents, onPick, onClose }: { machines: Ma
   );
 }
 
-export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, logo, products, onSold, onSetupPrinter, onBusy, onDay }: Props) {
+export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, logo, products, onSold, onSetupPrinter, onBusy }: Props) {
   const toast = useToast();
   const [restored] = useState(() => storedCart(cartKey));
   const [lines, setLines] = useState<CartLine[]>(restored.lines);
+  const linesNow = useRef(lines);
+  linesNow.current = lines;
   const [fixing, setFixing] = useState<Fixing | null>(restored.fixing ?? null);
   const saleId = useRef(restored.saleId);
   const [clock, setClock] = useState<{ last: string; charge: Charge } | null>(null);
@@ -410,19 +429,23 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [last, setLast] = useState<{ ticket: TicketRecord; printed: boolean } | null>(null);
   const [sharing, setSharing] = useState<TicketRecord | null>(null);
   const [printOn, setPrintOn] = useState(storedPrint);
-  const [day, setDay] = useState<DaySummary | null>(null);
-  const [recharge, setRecharge] = useState<{ cents: number; fromCart: boolean } | null>(null);
+  const [today, setToday] = useState<DayList | null>(null);
+  const day = today?.summary;
+  const [recharge, setRecharge] = useState<number | null>(null);
   const [expense, setExpense] = useState<string | null>(null);
   const [seeTicket, setSeeTicket] = useState(false);
   // the add/change dialog: 'add', or the key of the line being changed
   const [item, setItem] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>(storedTab);
-  const [recent, setRecent] = useState<Recent[]>([]);
   const searchRef = useRef<HTMLInputElement>(null);
   const givenRef = useRef<HTMLInputElement>(null);
   const linesRef = useRef<HTMLDivElement>(null);
   const payRef = useRef<HTMLDivElement>(null);
   const sureBig = useRef('');
+  const lastAdd = useRef(0);
+  // when the ticket last changed, and the lines left there for a long time:
+  // whatever comes next is someone else's
+  const touched = useRef(restored.touched ?? Date.now());
+  const [left, setLeft] = useState<string[]>(restored.left ?? []);
   const reqSeq = useRef(0);
   const openedAt = useRef(0);
   const burst = useRef({ text: '', last: 0, fast: 0, given: '' });
@@ -438,8 +461,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [opening, setOpening] = useState(false);
 
   const loadDay = useCallback(() => {
-    call<DaySummary | null>('day.totals')
-      .then(setDay)
+    const date = isoDate(new Date());
+    call<DayList>('day.list', { from: date, to: date })
+      .then(setToday)
       .catch(() => {});
   }, []);
 
@@ -454,12 +478,24 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   // survives a crash or a power cut mid-sale
   useEffect(() => {
+    if (!lines.length) setLeft([]);
     try {
-      localStorage.setItem(cartKey, JSON.stringify({ saleId: saleId.current, lines, fixing }));
+      localStorage.setItem(cartKey, JSON.stringify({ saleId: saleId.current, lines, fixing, touched: touched.current, left }));
     } catch {
       // storage unavailable: the cart simply isn't restored
     }
-  }, [lines, fixing, cartKey]);
+  }, [lines, fixing, left, cartKey]);
+
+  // a ticket nobody has touched for a while is marked, so the next customer's
+  // things never end up on it unnoticed
+  useEffect(() => {
+    const look = () => {
+      if (Date.now() - touched.current > FORGOTTEN) setLeft((cur) => (cur.length ? cur : linesNow.current.map((l) => l.key)));
+    };
+    look();
+    const t = setInterval(look, 20_000);
+    return () => clearInterval(t);
+  }, []);
 
   // Tiquet closed between charging and clearing the screen: the cart came
   // back, but the core already has its ticket
@@ -478,14 +514,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       })
       .catch(() => {});
   }, [restored, toast]);
-
-  const loadRecent = useCallback(() => {
-    call<Recent[]>('products.recent')
-      .then(setRecent)
-      .catch(() => {});
-  }, []);
-
-  useEffect(loadRecent, [loadRecent, products]);
 
   const loadTill = useCallback(() => {
     call<CashDrawer>('cash.state')
@@ -509,12 +537,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   useEffect(() => {
     try {
-      localStorage.setItem(TAB_KEY, tab);
       localStorage.setItem(PRINT_KEY, printOn ? '1' : '0');
     } catch {
       // the choice just will not be remembered
     }
-  }, [tab, printOn]);
+  }, [printOn]);
 
   const catalogue = useMemo(() => index(products), [products]);
   const stacked = useMemo(() => [...lines].reverse(), [lines]);
@@ -528,7 +555,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     }
     return search(catalogue, query).filter((o) => (o.kind !== 'recharge' || settings.showRecharge) && (o.kind !== 'expense' || settings.showExpense));
   }, [catalogue, query, lines, settings.showRecharge, settings.showExpense]);
-  useEffect(() => setHi(0), [query]);
+  useEffect(() => setHi(sure(options, query)), [options, query]);
+
+  // the list hangs over the box, so what is chosen may need bringing into view
+  useEffect(() => {
+    document.getElementById(`opt-${hi}`)?.scrollIntoView({ block: 'nearest' });
+  }, [hi]);
 
   const tendered = method === 'cash' ? parseMoney(given, 999_999_999) : null;
   const payload = lines.map(({ productId, name, qty, unitCents, vatBp, repairId }) => ({ productId, name, qty, unitCents, vatBp, repairId }));
@@ -611,9 +643,13 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const commit = (next: CartLine[]) => {
     history.current.push(lines);
     if (history.current.length > 60) history.current.shift();
+    touched.current = Date.now();
     setLines(next);
   };
-  const pulse = (key: string) => setFlash((f) => ({ key, n: (f?.n ?? 0) + 1 }));
+  const pulse = (key: string) => {
+    lastAdd.current = performance.now();
+    setFlash((f) => ({ key, n: (f?.n ?? 0) + 1 }));
+  };
   const target = () => lines.find((l) => l.key === sel) ?? lines[lines.length - 1];
 
   const undo = () => {
@@ -624,7 +660,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   };
 
   const addProduct = (p: Product, qty = 1) => {
-    const same = p.priceCents !== 0 ? lines.find((l) => l.productId === p.id && l.unitCents === p.priceCents) : undefined;
+    const same = p.priceCents !== 0 ? lines.find((l) => l.productId === p.id && l.unitCents === p.priceCents && !left.includes(l.key)) : undefined;
     if (same) {
       commit(toEnd(lines, { ...same, qty: Math.min(999, same.qty + qty) }));
       setSel(same.key);
@@ -647,7 +683,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       const same = next.find((l) =>
         d.repairId
           ? l.repairId === d.repairId
-          : !l.repairId && l.name === d.name && l.unitCents === d.unitCents && l.vatBp === d.vatBp && (l.productId ?? null) === (d.productId ?? null),
+          : !l.repairId && !left.includes(l.key) && l.name === d.name && l.unitCents === d.unitCents && l.vatBp === d.vatBp && (l.productId ?? null) === (d.productId ?? null),
       );
       if (same && d.repairId) {
         lastKey = same.key;
@@ -675,14 +711,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     vatBp: l.vatBp,
     productId: l.productId ?? undefined,
   });
-
-  // the same items again, e.g. a customer buying what they bought last time
-  const repeat = (t: TicketRecord) => {
-    addMany(t.lines.filter((l) => l.qty > 0 && !l.repairId).map(toDraft));
-    toast.ok(`${tr('Añadidos los artículos de', 'Added the items from')} ${t.number}`);
-  };
-  // a repair is handed back once; there is nothing in it to sell again
-  const repeatable = (t: TicketRecord) => t.lines.some((l) => l.qty > 0 && !l.repairId);
 
   const handled = useRef(0);
   useEffect(() => {
@@ -721,6 +749,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   };
 
   const pick = (o: Option) => {
+    lastAdd.current = performance.now();
     if (o.kind === 'expense' || o.kind === 'recharge') {
       // a typo of 1000 for 10,00 is easy: a big amount takes a second Enter
       const key = `${o.kind}${o.cents}`;
@@ -798,13 +827,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     return out;
   };
 
-  const bump = (d: number) => {
-    const t = target();
-    if (!t) return;
-    setQty(t.key, t.qty + d);
-    setSel(t.key);
-  };
-
   const moveSel = (d: number) => {
     if (!lines.length) return;
     const i = stacked.findIndex((l) => l.key === sel);
@@ -863,12 +885,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     searchRef.current?.focus();
   }, []);
 
+  // it starts with an amount only if one was just typed in the box
   const openRecharge = () => {
     const typed = parseMoney(query.trim());
-    // an amount typed on the ticket is what the recharge is for
-    const fromCart = !typed && lines.length > 0 && lines.every((l) => !l.productId && !l.repairId && l.unitCents > 0);
     setQuery('');
-    setRecharge({ cents: typed && typed > 0 ? typed : fromCart ? total : 0, fromCart });
+    setRecharge(typed && typed > 0 ? typed : 0);
   };
 
   const openExpense = () => {
@@ -938,6 +959,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       history.current = [];
       saleId.current = newSaleId();
       const next = cartFromScans(pendingScans.current.splice(0));
+      touched.current = Date.now();
       setLines(next);
       setSel(next[next.length - 1]?.key ?? null);
       setPaying(false);
@@ -957,7 +979,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         if (r.printed) refreshPrinter();
       }
       onSold();
-      loadRecent();
       loadDay();
     } catch (e) {
       if (e instanceof ApiError && e.code === 'E_CLOCK') setClock({ last: e.detail, charge: c });
@@ -983,32 +1004,55 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     }
   };
 
+  // charged by mistake: the sale goes, and what was on it comes back to the
+  // ticket to be charged properly
+  const undoSale = async (t: TicketRecord) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await call('tickets.void', { id: t.id, reason: 'Cobrada por error' });
+      setLast(null);
+      touched.current = Date.now();
+      setLines(t.lines.map((l) => ({ key: uid(), productId: l.productId ?? undefined, name: l.name, qty: l.qty, unitCents: l.unitCents, vatBp: l.vatBp })));
+      toast.info(`${t.number} ${tr('borrada: sus artículos vuelven al ticket', 'deleted: its items are back on the ticket')}`);
+      onSold();
+      loadDay();
+    } catch (e) {
+      toast.error(errorText(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // the window's Enter and its buttons, once everything in it adds up
   const confirmPay = (print: boolean) => {
     if (!blocked) finish({ method, machine: method === 'card' ? machine || null : null, tendered, print, invoice });
   };
 
   const onSearchKey = (e: ReactKey<HTMLInputElement>) => {
-    if (e.key === 'ArrowDown') {
+    // the list opens upwards with the best match next to the box
+    if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (query) setHi((h) => Math.min(h + 1, options.length - 1));
-      else moveSel(1);
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      if (query) setHi((h) => Math.max(h - 1, 0));
       else moveSel(-1);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (query) setHi((h) => Math.max(h - 1, -1));
+      else moveSel(1);
     } else if (e.key === 'Enter') {
       e.preventDefault();
+      if (e.repeat) return;
       const q = query.trim();
       if (!q) {
-        openPay();
+        if (performance.now() - lastAdd.current > AFTER_ADD) openPay();
         return;
       }
-      const o = options[hi] ?? options[0];
+      const o = options[hi];
       if (o) {
         pick(o);
         return;
       }
+      if (options.length) return;
       // keep what was typed or scanned visible, but selected, so the next
       // scan replaces it instead of appending to it
       e.currentTarget.select();
@@ -1020,9 +1064,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     } else if (e.key === 'Escape' && query) {
       e.preventDefault();
       setQuery('');
-    } else if (!query && (e.code === 'NumpadAdd' || e.code === 'NumpadSubtract')) {
-      e.preventDefault();
-      bump(e.code === 'NumpadAdd' ? 1 : -1);
     } else if (!query && e.key === 'Delete') {
       e.preventDefault();
       const t = target();
@@ -1066,7 +1107,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
             return;
           }
           // the Enter that opened the dialog, or a scanner's trailing one
-          if (e.repeat || busy || now - openedAt.current < 400) return;
+          if (e.repeat || busy || now - openedAt.current < 500) return;
           confirmPay(e.shiftKey ? !printOn : printOn);
           return;
         }
@@ -1136,15 +1177,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  // tiles keep their place between sales so cashiers can rely on muscle memory;
-  // only something new takes the first place
-  const everything = useMemo(() => [...products].sort(productOrder(settings.productOrder === 'az')), [products, settings.productOrder]);
-  const favs = useMemo(() => everything.filter((p) => p.favorite), [everything]);
-  const tabs: { id: Tab; label: string; icon: typeof Star; count: number }[] = [
-    { id: 'recent', label: tr('Recientes', 'Recent'), icon: History, count: recent.length },
-    { id: 'fav', label: tr('Favoritos', 'Favourites'), icon: Star, count: favs.length },
-    { id: 'all', label: tr('Todos', 'All'), icon: LayoutGrid, count: products.length },
-  ];
   const editing = item && item !== 'add' ? lines.find((l) => l.key === item) : undefined;
 
   const paid = last?.ticket;
@@ -1154,6 +1186,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   return (
     <div className="sale" hidden={!active}>
       <section className="sale-main">
+        <Board rows={today?.rows ?? []} settings={settings} />
+
+        {day && <DayStrip s={day} settings={settings} />}
+
         <div className="bar-row">
           <div className="bar">
             <div className="bar-box">
@@ -1180,7 +1216,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
               )}
             </div>
             {query.trim() && (
-              <div className="dropdown" role="listbox" id="search-options">
+              <div className="dropdown up" role="listbox" id="search-options">
+                {hi < 0 && options.length > 1 && <div className="opt-hint">{tr('Hay varios: toca el que sea, o usa ↑ y Enter.', 'Several match: tap one, or use ↑ and Enter.')}</div>}
                 {options.length === 0 && (
                   <div className="opt-empty">
                     {/^\d{6,}$/.test(query.trim())
@@ -1195,11 +1232,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                     role="option"
                     aria-selected={i === hi}
                     className={`opt${i === hi ? ' hi' : ''}`}
-                    onMouseDown={(e) => {
-                      e.preventDefault();
-                      pick(o);
-                    }}
-                    onMouseEnter={() => setHi(i)}
+                    onMouseDown={keep}
+                    onClick={() => pick(o)}
                   >
                     {o.kind === 'product' && (
                       <>
@@ -1255,55 +1289,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
             <kbd>F4</kbd>
           </button>
         </div>
-
-        <div className="browse">
-          <div className="browse-tabs" role="tablist" aria-label={tr('Productos', 'Products')}>
-            {tabs.map((t) => (
-              <button key={t.id} role="tab" aria-selected={tab === t.id} className={tab === t.id ? 'on' : ''} onMouseDown={keep} onClick={() => setTab(t.id)}>
-                <t.icon size={15} />
-                {t.label}
-                {t.count > 0 && <small>{t.count}</small>}
-              </button>
-            ))}
-          </div>
-          <div className="tiles" role="tabpanel">
-            {tab === 'recent' &&
-              recent.map((r) => (
-                <button
-                  key={`${r.name}-${r.unitCents}-${r.vatBp}`}
-                  className="tile"
-                  onMouseDown={keep}
-                  onClick={() => addMany([toDraft({ ...r, qty: 1 })])}
-                  title={`${tr('Vendido', 'Sold')} ${r.times} ${r.times === 1 ? tr('vez', 'time') : tr('veces', 'times')}`}
-                >
-                  <span className="tile-name">{r.name}</span>
-                  <span className="tile-meta">
-                    <b>{eur(r.unitCents)}</b>
-                    {!r.productId && <small>{tr('libre', 'custom')}</small>}
-                  </span>
-                </button>
-              ))}
-            {tab !== 'recent' &&
-              (tab === 'fav' ? favs : everything.slice(0, ALL_SHOWN)).map((p) => (
-                <button key={p.id} className={`tile${p.favorite ? ' fav' : ''}`} onMouseDown={keep} onClick={() => addProduct(p)}>
-                  <span className="tile-name">{p.name}</span>
-                  <span className="tile-meta">
-                    {p.priceCents ? <b>{eur(p.priceCents)}</b> : <small>{tr('Precio libre', 'Open price')}</small>}
-                  </span>
-                </button>
-              ))}
-            {tab === 'recent' && recent.length === 0 && <p className="tiles-empty">{tr('Aquí saldrá lo último que vendas, para repetirlo con un toque.', 'What you sell shows up here, to sell it again with one tap.')}</p>}
-            {tab === 'fav' && favs.length === 0 && (
-              <p className="tiles-empty">{tr('Marca productos con la estrella en Productos, o al añadir un artículo, para tenerlos aquí.', 'Star products in Products, or when adding an item, to have them here.')}</p>
-            )}
-            {tab === 'all' && products.length === 0 && <p className="tiles-empty">{tr('Aún no hay productos: añade un artículo y guárdalo como producto.', 'No products yet: add an item and save it as a product.')}</p>}
-            {tab === 'all' && products.length > ALL_SHOWN && (
-              <p className="tiles-empty">{tr(`Y ${products.length - ALL_SHOWN} más: búscalos arriba.`, `And ${products.length - ALL_SHOWN} more: search above.`)}</p>
-            )}
-          </div>
-        </div>
-
-        {day && <DayStrip s={day} settings={settings} onOpen={onDay} />}
       </section>
 
       <aside className="till">
@@ -1322,6 +1307,26 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           </div>
         </div>
 
+        {left.length > 0 && (
+          <div className="fixing left">
+            <History size={15} />
+            <span>{tr('Lo marcado es de antes, sin cobrar', 'What is marked is from earlier, unpaid')}</span>
+            <button
+              className="link"
+              onMouseDown={keep}
+              onClick={() => {
+                commit(lines.filter((l) => !left.includes(l.key)));
+                setLeft([]);
+              }}
+            >
+              {tr('Quitar', 'Remove')}
+            </button>
+            <button className="link" onMouseDown={keep} onClick={() => setLeft([])}>
+              {tr('Seguir', 'Keep it')}
+            </button>
+          </div>
+        )}
+
         {fixing && (
           <div className="fixing">
             <Pencil size={15} />
@@ -1336,7 +1341,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
         <div className="till-lines" ref={linesRef}>
           {stacked.map((l) => (
-            <div key={l.key} className={`ln${sel === l.key ? ' sel' : ''}`} onMouseDown={() => setSel(l.key)}>
+            <div key={l.key} className={`ln${sel === l.key ? ' sel' : ''}${left.includes(l.key) ? ' left' : ''}`} onMouseDown={() => setSel(l.key)}>
               {flash?.key === l.key && <i className="row-flash" key={flash.n} />}
               <button
                 className="ln-name"
@@ -1355,7 +1360,16 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                 <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty - 1)} disabled={l.qty <= 1 || !!l.repairId} aria-label={tr('Uno menos', 'One less')}>
                   <Minus size={15} />
                 </button>
-                <QtyInput qty={l.qty} onChange={(n) => setQty(l.key, n)} onExit={() => searchRef.current?.focus()} disabled={!!l.repairId} />
+                <QtyInput
+                  qty={l.qty}
+                  onChange={(n) => setQty(l.key, n)}
+                  onExit={() => searchRef.current?.focus()}
+                  onElse={(text) => {
+                    setQuery(text);
+                    searchRef.current?.focus();
+                  }}
+                  disabled={!!l.repairId}
+                />
                 <button onMouseDown={keep} onClick={() => setQty(l.key, l.qty + 1)} disabled={l.qty >= 999 || !!l.repairId} aria-label={tr('Uno más', 'One more')}>
                   <Plus size={15} />
                 </button>
@@ -1418,10 +1432,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                   <Send size={16} />
                   {tr('Enviar', 'Send')}
                 </button>
-                {repeatable(paid) && (
-                  <button className="btn" onMouseDown={keep} onClick={() => repeat(paid)} title={tr('Añadir los mismos artículos a una venta nueva', 'Add the same items to a new sale')}>
-                    <Repeat2 size={16} />
-                    {tr('Repetir', 'Repeat')}
+                {(admin || settings.bookStaffDelete) && paid.kind === 'sale' && paid.lines.every((l) => !l.repairId) && (
+                  <button className="btn" onMouseDown={keep} onClick={() => undoSale(paid)} disabled={busy} title={tr('Cobrada por error: se borra y sus artículos vuelven al ticket', 'Charged by mistake: it is deleted and its items come back to the ticket')}>
+                    <Undo2 size={16} />
+                    {tr('Deshacer', 'Undo')}
                   </button>
                 )}
               </div>
@@ -1431,7 +1445,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           {!lines.length && !paid && (
             <div className="till-empty">
               <ScanBarcode size={30} />
-              <p>{tr('Escribe, escanea o toca un producto.', 'Type, scan or tap a product.')}</p>
+              <p>{tr('Escribe o escanea abajo.', 'Type or scan below.')}</p>
             </div>
           )}
         </div>
@@ -1693,17 +1707,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
           {previewErr && <p className="form-error">{previewErr}</p>}
         </Modal>
       )}
-      {recharge && (
+      {recharge !== null && (
         <RechargeModal
           settings={settings}
-          cents={recharge.cents}
+          cents={recharge}
           onSave={saveEntry}
-          onClose={(saved) => {
-            if (saved && recharge.fromCart) {
-              history.current = [];
-              setLines([]);
-              setSel(null);
-            }
+          onClose={() => {
             setRecharge(null);
             searchRef.current?.focus();
           }}

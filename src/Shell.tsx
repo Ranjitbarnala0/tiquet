@@ -374,7 +374,6 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
             onSold={loadProducts}
             onSetupPrinter={setupPrinter}
             onBusy={setSaleBusy}
-            onDay={() => go('day')}
           />
           {screen === 'day' && (
             <Day

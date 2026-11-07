@@ -368,7 +368,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 label={tr('Reparaciones', 'Repairs')}
                 hint={tr('Apagado, desaparece de la barra de la izquierda, para tiendas que solo venden.', 'Off, it leaves the bar on the left, for shops that only sell.')}
               />
-              <Field label={tr('Orden de los productos', 'Order of the products')} hint={tr('En Venta y en Productos. Lo que se vende se ve siempre en Recientes, por hora.', 'In Sale and Products. What is sold always shows in Recent, by time.')}>
+              <Field label={tr('Orden de los productos', 'Order of the products')} hint={tr('En la lista de Productos', 'In the Products list')}>
                 <Segmented
                   value={d.productOrder}
                   onChange={(v) => set('productOrder', v)}

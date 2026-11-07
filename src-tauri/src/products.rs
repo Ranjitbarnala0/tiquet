@@ -26,35 +26,8 @@ fn yes() -> bool {
     true
 }
 
-#[derive(Serialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct Recent {
-    pub product_id: Option<i64>,
-    pub name: String,
-    pub unit_cents: i64,
-    pub vat_bp: i64,
-    pub at: String,
-    pub times: i64,
-}
-
 // What was sold lately, from the catalogue or typed by hand, newest first:
 // one tap sells it again at the same price.
-pub fn recent(conn: &Connection, limit: i64) -> Result<Vec<Recent>> {
-    let mut stmt = conn.prepare(
-        "SELECT CASE WHEN p.active = 1 THEN l.product_id END, l.name, l.unit_cents, l.vat_bp, MAX(t.issued_at), COUNT(*)
-         FROM ticket_lines l JOIN tickets t ON t.id = l.ticket_id LEFT JOIN products p ON p.id = l.product_id
-         WHERE t.kind = 'sale' AND t.training = 0 AND t.voided_at IS NULL AND l.unit_cents > 0 AND l.repair_id IS NULL
-         GROUP BY l.name, l.unit_cents, l.vat_bp
-         ORDER BY MAX(t.id) DESC LIMIT ?1",
-    )?;
-    let rows = stmt
-        .query_map([limit.clamp(1, 60)], |r| {
-            Ok(Recent { product_id: r.get(0)?, name: r.get(1)?, unit_cents: r.get(2)?, vat_bp: r.get(3)?, at: r.get(4)?, times: r.get(5)? })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows)
-}
-
 // A product never sold goes for good. One that is on tickets is archived
 // instead, so those tickets and the reports keep its name. Returns whether it
 // was really deleted.

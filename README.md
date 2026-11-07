@@ -32,9 +32,10 @@ Picking a printer from the list sets the kind: a receipt printer prints raw, any
 
 ## What it does
 
-- **Selling at keyboard speed.** One search box for everything: type a name, scan a barcode, `3*cable` for three units, `funda 12,50` for an item at any price, or just `12,50`. Enter adds, F12 charges, Ctrl+Z undoes.
+- **Selling at keyboard speed.** One box for everything, at the bottom of the page: type a name, scan a barcode, `3*cable` for three units, `funda 12,50` for an item at any price, or just `12,50`. Enter adds, F12 charges, Ctrl+Z undoes.
+- **Nothing added by accident.** The main page has no product buttons. What is typed as money is money, whatever products contain those digits, and a word that fits several products selects nothing until someone chooses. A second Enter does not charge. A ticket left unpaid is marked, and the next customer's items stay apart from it. **Deshacer** after a sale deletes it and puts its items back on the ticket.
 - **Anything, by hand.** The big **+ Artículo** button (F4), or the card in the middle of an empty ticket, adds any item with its own name, price, quantity and VAT, and can save it as a product on the way. Tapping a line changes its name, price, quantity or VAT, and can update the product's price too.
-- **Products at hand.** Beside the ticket: **Recientes** (what was sold lately, catalogue or not), **Favoritos** and **Todos**, one tap to add, the last added first (or alphabetical, in Ajustes). On the ticket the last thing added is always on top. **Repetir** puts the items of any earlier ticket into a new sale.
+- **The day stacking up.** Above the box, the day's totals; above them, the day itself in columns: cash, card, Bizum, recharges and expenses, the newest on top. It only shows: nothing there can be tapped. On the ticket the last thing added is always on top. **Repetir** in **Hoy** puts the items of any earlier ticket into a new sale.
 - **Exact preview.** The ticket on the right is rendered from the same lines that are sent to the printer, so what you see is what prints, including change and VAT.
 - **Payments.** Cash with quick amounts and change, card, Bizum. Opens the cash drawer on cash sales. A barcode scanned while the payment window is open adds the item; it never confirms a payment.
 - **Tickets that cannot be edited.** Numbered per year without gaps (`T2026-000001`), printed or not. Issued tickets can be reprinted or voided, never edited or erased; the database enforces it.
@@ -62,13 +63,16 @@ Picking a printer from the list sets the kind: a receipt printer prints raw, any
 
 | Key | Action |
 | --- | --- |
-| Enter | Add the highlighted result; on an empty search, charge |
+| Enter | Add what is selected in the list; on an empty box, charge |
+| ↑ / ↓ | Choose in the list, which opens upwards from the box |
 | F12 | Charge |
+| F9 / F10 | Charge in cash / by card at once |
+| F7 / F8 | Recharge / expense |
+| F6 | Print the ticket or not |
 | F4 | Add an item by hand |
 | F1 / F2 / F3 | Cash / card / Bizum while charging |
 | Enter / Shift+Enter | Print the ticket / save without printing |
 | Ctrl+Z | Undo the last change to the ticket |
-| Numpad + / - | Change the quantity of the selected line |
 | Delete | Remove the selected line |
 | F2 | Focus the search box |
 

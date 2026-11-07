@@ -1,10 +1,22 @@
-Download `Tiquet_1.9.2_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.10.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.9.2: **everything stacks by time, and Hoy keeps things apart.**
+New in 1.10.0: **a new main page, where nothing gets added by accident.**
+
+- **No more product buttons.** Recientes, Favoritos and Todos are gone. Items come in through the box, now at the bottom, with the day's totals right above it. The right side is the same.
+- **The day stacks up in their place:** columns for cash, card, Bizum, recharges and expenses, the newest on top. They only show: nothing there can be tapped.
+- **What you type as money is money.** Typing 10 used to select the first product with a 10 in its name, at its own price. Now it is 10,00 €.
+- **Nothing is selected for you.** A word that fits several products selects none until you choose. The list opens upwards, the best match next to the box.
+- **A second Enter does nothing.** It used to open the charge window. Holding Enter, or a scanner sending it twice, is the same.
+- **Numpad + no longer changes a quantity** without anyone seeing, and **Recarga no longer starts with the amount of the ticket** and then empties it.
+- **A forgotten ticket is marked.** After 10 minutes without being touched its lines turn amber, and what is added next stays apart. **Quitar** removes only those lines.
+- **Charged by mistake?** **Deshacer**, right after the sale, deletes it and puts its items back on the ticket.
+- **A barcode scanned with the quantity box selected** goes to the box, not into the quantity.
+
+Also new since 1.9.1: **everything stacks by time, and Hoy keeps things apart.**
 
 - **On the ticket the last thing added is on top.** Adding the same item again moves its line to the top. The printed ticket keeps the order things were added.
 - **Products: the last added first,** in **Todos**, **Favoritos** and **Productos**. **Ajustes > Venta** can make them alphabetical.

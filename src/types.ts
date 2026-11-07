@@ -168,15 +168,6 @@ export interface SaleLine {
   repairId?: number;
 }
 
-export interface Recent {
-  productId: number | null;
-  name: string;
-  unitCents: number;
-  vatBp: number;
-  at: string;
-  times: number;
-}
-
 export interface CartLine extends SaleLine {
   key: string;
 }
