@@ -26,6 +26,9 @@ export interface Boot {
   session: User | null;
   version: string;
   autoUpdate: boolean;
+  // several PCs in one shop: this one alone, the main till, or one that
+  // sells with the main till's data
+  lan?: { role: 'single' | 'main' | 'secondary'; shop?: string; addr?: string; down?: boolean } | null;
 }
 
 // a card terminal or a recharge machine, named by the shop
@@ -106,6 +109,9 @@ export interface Settings {
   autostart: boolean;
   fullscreen: boolean;
   repairTerms: string;
+  // this PC's printer for A4 invoices; empty prints them as receipts
+  invoicePrinter: string;
+  invoiceTerms: string;
 }
 
 export interface Customer {
@@ -336,6 +342,10 @@ export interface RepairEvent {
   detail: { fields?: string[]; estimateFrom?: number | null; estimateTo?: number | null; ticket?: string; reason?: string } | null;
 }
 
+// what is paid of a repair: everything, a part (or something and no price
+// yet), nothing, nothing and no price yet; none once cancelled
+export type PayState = 'paid' | 'partial' | 'unpaid' | 'unpriced' | 'none';
+
 export interface Repair extends RepairData {
   id: number;
   number: string;
@@ -352,6 +362,7 @@ export interface Repair extends RepairData {
   cancelReason: string | null;
   lineName: string;
   events: RepairEvent[];
+  pay: PayState;
 }
 
 export interface RepairSummary {
@@ -363,6 +374,9 @@ export interface RepairSummary {
   device: string;
   status: RepairStatus;
   estimateCents: number | null;
+  depositCents: number;
+  dueCents: number | null;
+  pay: PayState;
 }
 
 export interface RepairDetail {

@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import { BadgeCheck, CalendarDays, FlaskConical, Lock, Maximize2, Minimize2, Package, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Wrench } from 'lucide-react';
+import { BadgeCheck, CalendarDays, FileText, FlaskConical, Lock, Maximize2, Minimize2, Package, Settings as SettingsIcon, ShoppingBag, TriangleAlert, Wrench } from 'lucide-react';
 import { call, native } from './api';
 import { Day, type DayView } from './Day';
 import { initials } from './format';
 import { errorText, tr, type Lang } from './i18n';
+import { Invoices } from './Invoices';
+import { LicenseBanner, useLicense } from './License';
 import { Products } from './Products';
 import { Repairs } from './Repairs';
 import { Sale } from './Sale';
@@ -16,8 +18,8 @@ import { Mark, Modal } from './ui';
 import { UpdateBar, useUpdate } from './Update';
 import { sendError, stuck } from './Verifactu';
 
-type Screen = 'sale' | 'day' | 'repairs' | 'products' | 'settings';
-export type SettingsTab = 'shop' | 'sale' | 'machines' | 'ticket' | 'printer' | 'mail' | 'users' | 'data' | 'verifactu';
+type Screen = 'sale' | 'day' | 'invoices' | 'repairs' | 'products' | 'settings';
+export type SettingsTab = 'shop' | 'sale' | 'machines' | 'ticket' | 'printer' | 'mail' | 'users' | 'lan' | 'data' | 'verifactu';
 
 const VERSION_KEY = 'tiquet.version';
 
@@ -48,7 +50,8 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const [saleBusy, setSaleBusy] = useState(false);
   // whoever is signed in carries on after the update, with no password to type
   const keepSession = useCallback(() => call('session.keep'), []);
-  const updates = useUpdate(saleBusy, { hold: settingsDirty, auto: !!settings?.autoUpdate, before: keepSession });
+  const license = useLicense(true);
+  const updates = useUpdate(saleBusy, { hold: settingsDirty, auto: !!settings?.autoUpdate, before: keepSession, force: !!license.state?.forceUpdate });
   const [full, setFull] = useState(false);
   const admin = user.role === 'admin';
 
@@ -283,6 +286,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const nav: { id: Screen; label: string; icon: typeof ShoppingBag }[] = [
     { id: 'sale', label: tr('Venta', 'Sale'), icon: ShoppingBag },
     { id: 'day', label: tr('Hoy', 'Today'), icon: CalendarDays },
+    { id: 'invoices', label: tr('Facturas', 'Invoices'), icon: FileText },
   ];
   if (settings.showRepairs) nav.push({ id: 'repairs', label: tr('Reparaciones', 'Repairs'), icon: Wrench });
   if (admin) {
@@ -325,6 +329,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
       </aside>
       <div className="stage">
         <div className="bars">
+          <LicenseBanner l={license} />
           <UpdateBar u={updates} />
           {vf && stuck(vf) && (
             <div className={`vf-bar${vf.problems.length > 0 ? ' bad' : ''}`} role="status">
@@ -391,6 +396,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
               }}
             />
           )}
+          {screen === 'invoices' && <Invoices settings={settings} products={products} onSetupPrinter={setupPrinter} />}
           {screen === 'repairs' && (
             <Repairs
               user={user}

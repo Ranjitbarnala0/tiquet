@@ -260,6 +260,18 @@ pub fn end_print(conn: &Connection, attempt: i64, status: &str, detail: Option<&
     Ok(())
 }
 
+// What another PC of the shop could not print: the ticket's latest print is
+// what really happened there. A print that may be partly on paper stays unknown.
+pub fn print_failed(conn: &Connection, number: &str, detail: &str) -> Result<()> {
+    let status = if detail == "E_PRINT:timeout" || detail.starts_with("E_PRINT:partial") { "unknown" } else { "failed" };
+    conn.execute(
+        "UPDATE ticket_prints SET status = ?2, detail = ?3
+         WHERE id = (SELECT MAX(p.id) FROM ticket_prints p JOIN tickets t ON t.id = p.ticket_id WHERE t.number = ?1)",
+        params![number, status, detail],
+    )?;
+    Ok(())
+}
+
 // the latest attempt for any ticket: what the printer pill reports between sales
 pub fn last_print(conn: &Connection) -> Result<Option<PrintRow>> {
     Ok(conn
@@ -955,6 +967,66 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
     rec.qr = verifactu::qr_of(conn, id)?;
     rec.aeat = verifactu::ticket_state(conn, id)?;
     Ok(rec)
+}
+
+#[derive(Deserialize, Default, Debug)]
+#[serde(default, rename_all = "camelCase")]
+pub struct InvoiceQuery {
+    pub q: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct InvoiceRow {
+    pub id: i64,
+    pub kind: String,
+    pub number: String,
+    pub issued_at: String,
+    pub user_name: String,
+    pub total_cents: i64,
+    pub payment_method: String,
+    pub voided: bool,
+    pub customer_name: String,
+    pub customer_nif: String,
+}
+
+// The full invoices, refunds of them included, newest first. Every word typed
+// must be in the number, the customer, the NIF or the amount.
+pub fn invoices(conn: &Connection, q: &InvoiceQuery) -> Result<Vec<InvoiceRow>> {
+    let limit = q.limit.unwrap_or(500).clamp(1, 5000) as usize;
+    let words: Vec<String> = q.q.as_deref().unwrap_or_default().to_lowercase().split_whitespace().map(|w| w.replace(',', ".")).collect();
+    let mut stmt = conn.prepare(
+        "SELECT id, kind, number, issued_at, user_name, total_cents, payment_method, voided_at IS NOT NULL,
+                COALESCE(customer_name, ''), COALESCE(customer_nif, '')
+         FROM tickets WHERE customer_name IS NOT NULL AND training = 0 ORDER BY id DESC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(InvoiceRow {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            number: r.get(2)?,
+            issued_at: r.get(3)?,
+            user_name: r.get(4)?,
+            total_cents: r.get(5)?,
+            payment_method: r.get(6)?,
+            voided: r.get(7)?,
+            customer_name: r.get(8)?,
+            customer_nif: r.get(9)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let row = row?;
+        let hay = format!("{} {} {} {:.2}", row.number, row.customer_name, row.customer_nif, row.total_cents.abs() as f64 / 100.0).to_lowercase();
+        if words.iter().all(|w| hay.contains(w.as_str())) {
+            out.push(row);
+            if out.len() == limit {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<TicketSummary>> {

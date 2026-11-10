@@ -478,7 +478,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   // survives a crash or a power cut mid-sale
   useEffect(() => {
-    if (!lines.length) setLeft([]);
+    // the same empty list when there is nothing to clear: a new one would
+    // run this again, and again, for as long as the ticket is empty
+    if (!lines.length) setLeft((cur) => (cur.length ? [] : cur));
     try {
       localStorage.setItem(cartKey, JSON.stringify({ saleId: saleId.current, lines, fixing, touched: touched.current, left }));
     } catch {

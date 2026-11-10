@@ -28,7 +28,12 @@ pub fn text(rec: &TicketRecord, s: &Settings) -> String {
     t
 }
 
+// a full invoice is an A4 page, like any invoice; a ticket keeps its own shape
 pub fn pdf(rec: &TicketRecord, s: &Settings, logo: Option<&Logo>) -> Vec<u8> {
+    if rec.customer.is_some() {
+        let opts = crate::invoice::InvoiceOpts { terms: s.invoice_terms.clone(), copy: copy(rec) };
+        return crate::invoice::to_pdf(&crate::invoice::invoice(rec, logo, &opts), &rec.number);
+    }
     let s = Settings { codepage: "cp1252".into(), ..s.clone() };
     let lines = layout::record(rec, &s, logo.is_some(), copy(rec));
     crate::pdf::render(&[Page { lines, logo: logo.cloned(), cols: s.columns as usize }], &rec.number)
@@ -39,11 +44,22 @@ pub fn file_name(number: &str) -> String {
     format!("Ticket-{safe}.pdf")
 }
 
-// Documents\Tiquet\Tickets\Ticket-T2026-000001.pdf
+// Factura-TF2026-000001.pdf for a full invoice
+pub fn file_name_of(rec: &TicketRecord) -> String {
+    let name = file_name(&rec.number);
+    if rec.customer.is_some() {
+        name.replacen("Ticket-", "Factura-", 1)
+    } else {
+        name
+    }
+}
+
+// Documents\Tiquet\Tickets\Ticket-T2026-000001.pdf, and the invoices in
+// Documents\Tiquet\Facturas
 pub fn save_pdf(rec: &TicketRecord, s: &Settings, logo: Option<&Logo>) -> crate::error::Result<PathBuf> {
-    let dir = crate::backup::documents().join("Tickets");
+    let dir = crate::backup::documents().join(if rec.customer.is_some() { "Facturas" } else { "Tickets" });
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(file_name(&rec.number));
+    let path = dir.join(file_name_of(rec));
     std::fs::write(&path, pdf(rec, s, logo))?;
     Ok(path)
 }

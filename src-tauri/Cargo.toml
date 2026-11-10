@@ -1,6 +1,6 @@
 [package]
 name = "tiquet"
-version = "1.10.0"
+version = "1.11.0"
 description = "Tiquet: caja y tickets para comercio"
 edition = "2021"
 rust-version = "1.77"
@@ -23,10 +23,11 @@ chrono = "0.4"
 base64 = "0.22"
 sha2 = "0.10"
 qrcodegen = "1.8"
+ed25519-dalek = "2"
 roxmltree = "0.20"
 dirs = "6"
 tauri-plugin-single-instance = "2"
-tiny_http = { version = "0.12", optional = true }
+tiny_http = "0.12"
 tauri-plugin-autostart = "2"
 zip = { version = "4.2.0", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tauri-plugin-updater = { version = "2.14", default-features = false, features = ["native-tls", "system-proxy"] }
@@ -54,7 +55,7 @@ windows-core = "0.62"
 schannel = "0.1"
 
 [features]
-devserver = ["dep:tiny_http"]
+devserver = []
 
 [[example]]
 name = "devserver"

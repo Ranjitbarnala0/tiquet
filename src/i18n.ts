@@ -25,6 +25,21 @@ const errors: Record<string, [string, string]> = {
   E_SESSION: ['La sesión ha caducado. Vuelve a entrar.', 'Session expired. Please sign in again.'],
   E_SESSION_IDLE: ['La caja se bloqueó porque nadie la usaba. Vuelve a entrar.', 'The till locked because nobody was using it. Sign in again.'],
   E_FORBIDDEN: ['Solo un administrador puede hacer esto', 'Only an administrator can do this'],
+  E_LAN_DOWN: [
+    'No se llega a la caja principal. Comprueba que está encendida, con Tiquet abierto y en la misma WiFi.',
+    'The main till cannot be reached. Check it is on, with Tiquet open and on the same WiFi.',
+  ],
+  E_LAN_NOT_FOUND: ['En esa dirección no hay ninguna caja Tiquet compartida.', 'There is no shared Tiquet till at that address.'],
+  E_LAN_SELF: ['Esa dirección es la de esta misma caja.', 'That address is this till itself.'],
+  E_LAN_ROLE: [
+    'Esta caja trabaja con otra caja principal: primero deja de trabajar con ella en Ajustes › Cajas.',
+    'This till works with another main till: stop working with it first in Settings › Tills.',
+  ],
+  E_LAN_HERE: ['Esto solo se puede hacer en la propia caja principal.', 'This can only be done on the main till itself.'],
+  E_LAN_PORT: [
+    'No se pudo abrir la conexión para los otros PC. ¿Hay otro Tiquet abierto en este PC? Cierra Tiquet y vuelve a abrirlo.',
+    'Could not open the connection for the other PCs. Is another Tiquet open on this PC? Close Tiquet and open it again.',
+  ],
   E_NOT_FOUND: ['No encontrado', 'Not found'],
   E_EMPTY: ['El ticket está vacío', 'The ticket is empty'],
   E_TENDERED: ['El importe entregado no cubre el total', 'The amount received does not cover the total'],
@@ -81,6 +96,19 @@ const errors: Record<string, [string, string]> = {
   ],
   E_REASON: ['Escribe el motivo', 'Enter a reason'],
   E_NO_PRINTER: ['No hay impresora configurada. Elígela en Ajustes.', 'No printer configured. Choose one in Settings.'],
+  E_LICENSE_LOCKED: [
+    'Tiquet está bloqueado en este PC: no se puede cobrar. Habla con quien te instaló Tiquet.',
+    'Tiquet is locked on this PC: nothing can be charged. Talk to whoever installed Tiquet for you.',
+  ],
+  E_LICENSE_LAPSED: [
+    'Este PC lleva demasiado tiempo sin conectarse. Conéctalo a internet y pulsa Comprobar, arriba.',
+    'This PC has been offline for too long. Connect it to the internet and press Check, at the top.',
+  ],
+  E_LICENSE_NEW: [
+    'Este PC aún no ha comprobado su licencia. Conéctalo a internet y pulsa Comprobar, arriba.',
+    'This PC has not checked its licence yet. Connect it to the internet and press Check, at the top.',
+  ],
+  E_NO_A4_PRINTER: ['Este PC no tiene impresora A4 para facturas. Elígela en Ajustes › Impresora.', 'This PC has no A4 printer for invoices. Choose one in Settings › Printer.'],
   E_PRINTER_MISSING: ['La impresora «{s}» no está instalada en este equipo', 'The printer "{s}" is not installed on this computer'],
   E_PRINTER_VIRTUAL: [
     '«{s}» es una impresora virtual (PDF, XPS…) y no imprime tickets. Elige la impresora de tickets en Ajustes.',

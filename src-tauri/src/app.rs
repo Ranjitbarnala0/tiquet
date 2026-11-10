@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -8,7 +8,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 use crate::state::{AppState, PrintSink};
-use crate::{aeat, api, backup, log, os, paths, settings, update};
+use crate::{aeat, api, backup, lan, log, os, paths, settings, update};
 
 // set once the window is on screen; a failure before that gets a message box
 // instead of a till that silently never opens
@@ -38,7 +38,29 @@ impl Shell {
         }
         let res = core.as_ref().map(|_| ()).map_err(|e| e.clone());
         *self.core.write().unwrap_or_else(|e| e.into_inner()) = core;
+        if res.is_ok() && self.report.is_none() {
+            if let Ok(c) = &*self.core() {
+                lan::resume_sharing(c);
+            }
+        }
         res
+    }
+}
+
+// the shop's other PCs reach the data through whatever core is open now
+struct Host(AppHandle);
+
+impl lan::Host for Host {
+    fn with(&self, f: &mut dyn FnMut(&AppState)) -> bool {
+        let Some(shell) = self.0.try_state::<Shell>() else { return false };
+        let core = shell.core();
+        match &*core {
+            Ok(st) => {
+                f(st);
+                true
+            }
+            Err(_) => false,
+        }
     }
 }
 
@@ -280,8 +302,9 @@ pub fn run() {
         .plugin(tauri_plugin_autostart::init(tauri_plugin_autostart::MacosLauncher::LaunchAgent, None))
         .plugin(tauri_plugin_updater::Builder::new().build());
     // a second double-click on the shortcut brings the open till to the front
-    // instead of starting another copy against the same database
-    if report.is_none() {
+    // instead of starting another copy against the same database (another
+    // set of data is a test, which may run beside it)
+    if report.is_none() && other_data.is_none() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _, _| focus(app)));
     }
     builder
@@ -300,6 +323,7 @@ pub fn run() {
                     // Windows' start-up list and the window alone
                     if let (Ok(c), false) = (&core, testing) {
                         aeat::start(dir.join("tiquet.db"));
+                        crate::license::start(dir.join("tiquet.db"));
                         prefs(app.handle(), c);
                     }
                     core
@@ -315,6 +339,13 @@ pub fn run() {
             });
             #[cfg(windows)]
             disable_browser_keys(app);
+            // the shop's other PCs, when this till answers them
+            if !testing {
+                lan::set_host(Arc::new(Host(app.handle().clone())));
+                if let Ok(c) = &*app.state::<Shell>().core() {
+                    lan::resume_sharing(c);
+                }
+            }
 
             let handle = app.handle().clone();
             std::thread::spawn(move || {

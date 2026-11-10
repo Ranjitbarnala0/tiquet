@@ -48,7 +48,13 @@ interface Opts {
   hold?: boolean;
   // the last thing to do before Tiquet closes to install
   before?: () => Promise<unknown>;
+  // the control server wants this PC on a newer version: it is looked for now
+  // and installs itself as soon as the till is free, whatever Ajustes says
+  force?: boolean;
 }
+
+// with an update asked for, the till is free sooner
+const FORCED_QUIET = 15_000;
 
 // Asks GitHub for a newer Tiquet a few seconds after start and every quarter
 // of an hour, whatever is on the screen: asking and downloading get in nobody's
@@ -56,7 +62,9 @@ interface Opts {
 // while and no window is open; a ticket on the screen only makes that wait
 // longer. Installing closes Tiquet; the installer runs silently and opens the
 // new version.
-export function useUpdate(ticket: boolean, { on = true, auto = false, quiet = QUIET, hold = false, before }: Opts = {}) {
+export function useUpdate(ticket: boolean, { on = true, auto: autoSet = false, quiet: quietSet = QUIET, hold = false, before, force = false }: Opts = {}) {
+  const auto = autoSet || force;
+  const quiet = force ? Math.min(quietSet, FORCED_QUIET) : quietSet;
   const toast = useToast();
   const [found, setFound] = useState<string | null>(null);
   const [later, setLater] = useState(false);
@@ -115,6 +123,11 @@ export function useUpdate(ticket: boolean, { on = true, auto = false, quiet = QU
     setDue(false);
     check();
   }, [due, check]);
+
+  // asked for by the control server: no need to wait for the next round
+  useEffect(() => {
+    if (native && on && force) setDue(true);
+  }, [on, force]);
 
   const run = useCallback(
     async (alone: boolean) => {
@@ -175,7 +188,7 @@ export function useUpdate(ticket: boolean, { on = true, auto = false, quiet = QU
     kinds.forEach((k) => window.addEventListener(k, touched, true));
     const t = setInterval(() => {
       if (holdNow.current || document.querySelector('.modal-back, .pay-back')) return;
-      if (Date.now() - seen.current < (ticketNow.current ? LEFT : quiet)) return;
+      if (Date.now() - seen.current < (ticketNow.current ? (force ? QUIET : LEFT) : quiet)) return;
       if (found) tried(found);
       run(true);
     }, 5000);
@@ -183,7 +196,7 @@ export function useUpdate(ticket: boolean, { on = true, auto = false, quiet = QU
       kinds.forEach((k) => window.removeEventListener(k, touched, true));
       clearInterval(t);
     };
-  }, [waiting, quiet, found, run]);
+  }, [waiting, quiet, found, run, force]);
 
   return { found, auto: alone, later, checking, upToDate, failed, installing, progress, check, install, hide: () => setLater(true) };
 }

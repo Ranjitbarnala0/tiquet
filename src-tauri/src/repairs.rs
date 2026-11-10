@@ -129,11 +129,27 @@ pub struct Repair {
     // as printed on its resguardo
     pub shop: ShopInfo,
     pub terms: String,
+    // pay_state
+    pub pay: String,
 }
 
 impl Repair {
     pub fn open(&self) -> bool {
         OPEN.contains(&self.status.as_str())
+    }
+}
+
+// What is paid of a repair, for the mark everyone sees: paid, partial (a part
+// paid, or something paid and no price yet), unpaid, unpriced (nothing paid
+// and no price), none (cancelled). One handed back was settled then.
+pub fn pay_state(status: &str, estimate: Option<i64>, held: i64) -> &'static str {
+    match (status, estimate) {
+        ("delivered", _) => "paid",
+        ("cancelled", _) => "none",
+        (_, Some(e)) if held >= e => "paid",
+        _ if held > 0 => "partial",
+        (_, Some(_)) => "unpaid",
+        (_, None) => "unpriced",
     }
 }
 
@@ -205,6 +221,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<Repair> {
                         events: Vec::new(),
                         shop: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
                         terms: r.get(18)?,
+                        pay: String::new(),
                     },
                     r.get::<_, Option<i64>>(19)?,
                     r.get::<_, Option<i64>>(20)?,
@@ -218,6 +235,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<Repair> {
     rep.deposit = deposit.map(|t| tickets::reference(conn, t)).transpose()?.flatten();
     rep.deposit_cents = held(conn, deposit)?;
     rep.due_cents = rep.data.estimate_cents.map(|e| e - rep.deposit_cents);
+    rep.pay = pay_state(&rep.status, rep.data.estimate_cents, rep.deposit_cents).into();
     rep.ticket = ticket.map(|t| tickets::reference(conn, t)).transpose()?.flatten();
     let mut stmt = conn.prepare("SELECT at, by_name, kind, status, detail FROM repair_events WHERE repair_id = ?1 ORDER BY id")?;
     rep.events = stmt
@@ -540,6 +558,7 @@ pub fn sketch(number: &str, at: &str, by: &str, s: &Settings, input: &RepairIn, 
         created_at: at.into(),
         created_by: by.into(),
         due_cents: data.estimate_cents.map(|e| e - deposit_cents),
+        pay: pay_state("received", data.estimate_cents, deposit_cents).into(),
         data,
         status: "received".into(),
         deposit: None,
@@ -559,6 +578,8 @@ pub fn sketch(number: &str, at: &str, by: &str, s: &Settings, input: &RepairIn, 
 pub struct ListQuery {
     // open (still in the shop, the default), all, or one status
     pub status: Option<String>,
+    // "due": something left to charge or no price yet; "paid": nothing left
+    pub pay: Option<String>,
     pub q: Option<String>,
     pub limit: Option<i64>,
 }
@@ -574,6 +595,11 @@ pub struct Summary {
     pub device: String,
     pub status: String,
     pub estimate_cents: Option<i64>,
+    // what the shop holds of what was paid in advance, what is left, and
+    // pay_state
+    pub deposit_cents: i64,
+    pub due_cents: Option<i64>,
+    pub pay: String,
 }
 
 // lower case and without accents, so "garcia" finds García
@@ -611,10 +637,17 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Summary>> {
     let words: Vec<&str> = needle.split_whitespace().collect();
     let limit = q.limit.unwrap_or(500).clamp(1, 2000) as usize;
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, number, created_at, customer_name, customer_phone, brand, model, colour, imei, status, estimate_cents
+        "SELECT id, number, created_at, customer_name, customer_phone, brand, model, colour, imei, status, estimate_cents,
+                COALESCE((SELECT CASE WHEN t.voided_at IS NULL
+                                      THEN t.total_cents + COALESCE((SELECT SUM(x.total_cents) FROM tickets x WHERE x.refund_of = t.id AND x.voided_at IS NULL), 0)
+                                      ELSE 0 END
+                          FROM tickets t WHERE t.id = repairs.deposit_ticket), 0)
          FROM repairs WHERE {filter} ORDER BY id DESC"
     ))?;
     let rows = stmt.query_map([], |r| {
+        let status: String = r.get(9)?;
+        let estimate: Option<i64> = r.get(10)?;
+        let held: i64 = r.get(11)?;
         Ok((
             Summary {
                 id: r.get(0)?,
@@ -623,15 +656,26 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Summary>> {
                 customer_name: r.get(3)?,
                 customer_phone: r.get(4)?,
                 device: [r.get::<_, String>(5)?, r.get(6)?, r.get(7)?].iter().filter(|x| !x.is_empty()).cloned().collect::<Vec<_>>().join(" "),
-                status: r.get(9)?,
-                estimate_cents: r.get(10)?,
+                pay: pay_state(&status, estimate, held).into(),
+                status,
+                estimate_cents: estimate,
+                deposit_cents: held,
+                due_cents: estimate.map(|e| e - held),
             },
             r.get::<_, String>(8)?,
         ))
     })?;
+    let pay = q.pay.as_deref().unwrap_or("any");
+    if !["any", "due", "paid"].contains(&pay) {
+        return fail("E_INVALID:pay");
+    }
     let mut out = Vec::new();
     for row in rows {
         let (s, imei) = row?;
+        let due = ["unpaid", "partial", "unpriced"].contains(&s.pay.as_str());
+        if (pay == "due" && !due) || (pay == "paid" && s.pay != "paid") {
+            continue;
+        }
         if !words.is_empty() {
             let hay = fold(&format!("{} {} {} {imei} {} {} {}", s.number, s.customer_name, s.customer_phone, s.device, digits(&s.customer_phone), digits(&imei)));
             if !words.iter().all(|w| hay.contains(w)) {
@@ -690,6 +734,43 @@ mod tests {
     // what Venta sends for "Entregar y cobrar"
     fn pickup(r: &Repair, cents: i64) -> SaleLine {
         SaleLine { name: "lo que sea".into(), qty: 3, unit_cents: cents, vat_bp: 2100, repair_id: Some(r.id), ..SaleLine::default() }
+    }
+
+    #[test]
+    fn everyone_sees_what_is_paid_and_what_is_left() {
+        let (mut conn, user, s) = setup();
+        let with = |conn: &mut Connection, estimate: Option<i64>, deposit: i64| {
+            let repair = RepairIn { estimate_cents: estimate, ..phone() };
+            create(conn, &user, &s, &NewRepair { repair, deposit_cents: deposit, ..NewRepair::default() }).unwrap().repair
+        };
+        let paid = with(&mut conn, Some(8000), 8000);
+        let part = with(&mut conn, Some(8000), 3000);
+        let none = with(&mut conn, Some(8000), 0);
+        let unpriced = with(&mut conn, None, 0);
+        let free = with(&mut conn, Some(0), 0);
+        let states: Vec<(&str, Option<i64>)> = [&paid, &part, &none, &unpriced, &free].iter().map(|r| (r.pay.as_str(), r.due_cents)).collect();
+        assert_eq!(states, [("paid", Some(0)), ("partial", Some(5000)), ("unpaid", Some(8000)), ("unpriced", None), ("paid", Some(0))]);
+
+        let ids = |pay: &str| -> Vec<i64> {
+            list(&conn, &ListQuery { pay: Some(pay.into()), ..ListQuery::default() }).unwrap().iter().map(|r| r.id).collect()
+        };
+        assert_eq!(ids("due"), [unpriced.id, none.id, part.id]);
+        assert_eq!(ids("paid"), [free.id, paid.id]);
+        let row = list(&conn, &ListQuery::default()).unwrap().into_iter().find(|r| r.id == part.id).unwrap();
+        assert_eq!((row.deposit_cents, row.due_cents, row.pay.as_str()), (3000, Some(5000), "partial"));
+
+        // a deposit ticket deleted in Hoy is money the shop no longer holds
+        let deposit = load(&conn, part.id).unwrap().deposit.unwrap();
+        tickets::void(&mut conn, deposit.id, &user.name, "error").unwrap();
+        assert_eq!(load(&conn, part.id).unwrap().pay, "unpaid");
+
+        // the paper says it as plainly
+        let text = |lines: Vec<crate::layout::Line>| {
+            lines.iter().filter_map(|l| if let crate::layout::Line::Text { text, .. } = l { Some(text.trim().to_string()) } else { None }).collect::<Vec<_>>()
+        };
+        assert!(text(crate::layout::resguardo(&paid, &s, false)).contains(&"*** PAGADO ***".to_string()));
+        assert!(text(crate::layout::resguardo(&none, &s, false)).contains(&"PENDIENTE: 80,00 €".to_string()));
+        assert!(text(crate::layout::repair_slip(&part, &s)).contains(&"COBRAR 50,00 €".to_string()));
     }
 
     #[test]
@@ -871,7 +952,7 @@ mod tests {
         let b = create(&mut conn, &user, &s, &NewRepair { repair: other, ..NewRepair::default() }).unwrap().repair;
         set_status(&mut conn, b.id, "Ana", "ready").unwrap();
         let find = |q: &str, status: Option<&str>| -> Vec<i64> {
-            list(&conn, &ListQuery { q: Some(q.into()), status: status.map(Into::into), limit: None }).unwrap().iter().map(|r| r.id).collect()
+            list(&conn, &ListQuery { q: Some(q.into()), status: status.map(Into::into), limit: None, pay: None }).unwrap().iter().map(|r| r.id).collect()
         };
         assert_eq!(find("", None), vec![b.id, a.id]);
         assert_eq!(find("garcia", None), vec![a.id]);

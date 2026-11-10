@@ -364,6 +364,16 @@ mod tls {
 
 pub use tls::certificates;
 
+// one HTTPS request with nobody's certificate, through Windows' own TLS: the
+// control server and the address of it
+pub fn https(host: &str, request: &[u8]) -> Result<Vec<u8>> {
+    tls::exchange(host, request, None)
+}
+
+pub fn reply(raw: &[u8]) -> Result<(u16, String)> {
+    http_reply(raw)
+}
+
 fn post(env: Env, body: &str, thumbprint: &str) -> Result<(u16, String)> {
     let host = env.host();
     let mut request = format!(

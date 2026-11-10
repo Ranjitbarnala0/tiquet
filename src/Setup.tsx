@@ -1,15 +1,18 @@
 import { useState, type FormEvent } from 'react';
-import { ArrowRight } from 'lucide-react';
+import { ArrowLeft, ArrowRight, Link2 } from 'lucide-react';
 import { call } from './api';
 import { errorText, tr, type Lang } from './i18n';
+import { JoinShop } from './Lan';
 import { spanishNif } from './nif';
 import { CodeView } from './Recovery';
 import { useToast } from './toast';
 import type { User } from './types';
 import { Field, LangSwitch, Mark, Toggle } from './ui';
 
-export function Setup({ lang, onLang, onDone }: { lang: Lang; onLang: (l: Lang) => void; onDone: (u: User) => void }) {
+export function Setup({ lang, onLang, onDone, onJoined }: { lang: Lang; onLang: (l: Lang) => void; onDone: (u: User) => void; onJoined: () => void }) {
   const toast = useToast();
+  // a second PC for a shop that already has Tiquet: no setup, it joins
+  const [joining, setJoining] = useState(false);
   const [f, setF] = useState({
     shopName: '',
     legalName: '',
@@ -60,6 +63,34 @@ export function Setup({ lang, onLang, onDone }: { lang: Lang; onLang: (l: Lang) 
     );
   }
 
+  if (joining) {
+    return (
+      <div className="onboard">
+        <div className="onboard-card">
+          <div className="onboard-top">
+            <div className="brand">
+              <Mark size={30} />
+              <span>Tiquet</span>
+            </div>
+            <LangSwitch lang={lang} onLang={onLang} />
+          </div>
+          <h1>{tr('Conectar a la caja de la tienda', 'Connect to the shop’s till')}</h1>
+          <p className="lede">
+            {tr(
+              'Este PC venderá con los datos de la caja principal: sus productos, sus usuarios, su numeración y su cajón. Se entra con un usuario y contraseña de esa caja.',
+              'This PC will sell with the main till’s data: its products, its users, its numbering and its drawer. You sign in with a user and password of that till.',
+            )}
+          </p>
+          <JoinShop onJoined={onJoined} />
+          <button type="button" className="btn btn-ghost" onClick={() => setJoining(false)}>
+            <ArrowLeft size={16} />
+            {tr('Volver: es la primera caja de la tienda', 'Back: this is the shop’s first till')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="onboard">
       <form className="onboard-card" onSubmit={submit}>
@@ -70,6 +101,14 @@ export function Setup({ lang, onLang, onDone }: { lang: Lang; onLang: (l: Lang) 
           </div>
           <LangSwitch lang={lang} onLang={onLang} />
         </div>
+        <button type="button" className="lan-offer" onClick={() => setJoining(true)}>
+          <Link2 size={20} />
+          <span>
+            <b>{tr('¿La tienda ya tiene Tiquet en otro PC?', 'Does the shop already have Tiquet on another PC?')}</b>
+            <small>{tr('Conecta este a esa caja y vende con sus mismos datos', 'Connect this one to that till and sell with the same data')}</small>
+          </span>
+          <ArrowRight size={18} />
+        </button>
         <h1>{tr('Configura tu comercio', 'Set up your shop')}</h1>
         <p className="lede">
           {tr(

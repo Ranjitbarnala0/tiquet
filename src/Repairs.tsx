@@ -10,11 +10,12 @@ import { Paper } from './Paper';
 import { RepairWhatsApp } from './Share';
 import { useToast } from './toast';
 import { cardMachines } from './machines';
-import type { Logo, Method, PLine, Repair, RepairCreated, RepairData, RepairDetail, RepairEvent, RepairStatus, RepairSummary, Settings, User } from './types';
+import type { Logo, Method, PayState, PLine, Repair, RepairCreated, RepairData, RepairDetail, RepairEvent, RepairStatus, RepairSummary, Settings, User } from './types';
 import { Drawer, Empty, Field, Modal, Segmented } from './ui';
 import { printerLabel } from './usePrinter';
 
-type Filter = 'open' | 'all' | RepairStatus;
+// due and paid: the ones still in the shop, by what is left to charge
+type Filter = 'open' | 'due' | 'paid' | 'all' | RepairStatus;
 
 // still in the shop
 const OPEN: RepairStatus[] = ['received', 'in_progress', 'ready', 'not_repaired'];
@@ -36,8 +37,42 @@ function StatusBadge({ s }: { s: RepairStatus }) {
   return <span className={`badge ${BADGE[s]}`}>{statusText(s)}</span>;
 }
 
+// paid or not, in letters nobody can miss
+function PayBadge({ pay, due }: { pay: PayState; due: number | null }) {
+  const left = due === null ? '' : ` ${eur(Math.max(0, due))}`;
+  switch (pay) {
+    case 'paid':
+      return <span className="pay-badge paid">{tr('PAGADO', 'PAID')}</span>;
+    case 'partial':
+      return <span className="pay-badge partial">{due === null ? tr('A CUENTA', 'PART PAID') : `${tr('FALTA', 'DUE')}${left}`}</span>;
+    case 'unpaid':
+      return <span className="pay-badge unpaid">{`${tr('SIN PAGAR', 'UNPAID')}${left}`}</span>;
+    case 'unpriced':
+      return <span className="pay-badge unpriced">{tr('SIN PRECIO', 'NO PRICE')}</span>;
+    default:
+      return null;
+  }
+}
+
+// the same, big, at the top of a repair still in the shop
+function PayBlock({ r }: { r: Repair }) {
+  const due = r.dueCents === null ? null : Math.max(0, r.dueCents);
+  const paid = r.depositCents > 0 ? ` · ${tr('pagado', 'paid')} ${eur(r.depositCents)}` : '';
+  const text: Record<PayState, string> = {
+    paid: tr('PAGADO: no queda nada por cobrar', 'PAID: nothing left to charge'),
+    partial: due === null ? `${tr('PAGADO A CUENTA', 'PART PAID')} ${eur(r.depositCents)} · ${tr('falta poner precio', 'no price yet')}` : `${tr('FALTA POR COBRAR', 'LEFT TO CHARGE')} ${eur(due)}${paid}`,
+    unpaid: `${tr('SIN PAGAR', 'UNPAID')} · ${tr('cobrar', 'charge')} ${eur(due ?? 0)} ${tr('al recoger', 'on pick-up')}`,
+    unpriced: tr('SIN PAGAR · aún no tiene precio', 'UNPAID · no price yet'),
+    none: '',
+  };
+  if (r.pay === 'none') return null;
+  return <div className={`pay-block ${r.pay}`}>{text[r.pay]}</div>;
+}
+
 const FILTERS: { id: Filter; label: () => string }[] = [
   { id: 'open', label: () => tr('En tienda', 'In the shop') },
+  { id: 'due', label: () => tr('Sin cobrar', 'To charge') },
+  { id: 'paid', label: () => tr('Pagadas', 'Paid') },
   ...OPEN.map((s) => ({ id: s, label: () => statusText(s) })),
   { id: 'delivered', label: () => statusText('delivered') },
   { id: 'cancelled', label: () => statusText('cancelled') },
@@ -400,6 +435,15 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
               </Field>
             )}
           </div>
+          {!repair && !badEstimate && estimate !== null && estimate > 0 && estimate <= 40_000 && depositCents !== estimate && (
+            <button type="button" className="pay-all" onClick={() => set('deposit', fmt(estimate))}>
+              <HandCoins size={16} />
+              {tr(`Lo paga todo ahora: ${eur(estimate)}`, `Paid in full now: ${eur(estimate)}`)}
+            </button>
+          )}
+          {!repair && !badEstimate && estimate !== null && estimate > 0 && depositCents === estimate && (
+            <p className="pay-block paid">{tr('PAGADO: el resguardo y la etiqueta lo dirán bien grande', 'PAID: the receipt and the tag will say so in big letters')}</p>
+          )}
           {!repair && depositCents > 0 && (
             <div className="repair-pay">
               <Segmented
@@ -590,7 +634,8 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
   // the filter no longer lists it
   const load = useCallback(
     (keep?: number) => {
-      call<RepairSummary[]>('repairs.list', { status: filter, q: q.trim() })
+      const byPay = filter === 'due' || filter === 'paid';
+      call<RepairSummary[]>('repairs.list', { status: byPay ? 'open' : filter, pay: byPay ? filter : undefined, q: q.trim() })
         .then((l) => {
           setList(l);
           setSelId((id) => keep ?? (id !== null && l.some((r) => r.id === id) ? id : l[0]?.id ?? null));
@@ -728,7 +773,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
               </div>
               <div className="ticket-row-side">
                 <StatusBadge s={s.status} />
-                {s.estimateCents !== null && <b>{eur(s.estimateCents)}</b>}
+                {OPEN.includes(s.status) ? <PayBadge pay={s.pay} due={s.dueCents} /> : s.estimateCents !== null && <b>{eur(s.estimateCents)}</b>}
               </div>
             </button>
           ))}
@@ -763,6 +808,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                     </>
                   )}
                 </p>
+                {open && <PayBlock r={r} />}
                 <p className="ref-note">
                   {tr('Presupuesto', 'Estimate')} <b>{r.estimateCents === null ? tr('pendiente', 'pending') : eur(r.estimateCents)}</b>
                   {r.deposit && (

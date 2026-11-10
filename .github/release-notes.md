@@ -1,10 +1,18 @@
-Download `Tiquet_1.10.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.11.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.10.0: **a new main page, where nothing gets added by accident.**
+New in 1.11.0: **several PCs in one shop, invoices on A4, and repairs that say what is paid.**
+
+- **Several PCs, one shop.** In **Ajustes > Cajas** turn on **Compartir esta caja**: this till keeps the data for all of them. On another PC of the shop, on the same WiFi, install Tiquet and press **¿La tienda ya tiene Tiquet en otro PC?** on its first screen: it finds the till by itself. Each person signs in with their own user and password and sells into the same day, the same numbering, the same drawer and the same **Hoy**. Each PC prints on its own printer, with its own paper. If the main till is switched off, the others say so, keep the ticket on the screen and carry on as soon as it is back.
+- **Facturas**, a new section on the left. **Nueva factura**: the customer, what is sold (a phone with its IMEI on the same line), how it is paid, and it comes out on an A4 page by itself. Each PC chooses its A4 printer in **Ajustes > Impresora**; without one, invoices print as before. An invoice made in **Venta** with **Factura** comes out on A4 too. Its PDF is the A4 page, kept in `Documentos\Tiquet\Facturas`, and that is what goes by email.
+- **Repairs say what is paid.** Every repair in the list shows **PAGADO**, **FALTA 50,00 €**, **SIN PAGAR 80,00 €** or **SIN PRECIO** in coloured letters, and the repair says it again at the top. **Sin cobrar** and **Pagadas** list just those. Paid in full when the phone is left: one tap on **Lo paga todo ahora**. The resguardo and the label on the phone print PAGADO, or what is left to charge, in big letters.
+- **The main page no longer keeps the PC busy.** Since 1.10.0, with nothing on the ticket, the page kept redrawing itself without end and used the processor for nothing. Fixed.
+- **Licence check.** Tiquet tells its supplier's server which PC it runs on, at start and every few hours: the shop's name and NIF, the PC's name, the version and how many tickets there are. Nothing about customers or what was sold. It lets the supplier push an update and control copies. Until that server is published it does nothing.
+
+Also new in 1.10.0: **a new main page, where nothing gets added by accident.**
 
 - **No more product buttons.** Recientes, Favoritos and Todos are gone. Items come in through the box, now at the bottom, with the day's totals right above it. The right side is the same.
 - **The day stacks up in their place:** columns for cash, card, Bizum, recharges and expenses, the newest on top. They only show: nothing there can be tapped.

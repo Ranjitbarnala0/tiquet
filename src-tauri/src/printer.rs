@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{fail, Error, Result};
 use crate::escpos::{self, Opts};
@@ -59,13 +59,16 @@ pub struct Port {
 
 // What a print is: the ESC/POS bytes for a receipt printer, and the same
 // documents as lines for a printer that prints pages through its driver.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Serialize, Deserialize)]
 pub struct Job {
     pub raw: Vec<u8>,
     pub pages: Vec<Page>,
+    // a full page (an A4 invoice) for the PC's page printer instead
+    #[serde(default)]
+    pub sheets: Vec<crate::invoice::Sheet>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Page {
     pub lines: Vec<Line>,
     pub logo: Option<Logo>,
@@ -74,7 +77,7 @@ pub struct Page {
 
 impl Job {
     pub fn raw(bytes: Vec<u8>) -> Job {
-        Job { raw: bytes, pages: Vec::new() }
+        Job { raw: bytes, ..Job::default() }
     }
 
     pub fn doc(lines: &[Line], logo: Option<&Logo>, o: &Opts) -> Job {
@@ -533,6 +536,11 @@ pub fn send(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) -> Result<Op
 
 // Ok(Some("W_SAVED:<path>")): a PDF or XPS writer saved the document there.
 pub fn send_job(sink: &PrintSink, s: &Settings, doc: &str, job: &Job) -> Result<Option<String>> {
+    // made for another PC of the shop: it goes back to be printed there
+    if let Some(c) = crate::state::caller() {
+        c.jobs.borrow_mut().push((doc.to_string(), job.clone()));
+        return Ok(None);
+    }
     let Some(to) = target(s) else {
         return fail("E_NO_PRINTER");
     };
@@ -609,10 +617,41 @@ fn on_lane(total: Duration, f: impl FnOnce() -> std::result::Result<Option<Strin
     }
 }
 
+// A full page, an A4 invoice, on the printer Ajustes gives for them: drawn
+// through its own driver, never anything that asks where to save. Made for
+// another PC of the shop, it goes back to be printed there.
+pub fn send_sheets(sink: &PrintSink, s: &Settings, doc: &str, sheets: &[crate::invoice::Sheet]) -> Result<Option<String>> {
+    if let Some(c) = crate::state::caller() {
+        c.jobs.borrow_mut().push((doc.to_string(), Job { sheets: sheets.to_vec(), ..Job::default() }));
+        return Ok(None);
+    }
+    let name = s.invoice_printer.trim().to_string();
+    if name.is_empty() {
+        return fail("E_NO_A4_PRINTER");
+    }
+    match sink {
+        PrintSink::Dir(dir) => {
+            std::fs::create_dir_all(dir)?;
+            let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%3f");
+            let safe: String = doc.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+            std::fs::write(dir.join(format!("{stamp}-{safe}-A4.pdf")), crate::invoice::to_pdf(sheets, doc))?;
+            Ok(None)
+        }
+        PrintSink::Spooler => {
+            let sheets = sheets.to_vec();
+            on_lane(DRAW + Duration::from_secs(5), move || crate::invoice::print(&name, &sheets, 1).map(|_| None).map_err(|e| e.0))
+        }
+    }
+}
+
 // For a drawer kick after a sale saved without printing: the sale does not
 // wait for it, and if the printer is off the job is cancelled, never left to
 // open the drawer later on its own.
 pub fn send_detached(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) {
+    if let Some(c) = crate::state::caller() {
+        c.jobs.borrow_mut().push((doc.to_string(), Job::raw(data.to_vec())));
+        return;
+    }
     let Some(to) = target(s) else { return };
     match sink {
         PrintSink::Dir(_) => {

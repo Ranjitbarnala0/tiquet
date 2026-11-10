@@ -26,6 +26,13 @@ export function onSessionLost(f: ((code: string) => void) | null) {
   lost = f;
 }
 
+// called when the main till of the shop stops answering this PC
+let down: (() => void) | null = null;
+
+export function onLanDown(f: (() => void) | null) {
+  down = f;
+}
+
 // In the app this goes over Tauri IPC; in a plain browser it hits the
 // devserver, which runs the same Rust handlers.
 export async function call<T = unknown>(cmd: string, args: object = {}): Promise<T> {
@@ -42,6 +49,7 @@ export async function call<T = unknown>(cmd: string, args: object = {}): Promise
   } catch (e) {
     const err = e instanceof ApiError ? e : toError(e);
     if (lost && (err.code === 'E_SESSION' || err.code === 'E_SESSION_IDLE')) lost(err.code);
+    if (down && err.code === 'E_LAN_DOWN') down();
     throw err;
   }
 }

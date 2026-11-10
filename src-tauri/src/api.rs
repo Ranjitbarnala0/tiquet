@@ -13,10 +13,10 @@ use crate::escpos::{self, Opts};
 use crate::layout::{self, TicketView};
 use crate::printer::Job;
 use crate::settings::{self, Logo, Settings};
-use crate::state::{AppState, SessionUser};
+use crate::state::{self, AppState, SessionUser};
 use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
 use crate::verifactu::{self, Env};
-use crate::{aeat, auth, backup, book, cash, diag, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
+use crate::{aeat, auth, backup, book, cash, diag, lan, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
 
 // who was signed in as Tiquet closed to update itself
 const RESUME: &str = "resumeUser";
@@ -97,6 +97,54 @@ fn flag(a: &Value, key: &str, default: bool) -> bool {
 }
 
 fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
+    // another PC of the shop never touches this till's printer, folders,
+    // network or backups, nor asks it to go and find another till
+    if state::caller().is_some() && ((lan::local(cmd) && cmd != "log.client") || cmd == "backup.restore") {
+        return fail("E_LAN_HERE");
+    }
+    // a copy the control server locked, or that has not reached it for too
+    // long, shows and prints everything but takes no money
+    if crate::license::CHARGES.contains(&cmd) {
+        if let Some(e) = crate::license::refusal(&st.conn()) {
+            return fail(e);
+        }
+    }
+    // a PC that works with the main till: everything but its own printer,
+    // folders and screen is answered there
+    if st.remote().is_some() && state::caller().is_none() {
+        if !lan::local(cmd) {
+            return lan::forward(st, cmd, a);
+        }
+        let mut v = here(st, cmd, a)?;
+        // settings that changed here come back whole: the shop's with this PC's
+        if v.get("settings").is_some_and(Value::is_object) {
+            if let Ok(s) = lan::forward(st, "settings.get", json!({})) {
+                v["settings"] = s;
+            }
+        }
+        return Ok(v);
+    }
+    here(st, cmd, a)
+}
+
+// A file made for another PC of the shop goes back to it, to be kept in its
+// own Documents\Tiquet; this till keeps no copy.
+fn hand_back(path: &Path, mut out: Value) -> Result<Value> {
+    if state::caller().is_none() {
+        return Ok(out);
+    }
+    use base64::Engine;
+    let sub = path
+        .strip_prefix(backup::documents())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| PathBuf::from(path.file_name().unwrap_or_default()));
+    let data = fs::read(path)?;
+    let _ = fs::remove_file(path);
+    out["_file"] = json!({ "sub": sub.to_string_lossy(), "data": base64::engine::general_purpose::STANDARD.encode(data) });
+    Ok(out)
+}
+
+fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
     match cmd {
         "bootstrap" => bootstrap(st),
         "setup" => setup(st, parse(a)?),
@@ -122,7 +170,18 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         }
         "logout" => {
             st.set_session(None);
-            settings::clear(&st.conn(), RESUME)?;
+            if state::caller().is_none() {
+                settings::clear(&st.conn(), RESUME)?;
+            }
+            Ok(Value::Null)
+        }
+        // another PC of the shop could not print what was made for it: that
+        // ticket's last print did not reach the paper, so the next is no copy
+        "tickets.printFailed" => {
+            st.user()?;
+            let number = a.get("number").and_then(Value::as_str).unwrap_or_default();
+            let detail = a.get("detail").and_then(Value::as_str).unwrap_or("E_PRINT");
+            tickets::print_failed(&st.conn(), number, detail)?;
             Ok(Value::Null)
         }
         // Tiquet is closing to update itself and opens again by itself: whoever
@@ -150,26 +209,35 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         "settings.save" => {
             let me = st.admin()?;
             log::info(format!("settings saved by {}", me.name));
+            // another PC of the shop keeps its printer and paper to itself
+            let remote = state::caller().is_some();
             // keys the caller leaves out keep their saved value
-            let old = settings::load(&st.conn())?;
+            let old = settings::load_own(&st.conn())?;
             let mut merged = serde_json::to_value(&old)?;
             if let (Some(cur), Some(new)) = (merged.as_object_mut(), a.as_object()) {
                 for (k, v) in new {
-                    cur.insert(k.clone(), v.clone());
+                    if !(remote && settings::DEVICE_KEYS.contains(&k.as_str())) {
+                        cur.insert(k.clone(), v.clone());
+                    }
                 }
             }
             let mut new: Settings = parse(merged)?;
-            // a width given without Automático is the shop's own choice
-            if a.get("columns").is_some() && a.get("paperAuto").is_none() {
-                new.paper_auto = false;
-            }
-            // asked of the printer before the database is held
-            if new.paper_auto {
-                new.columns = printer::auto_columns(&st.sink, &new).unwrap_or(new.columns);
+            if !remote {
+                // a width given without Automático is the shop's own choice
+                if a.get("columns").is_some() && a.get("paperAuto").is_none() {
+                    new.paper_auto = false;
+                }
+                // asked of the printer before the database is held
+                if new.paper_auto {
+                    new.columns = printer::auto_columns(&st.sink, &new).unwrap_or(new.columns);
+                }
             }
             let conn = st.conn();
             let saved = settings::save(&conn, new)?;
             st.set_lock_after(saved.auto_lock_min);
+            if remote {
+                return to(settings::load(&conn)?);
+            }
             // "None" chosen on purpose: no printer is then picked on its own
             if saved.printer_name.trim().is_empty() && !old.printer_name.trim().is_empty() {
                 settings::put(&conn, "printerOff", "1")?;
@@ -239,6 +307,8 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         }
         "tickets.get" => ticket_get(st, id(&a)?),
         // any user may reprint; the core decides whether it says COPIA
+        // "a4" or "ticket" chooses the paper; left out, a full invoice comes out
+        // on A4 when this PC has a printer for it
         "tickets.print" => {
             st.user()?;
             let (rec, s, logo) = {
@@ -247,8 +317,18 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let logo = tickets::logo_for(&conn, &rec)?;
                 (rec, settings::load(&conn)?, logo)
             };
-            let warning = print_ticket(st, &rec, &s, logo.as_ref(), false)?;
+            let warning = match a.get("format").and_then(Value::as_str) {
+                Some("a4") => print_as(st, &rec, &s, logo.as_ref(), false, true)?,
+                Some("ticket") => print_as(st, &rec, &s, logo.as_ref(), false, false)?,
+                _ => print_ticket(st, &rec, &s, logo.as_ref(), false)?,
+            };
             Ok(json!({ "warning": warning }))
+        }
+        // the full invoices, newest first, to find one by number, customer,
+        // NIF or amount
+        "invoices.list" => {
+            st.user()?;
+            to(tickets::invoices(&st.conn(), &parse(a)?)?)
         }
         // the ticket for the customer's phone or inbox, as text and as PDF
         "tickets.text" => {
@@ -265,11 +345,11 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let logo = tickets::logo_for(&conn, &rec)?;
                 share::save_pdf(&rec, &settings::load(&conn)?, logo.as_ref())?
             };
-            let copied = flag(&a, "copy", false) && st.desktop && os::copy_file(&path);
-            if flag(&a, "reveal", false) && st.desktop {
+            let copied = flag(&a, "copy", false) && st.desktop() && os::copy_file(&path);
+            if flag(&a, "reveal", false) && st.desktop() {
                 os::reveal(&path);
             }
-            Ok(json!({ "path": path.to_string_lossy(), "copied": copied }))
+            hand_back(&path, json!({ "path": path.to_string_lossy(), "copied": copied }))
         }
         "tickets.whatsapp" => {
             st.user()?;
@@ -300,16 +380,16 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             match account {
                 Ok(acc) => {
                     let pdf = share::pdf(&rec, &s, logo.as_ref());
-                    acc.send(&rec.shop.name, &to, &share::subject(&rec), &share::email_body(&rec), Some((share::file_name(&rec.number), pdf)))?;
+                    acc.send(&rec.shop.name, &to, &share::subject(&rec), &share::email_body(&rec), Some((share::file_name_of(&rec), pdf)))?;
                     log::info(format!("ticket {} emailed by {}", rec.number, me.name));
                     Ok(json!({ "sent": true }))
                 }
                 Err(e) if e.0 == "E_MAIL_SETUP" => {
                     let path = share::save_pdf(&rec, &s, logo.as_ref())?;
                     let url = share::mailto_url(&to, &share::subject(&rec), &share::email_body(&rec));
-                    let opened = st.desktop && os::handles("mailto") && os::open(&url);
-                    let copied = st.desktop && os::copy_file(&path);
-                    Ok(json!({ "sent": false, "opened": opened, "copied": copied, "url": url, "path": path.to_string_lossy() }))
+                    let opened = st.desktop() && os::handles("mailto") && os::open(&url);
+                    let copied = st.desktop() && os::copy_file(&path);
+                    hand_back(&path, json!({ "sent": false, "opened": opened, "copied": copied, "url": url, "path": path.to_string_lossy() }))
                 }
                 Err(e) => Err(e),
             }
@@ -508,7 +588,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let vat_book = a.get("kind").and_then(Value::as_str) == Some("vat");
             let r: reports::Range = parse(a)?;
             let path = if vat_book { reports::export_vat_book(&st.conn(), &r)? } else { reports::export_csv(&st.conn(), &r)? };
-            Ok(json!({ "path": path.to_string_lossy() }))
+            hand_back(&path, json!({ "path": path.to_string_lossy() }))
         }
 
         "users.list" => {
@@ -662,7 +742,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let r: reports::Range = parse(a)?;
             let conn = st.conn();
             let path = book::export(&conn, &settings::load(&conn)?, &r)?;
-            Ok(json!({ "path": path.to_string_lossy() }))
+            hand_back(&path, json!({ "path": path.to_string_lossy() }))
         }
 
         "cash.state" => {
@@ -869,7 +949,7 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let me = st.admin()?;
             let path = diag::save(st)?;
             log::info(format!("diagnostics saved to {} by {}", path.display(), me.name));
-            if st.desktop {
+            if st.desktop() {
                 os::reveal(&path);
             }
             Ok(json!({ "path": path.to_string_lossy() }))
@@ -888,11 +968,16 @@ fn route(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             // a bare file name inside that folder, never a path of its own
             let name = a.get("name").and_then(Value::as_str).filter(|n| Path::new(n).file_name().is_some_and(|f| f == *n));
             let path = name.map(|n| dir.join(n)).filter(|p| p.exists()).unwrap_or(dir);
-            if st.desktop {
+            if st.desktop() {
                 os::reveal(&path);
             }
             Ok(json!({ "path": path.to_string_lossy() }))
         }
+
+        // several PCs in one shop
+        c if c.starts_with("lan.") => lan::route(st, c, &a),
+        // this copy and the control server
+        c if c.starts_with("license.") => crate::license::route(st, c),
 
         _ => fail(format!("E_UNKNOWN:{cmd}")),
     }
@@ -911,7 +996,7 @@ fn backup_dirs(st: &AppState, s: &Settings) -> Vec<PathBuf> {
 fn whatsapp(st: &AppState, phone: &str, message: &str, web: bool) -> Value {
     let app = !web && os::handles("whatsapp");
     let url = share::whatsapp_url(phone, message, app);
-    let opened = st.desktop && os::open(&url);
+    let opened = st.desktop() && os::open(&url);
     json!({ "url": url, "opened": opened, "app": app })
 }
 
@@ -919,8 +1004,9 @@ fn bootstrap(st: &AppState) -> Result<Value> {
     let conn = st.conn();
     let s = settings::load(&conn)?;
     // Ajustes can sign someone in as Tiquet opens: on its first screen only,
-    // never again after they lock the till or sign out
-    let first = st.first_open();
+    // never again after they lock the till or sign out; another PC of the
+    // shop signs in with its own password
+    let first = state::caller().is_none() && st.first_open();
     if first && st.current().is_none() {
         let resumed = resume(&conn)?;
         let open_as = resumed.or((s.auto_login > 0).then_some(s.auto_login));
@@ -945,6 +1031,7 @@ fn bootstrap(st: &AppState) -> Result<Value> {
         "session": st.current(),
         "version": env!("CARGO_PKG_VERSION"),
         "autoUpdate": s.auto_update,
+        "lan": if state::caller().is_none() { lan::role(st) } else { Value::Null },
     }))
 }
 
@@ -996,7 +1083,7 @@ fn setup(st: &AppState, a: SetupIn) -> Result<Value> {
         shop_phone: a.shop_phone.trim().into(),
         shop_nif: crate::nif::normalize(&a.shop_nif),
         lang: a.lang,
-        ..settings::load(&conn)?
+        ..settings::load_own(&conn)?
     };
     let tx = conn.transaction()?;
     settings::save(&tx, s)?;
@@ -1277,8 +1364,33 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
 
 // The first print that may have reached the paper is the original; every
 // later one, by anyone, says COPIA, and so do the extra copies set in Ajustes.
-// The drawer opens only with the original printed at the sale itself.
+// The drawer opens only with the original printed at the sale itself. A full
+// invoice comes out on A4 when this PC has a printer for them.
 fn print_ticket(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>, at_sale: bool) -> Result<Option<String>> {
+    let a4 = rec.customer.is_some() && !s.invoice_printer.trim().is_empty();
+    print_as(st, rec, s, logo, at_sale, a4)
+}
+
+fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>, at_sale: bool, a4: bool) -> Result<Option<String>> {
+    if a4 {
+        if s.invoice_printer.trim().is_empty() {
+            return fail("E_NO_A4_PRINTER");
+        }
+        let (attempt, copy) = tickets::begin_print(&st.conn(), rec.id, false)?;
+        let sheets = crate::invoice::invoice(rec, logo, &crate::invoice::InvoiceOpts { terms: s.invoice_terms.clone(), copy });
+        let out = printer::send_sheets(&st.sink, s, &rec.number, &sheets);
+        // the drawer hangs on the receipt printer
+        if at_sale && !copy && drawer_opens(s, &rec.payment.method) {
+            printer::send_detached(&st.sink, s, "cajon", &escpos::kick(s));
+        }
+        let (status, detail) = match &out {
+            Ok(_) => ("printed", None),
+            Err(e) if e.0 == "E_PRINT:timeout" || e.0.starts_with("E_PRINT:partial") => ("unknown", Some(e.0.as_str())),
+            Err(e) => ("failed", Some(e.0.as_str())),
+        };
+        tickets::end_print(&st.conn(), attempt, status, detail)?;
+        return out;
+    }
     let (attempt, copy) = tickets::begin_print(&st.conn(), rec.id, false)?;
     let kick = at_sale && !copy && drawer_opens(s, &rec.payment.method);
     let mut job = Job::doc(&layout::record(rec, s, logo.is_some(), copy), logo, &Opts::new(s, kick));
@@ -1463,6 +1575,12 @@ fn printer_test(st: &AppState, t: TestIn) -> Result<Value> {
     let me = st.admin()?;
     let s = t.settings.clean();
     let logo = settings::logo(&st.conn())?;
+    // the A4 printer for invoices, with a page that says it is a test
+    if t.kind == "a4" {
+        let sheets = crate::invoice::invoice(&crate::invoice::sample(&s), logo.as_ref(), &crate::invoice::InvoiceOpts { terms: s.invoice_terms.clone(), copy: false });
+        let warning = printer::send_sheets(&st.sink, &s, "prueba A4", &sheets)?;
+        return Ok(json!({ "warning": warning }));
+    }
     let job = match t.kind.as_str() {
         "charset" => Job::raw(escpos::charset_test(&s)),
         "drawer" => Job::raw(escpos::kick(&s)),
@@ -2123,6 +2241,48 @@ mod tests {
             "customer": { "name": "Cliente SL", "nif": "B12345674", "address": "" } });
         let err = dispatch(&st, "sale.finalize", inv).unwrap_err();
         assert_eq!(err, "E_SHOP_NIF");
+    }
+
+    #[test]
+    fn a_full_invoice_comes_out_on_a4_by_itself() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        let prints = |ext: &str| std::fs::read_dir(st.data_dir.join("prints")).map(|d| d.filter_map(|f| f.ok()).filter(|f| f.file_name().to_string_lossy().ends_with(ext)).count()).unwrap_or(0);
+        let inv = |id: &str| {
+            json!({ "lines": [{ "name": "iPhone 15 · IMEI 356789012345678", "qty": 1, "unitCents": 79_900, "vatBp": 2100 }], "payment": { "method": "card" },
+                    "customer": { "name": "Acme Telecom SL", "nif": "B12345674", "address": "Rambla Nova 5\n17001 Girona" }, "saleId": id })
+        };
+        // with no A4 printer it is a receipt, as always
+        let r = dispatch(&st, "sale.finalize", inv("a")).unwrap();
+        assert_eq!((r["printed"].as_bool(), prints("-A4.pdf"), prints(".bin")), (Some(true), 0, 1));
+        // with one, the invoice is a page, and the drawer still opens on the receipt printer
+        dispatch(&st, "settings.save", json!({ "invoicePrinter": "Oficina A4" })).unwrap();
+        let r = dispatch(&st, "sale.finalize", inv("b")).unwrap();
+        assert_eq!((r["printed"].as_bool(), prints("-A4.pdf")), (Some(true), 1));
+        let id = r["ticket"]["id"].clone();
+        let row = &dispatch(&st, "tickets.list", json!({})).unwrap()[0];
+        assert_eq!((row["id"].clone(), row["printed"].as_str()), (id.clone(), Some("printed")));
+        // a reprint says COPIA; "ticket" asks for the receipt instead
+        dispatch(&st, "tickets.print", json!({ "id": id })).unwrap();
+        dispatch(&st, "tickets.print", json!({ "id": id, "format": "ticket" })).unwrap();
+        assert_eq!((prints("-A4.pdf"), prints(".bin")), (2, 2));
+        // its PDF is the A4 page, kept with the invoices
+        let path = PathBuf::from(dispatch(&st, "tickets.pdf", json!({ "id": id })).unwrap()["path"].as_str().unwrap());
+        assert!(path.parent().unwrap().ends_with("Facturas") && path.file_name().unwrap().to_string_lossy().starts_with("Factura-"));
+        let pdf = std::fs::read(&path).unwrap();
+        assert!(pdf.starts_with(b"%PDF") && pdf.windows(8).any(|w| w == b"Acme Tel"));
+        // Facturas finds it by customer, NIF, number or amount; plain sales are not there
+        let list = |q: &str| dispatch(&st, "invoices.list", json!({ "q": q })).unwrap().as_array().unwrap().len();
+        assert_eq!((list(""), list("acme"), list("b12345674"), list("799"), list("nadie")), (2, 2, 2, 2, 0));
+        dispatch(&st, "sale.finalize", json!({ "lines": [{ "name": "Funda", "qty": 1, "unitCents": 900, "vatBp": 2100 }], "payment": { "method": "cash" }, "print": false })).unwrap();
+        assert_eq!(list(""), 2);
+        // and Ajustes tries the A4 printer with a page marked as a test
+        let draft = dispatch(&st, "settings.get", json!({})).unwrap();
+        dispatch(&st, "printers.test", json!({ "settings": draft, "kind": "a4" })).unwrap();
+        assert_eq!(prints("-A4.pdf"), 3);
+        dispatch(&st, "settings.save", json!({ "invoicePrinter": "" })).unwrap();
+        let draft = dispatch(&st, "settings.get", json!({})).unwrap();
+        assert_eq!(dispatch(&st, "printers.test", json!({ "settings": draft, "kind": "a4" })).unwrap_err(), "E_NO_A4_PRINTER");
     }
 
     #[test]

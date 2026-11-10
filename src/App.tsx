@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Download, FolderOpen, History, RotateCcw, TriangleAlert } from 'lucide-react';
-import { call, onSessionLost } from './api';
+import { call, onLanDown, onSessionLost } from './api';
 import { dateTime } from './format';
 import { errorText, setLang, tr, type Lang } from './i18n';
+import { LanDown } from './Lan';
 import { Login } from './Login';
 import { Setup } from './Setup';
 import { Shell } from './Shell';
@@ -187,6 +188,27 @@ export function App() {
     return () => onSessionLost(null);
   }, [load, toast]);
 
+  // a PC that sells with the shop's main till: when that till stops
+  // answering a notice stays up until it is back
+  const [lanLost, setLanLost] = useState(false);
+  useEffect(() => {
+    onLanDown(() => setLanLost(true));
+    return () => onLanDown(null);
+  }, []);
+  useEffect(() => {
+    if (!lanLost) return;
+    const t = window.setInterval(() => {
+      call<{ up: boolean }>('lan.ping')
+        .then((r) => {
+          if (!r.up) return;
+          setLanLost(false);
+          toast.ok(tr('Conectada otra vez con la caja principal', 'Connected to the main till again'));
+        })
+        .catch(() => {});
+    }, 4000);
+    return () => window.clearInterval(t);
+  }, [lanLost, toast]);
+
   const logout = useCallback(async () => {
     await call('logout').catch(() => {});
     setUser(null);
@@ -195,6 +217,9 @@ export function App() {
 
   if (fatal) return <Fatal message={fatal} />;
   if (!boot) return <div className="splash" />;
+  if (boot.lan?.role === 'secondary' && boot.lan.down) {
+    return <LanDown shop={boot.lan.shop ?? ''} addr={boot.lan.addr ?? ''} onRetry={() => load().catch(() => {})} />;
+  }
   if (boot.needsSetup) {
     return (
       <Setup
@@ -204,6 +229,7 @@ export function App() {
           setUser(u);
           load().catch((e) => setFatal(errorText(e)));
         }}
+        onJoined={() => load().catch((e) => setFatal(errorText(e)))}
       />
     );
   }
@@ -220,6 +246,16 @@ export function App() {
     );
   }
   return (
-    <Shell key={user.id} installId={boot.installId} version={boot.version} user={user} setUser={setUser} lang={lang} onLang={changeLang} onLogout={logout} />
+    <>
+      {lanLost && (
+        <div className="lan-lost" role="alert">
+          {tr(
+            'Sin conexión con la caja principal: lo que se cobre no se guarda hasta que vuelva. Se reintenta solo.',
+            'No connection with the main till: nothing charged is saved until it is back. Retrying by itself.',
+          )}
+        </div>
+      )}
+      <Shell key={user.id} installId={boot.installId} version={boot.version} user={user} setUser={setUser} lang={lang} onLang={changeLang} onLogout={logout} />
+    </>
   );
 }

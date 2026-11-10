@@ -60,6 +60,7 @@ export function Login({ boot, lang, onLang, onLogin }: { boot: Boot; lang: Lang;
             <Mark size={30} />
             <span>Tiquet</span>
             {boot.shopName && <span className="brand-shop">{boot.shopName}</span>}
+            {boot.lan?.role === 'secondary' && <span className="brand-lan">{tr('conectada a la caja principal', 'connected to the main till')}</span>}
           </div>
           <LangSwitch lang={lang} onLang={onLang} />
         </div>

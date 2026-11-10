@@ -1,7 +1,7 @@
 use base64::Engine;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::{fail, Result};
 use crate::money::div_round;
@@ -158,6 +158,11 @@ pub struct Settings {
     pub fullscreen: bool,
     // printed on the resguardo a customer gets for a phone left for repair
     pub repair_terms: String,
+    // the printer full invoices come out of on A4, on this PC; none prints
+    // them on the receipt printer
+    pub invoice_printer: String,
+    // under the totals of every A4 invoice
+    pub invoice_terms: String,
 }
 
 impl Default for Settings {
@@ -223,6 +228,8 @@ impl Default for Settings {
             autostart: false,
             fullscreen: false,
             repair_terms: "Si el equipo no se recoge en 3 meses desde el aviso de que está listo, la tienda deja de responder de él. La reparación tiene 3 meses de garantía. Haga una copia de sus datos antes de dejar el equipo.".into(),
+            invoice_printer: String::new(),
+            invoice_terms: "Garantía legal de 3 años en productos nuevos. Conserve esta factura: es necesaria para cualquier garantía o devolución.".into(),
         }
     }
 }
@@ -392,7 +399,63 @@ pub fn install_id(conn: &Connection) -> Result<String> {
     Ok(id)
 }
 
+// What each PC keeps for itself when several work on one shop's data: its
+// printer, its paper, its screen. Everything else is the shop's.
+pub const DEVICE_KEYS: &[&str] = &[
+    "printerName",
+    "printerKind",
+    "invoicePrinter",
+    "printerHost",
+    "printerPort",
+    "printerCom",
+    "printerBaud",
+    "columns",
+    "paperAuto",
+    "codepage",
+    "cut",
+    "feedLines",
+    "drawer",
+    "cancelChinese",
+    "copies",
+    "autostart",
+    "fullscreen",
+    "lang",
+];
+
+// The settings as the PC being answered sees them: the shop's, with that PC's
+// own printer and paper when the request comes from another PC of the shop.
 pub fn load(conn: &Connection) -> Result<Settings> {
+    let s = load_own(conn)?;
+    Ok(match crate::state::caller().and_then(|c| c.device.clone()) {
+        Some(d) => with_device(s, &d),
+        None => s,
+    })
+}
+
+// this PC's own part of the settings
+pub fn device(s: &Settings) -> Map<String, Value> {
+    let all = serde_json::to_value(s).unwrap_or_default();
+    DEVICE_KEYS.iter().filter_map(|k| all.get(*k).map(|v| (k.to_string(), v.clone()))).collect()
+}
+
+// the shop's settings with a PC's own printer and paper; a value that does
+// not read is left as it was
+pub fn with_device(s: Settings, d: &Map<String, Value>) -> Settings {
+    let Ok(Value::Object(mut all)) = serde_json::to_value(&s) else { return s };
+    for k in DEVICE_KEYS {
+        if let Some(v) = d.get(*k) {
+            let mut trial = all.clone();
+            trial.insert(k.to_string(), v.clone());
+            if serde_json::from_value::<Settings>(Value::Object(trial)).is_ok() {
+                all.insert(k.to_string(), v.clone());
+            }
+        }
+    }
+    serde_json::from_value::<Settings>(Value::Object(all)).map(Settings::clean).unwrap_or(s)
+}
+
+// the settings stored on this PC, whoever is asking
+pub fn load_own(conn: &Connection) -> Result<Settings> {
     let Some(json) = get(conn, "settings")? else {
         return Ok(Settings::default());
     };

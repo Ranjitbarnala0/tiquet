@@ -40,7 +40,9 @@ Picking a printer from the list sets the kind: a receipt printer prints raw, any
 - **Payments.** Cash with quick amounts and change, card, Bizum. Opens the cash drawer on cash sales. A barcode scanned while the payment window is open adds the item; it never confirms a payment.
 - **Tickets that cannot be edited.** Numbered per year without gaps (`T2026-000001`), printed or not. Issued tickets can be reprinted or voided, never edited or erased; the database enforces it.
 - **Returns and invoices.** A return is its own rectifying ticket (`TR2026-...`) that points at the sale, line by line. A sale can carry the customer's name, NIF and address as a full invoice (`TF2026-...`); over 3.000 € it must.
-- **Repairs.** A phone left at the shop gets its own number (`REP2026-000001`), a resguardo for the customer and a slip for the phone. Its status is kept with who changed it and when. A deposit is a ticket of its own, and **Entregar y cobrar** charges the rest in Venta. See [Repairs](#repairs).
+- **Repairs.** A phone left at the shop gets its own number (`REP2026-000001`), a resguardo for the customer and a slip for the phone. Its status is kept with who changed it and when. A deposit is a ticket of its own, and **Entregar y cobrar** charges the rest in Venta. Every repair shows in big letters whether it is **PAGADO**, what is left (**FALTA 50,00 €**, **SIN PAGAR 80,00 €**) or that it has no price yet, on the screen, on the resguardo and on the slip. See [Repairs](#repairs).
+- **Facturas on A4.** A section of its own: **Nueva factura** takes the customer, what is sold (a phone with its IMEI) and how it is paid, and the invoice comes out of the PC's A4 printer by itself. Any invoice made in Venta does too. Its PDF is the A4 page, kept in `Documents\Tiquet\Facturas`; emails carry it.
+- **Several PCs, one shop.** One till shares its data (**Ajustes > Cajas**); the shop's other PCs, on the same network, join it from their first screen and sign in with the shop's users and passwords. Same products, numbering, drawer and day; each PC prints on its own printer and paper. See [Several PCs](#several-pcs).
 - **One main page.** Everything happens in **Venta**. The box is always ready: start typing or scanning anywhere and it lands there. `funda 10` adds an item, `-pantalla 45` saves an expense, `recarga 10` saves a recharge, `-10%` takes 10% off. **Efectivo** (F9) and **Tarjeta** (F10) charge with one tap; a switch (F6) says whether the ticket prints, and that is the only difference between a sale with a ticket and one without.
 - **Machines.** **Ajustes > Máquinas** lists the shop's card terminals and recharge machines, one or many, with the names the shop gives them. With one, Tiquet asks nothing. With several, **Tarjeta** asks which one right over the pay buttons (a tap, a number or Enter), and the recharge window shows each of them. Each machine says what it does and what of it counts as an expense: its recharges, less a commission, and what it takes in sales, all of it or a percentage such as the bank's fee.
 - **Recharges.** **Recarga** (F7): tap how it is done, then the amount. It always counts in the day's recharges. Made on a machine it also counts as an expense, less the commission; in cash it does not. Both can be changed, and so can the amounts and operators, in **Ajustes > Máquinas**. A slip can print with each one.
@@ -93,6 +95,16 @@ Rules:
 - A repair is a service, so a ticket with a repair on it is a simplified invoice only up to 400 € (RD 1619/2012 art. 4). Above that, Venta asks for the customer's details. A deposit can be 400 € at most.
 - In training mode repairs can be taken in, but no deposit or delivery is charged.
 - The conditions printed on the resguardo are in **Ajustes > Ticket**.
+
+## Several PCs
+
+One PC is the main till: **Ajustes > Cajas > Compartir esta caja**. It keeps the database and answers the others on port 47713 of the shop's network (only private addresses, and only Tiquet: a web page cannot drive it). Windows may ask once whether Tiquet may use the network: **Permitir**. The network has to be a private one in Windows for the others to reach it.
+
+On another PC, the first screen offers **¿La tienda ya tiene Tiquet en otro PC?**: it looks for the main till on the network (or takes its address) and then shows the shop's users. Whoever signs in stays signed in on that PC, also while the main till restarts to update. Everything is done on the main till's data; what it prints for a PC comes back and prints on that PC's own printer and paper, and files (PDFs, exports) are saved on that PC. **Ajustes > Cajas** on the main till lists the PCs connected and can disconnect one; on the others it can go back to working alone.
+
+## Licence check
+
+Each copy of Tiquet reports to its supplier's control server (a Cloudflare Worker, `tiquet-control`): at start and every six hours it sends the PC's id (a hash of Windows' own id), the data's id, the version, the shop's name and NIF, the PC's name and Windows version, its role and how many tickets there are. The answer is signed with Ed25519 and checked against the key built into the app. The supplier can lock a copy (or every PC of a shop), ask for an update now, or set the oldest version allowed; locked or not heard from for 45 days (14 for a new PC), Tiquet still shows, prints and exports everything but takes no money until it checks in again (**Comprobar**). The server's address is read from `control.json` in this repository; with none published nothing changes.
 
 ## Where the data lives
 

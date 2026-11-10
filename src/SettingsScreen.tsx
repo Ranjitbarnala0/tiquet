@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BadgeCheck, CreditCard, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Printer, ReceiptText, RefreshCw, ScanSearch, ShoppingBag, Store, Trash2, Users as UsersIcon } from 'lucide-react';
+import { BadgeCheck, CreditCard, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Network, Printer, ReceiptText, RefreshCw, ScanSearch, ShoppingBag, Store, Trash2, Users as UsersIcon } from 'lucide-react';
 import { call, native } from './api';
 import { dateTime, fmt, parseMoney, rate, VAT_RATES } from './format';
 import { errorText, printerStateText, tr, warningText, type Lang } from './i18n';
+import { LanTab } from './Lan';
 import { loadImage, rasterize, type LogoMode } from './logo';
 import { DayCells, MachinesTab } from './MachinesTab';
 import { Paper } from './Paper';
@@ -235,7 +236,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
     return () => window.removeEventListener('keydown', k);
   }, [dirty, save]);
 
-  const test = async (kind: 'page' | 'charset' | 'drawer') => {
+  const test = async (kind: 'page' | 'charset' | 'drawer' | 'a4') => {
     setBusy(kind);
     try {
       const r = await call<{ warning: string | null }>('printers.test', { settings: d, kind });
@@ -311,6 +312,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
     { id: 'printer', label: tr('Impresora', 'Printer'), icon: Printer },
     { id: 'mail', label: tr('Enviar tickets', 'Send tickets'), icon: Mail },
     { id: 'users', label: tr('Usuarios', 'Users'), icon: UsersIcon },
+    { id: 'lan', label: tr('Cajas', 'Tills'), icon: Network },
     { id: 'data', label: tr('Datos y copias', 'Data & backups'), icon: HardDrive },
     { id: 'verifactu', label: 'VERI*FACTU', icon: BadgeCheck },
   ];
@@ -344,6 +346,8 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
 
         <div className="settings-body">
           {tab === 'users' && <Users me={me} onMe={onMe} />}
+
+          {tab === 'lan' && <LanTab />}
 
           {tab === 'machines' && <MachinesTab d={d} set={set} />}
 
@@ -476,6 +480,12 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 hint={tr('Salen en el resguardo que se lleva el cliente al dejar un equipo', 'Printed on the receipt customers get when they leave a device')}
               >
                 <textarea rows={3} value={d.repairTerms} onChange={(e) => set('repairTerms', e.target.value)} maxLength={600} />
+              </Field>
+              <Field
+                label={tr('Pie de las facturas A4', 'A4 invoice footer')}
+                hint={tr('Debajo del total de cada factura: garantía, devoluciones…', 'Under the total of every invoice: guarantee, returns…')}
+              >
+                <textarea rows={3} value={d.invoiceTerms} onChange={(e) => set('invoiceTerms', e.target.value)} maxLength={800} />
               </Field>
 
               <div className="field">
@@ -815,6 +825,35 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 )}
               </div>
               {dirty && <p className="field-hint">{tr('Las pruebas usan estos ajustes aunque aún no estén guardados.', 'Tests use these settings even before you save them.')}</p>}
+
+              <section className="form-section a4-section">
+                <h2>{tr('Facturas en A4', 'Invoices on A4')}</h2>
+                <p className="muted small">
+                  {tr(
+                    'Una factura con los datos del cliente sale sola por esta impresora, en una hoja A4. Sin ella, sale por la de tickets. Es de este PC: cada PC de la tienda elige la suya.',
+                    'An invoice with the customer’s details comes out of this printer by itself, on an A4 page. Without one, it comes out of the receipt printer. It belongs to this PC: each PC of the shop picks its own.',
+                  )}
+                </p>
+                <div className="a4-row">
+                  <Field label={tr('Impresora de facturas', 'Invoice printer')}>
+                    <select value={d.invoicePrinter} onChange={(e) => set('invoicePrinter', e.target.value)}>
+                      <option value="">{tr('Ninguna: por la impresora de tickets', 'None: the receipt printer')}</option>
+                      {printers
+                        ?.filter((p) => !p.virtual && !p.receipt)
+                        .map((p) => (
+                          <option key={p.name} value={p.name}>
+                            {p.name}
+                          </option>
+                        ))}
+                      {d.invoicePrinter && !printers?.some((p) => p.name === d.invoicePrinter && !p.virtual && !p.receipt) && <option value={d.invoicePrinter}>{d.invoicePrinter}</option>}
+                    </select>
+                  </Field>
+                  <button className="btn" onClick={() => test('a4')} disabled={!d.invoicePrinter || !!busy}>
+                    <Printer size={16} />
+                    {tr('Imprimir factura de prueba', 'Print a test invoice')}
+                  </button>
+                </div>
+              </section>
             </div>
           )}
 

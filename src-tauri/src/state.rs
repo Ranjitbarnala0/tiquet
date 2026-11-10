@@ -1,12 +1,17 @@
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::error::{fail, Result};
+use crate::lan::Main;
+use crate::printer::Job;
 use crate::tickets::{self, TicketRecord};
 use crate::{db, log, paths};
 
@@ -15,7 +20,7 @@ pub enum PrintSink {
     Dir(PathBuf),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionUser {
     pub id: i64,
     pub name: String,
@@ -38,6 +43,65 @@ pub struct AppState {
     // only the packaged app opens Explorer windows; tests and the dev server
     // just answer with the path
     pub desktop: bool,
+    // the main till this PC works with, when it is not the main one itself
+    remote: Mutex<Option<Main>>,
+}
+
+// Another PC of the shop signed in on this till: who, and when it was last
+// used, apart from this till's own screen.
+pub struct Slot {
+    session: Mutex<Option<SessionUser>>,
+    active: Mutex<Instant>,
+}
+
+impl Default for Slot {
+    fn default() -> Self {
+        Slot::new()
+    }
+}
+
+impl Slot {
+    pub fn new() -> Slot {
+        Slot { session: Mutex::new(None), active: Mutex::new(Instant::now()) }
+    }
+
+    pub fn user(&self) -> Option<SessionUser> {
+        lock(&self.session).clone()
+    }
+
+    pub fn sign_in(&self, u: SessionUser) {
+        *lock(&self.active) = Instant::now();
+        *lock(&self.session) = Some(u);
+    }
+}
+
+// The request being answered for another PC of the shop, on this thread: its
+// sign-in, its own printer and paper, and what was printed for it, which goes
+// back to it to be printed there.
+pub struct Caller {
+    pub slot: Arc<Slot>,
+    pub device: Option<Map<String, Value>>,
+    pub jobs: RefCell<Vec<(String, Job)>>,
+}
+
+thread_local! {
+    static CALLER: RefCell<Option<Rc<Caller>>> = const { RefCell::new(None) };
+}
+
+pub fn caller() -> Option<Rc<Caller>> {
+    CALLER.with(|c| c.borrow().clone())
+}
+
+pub fn as_caller<T>(c: Rc<Caller>, f: impl FnOnce() -> T) -> T {
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            CALLER.with(|c| *c.borrow_mut() = None);
+        }
+    }
+    CALLER.with(|x| *x.borrow_mut() = Some(c));
+    let _done = Done;
+    f()
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -59,7 +123,9 @@ impl AppState {
             sink,
             data_dir: data_dir.to_path_buf(),
             desktop: false,
+            remote: Mutex::new(None),
         };
+        st.set_remote(crate::lan::load_main(&st.conn()));
         st.sync_marks()?;
         crate::settings::upgrade(&st.conn())?;
         let minutes = crate::settings::load(&st.conn())?.auto_lock_min;
@@ -104,7 +170,23 @@ impl AppState {
     }
 
     pub fn touch(&self) {
-        *lock(&self.active) = Instant::now();
+        match caller() {
+            Some(c) => *lock(&c.slot.active) = Instant::now(),
+            None => *lock(&self.active) = Instant::now(),
+        }
+    }
+
+    // Explorer, the clipboard and links open on the PC the person is at
+    pub fn desktop(&self) -> bool {
+        self.desktop && caller().is_none()
+    }
+
+    pub fn remote(&self) -> Option<Main> {
+        lock(&self.remote).clone()
+    }
+
+    pub fn set_remote(&self, m: Option<Main>) {
+        *lock(&self.remote) = m;
     }
 
     #[cfg(test)]
@@ -143,11 +225,17 @@ impl AppState {
     }
 
     pub fn current(&self) -> Option<SessionUser> {
-        lock(&self.session).clone()
+        match caller() {
+            Some(c) => c.slot.user(),
+            None => lock(&self.session).clone(),
+        }
     }
 
     pub fn set_session(&self, u: Option<SessionUser>) {
-        *lock(&self.session) = u;
+        match caller() {
+            Some(c) => *lock(&c.slot.session) = u,
+            None => *lock(&self.session) = u,
+        }
     }
 
     // A till left unused locks itself, so an admin who walks away does not
@@ -157,7 +245,11 @@ impl AppState {
             return fail("E_SESSION");
         };
         let limit = self.lock_after.load(Ordering::SeqCst);
-        if limit > 0 && lock(&self.active).elapsed().as_secs() >= limit {
+        let idle = match caller() {
+            Some(c) => lock(&c.slot.active).elapsed(),
+            None => lock(&self.active).elapsed(),
+        };
+        if limit > 0 && idle.as_secs() >= limit {
             self.set_session(None);
             log::info(format!("{} locked out after {} min without use", u.name, limit / 60));
             return fail("E_SESSION_IDLE");

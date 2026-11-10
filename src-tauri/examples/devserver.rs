@@ -5,12 +5,22 @@
 //   cargo run --example devserver --features devserver -- 1430 ../devdata
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tiny_http::{Header, Response, Server};
 
-use tiquet_lib::api;
 use tiquet_lib::state::{AppState, PrintSink};
+use tiquet_lib::{api, lan};
+
+struct Host(Arc<AppState>);
+
+impl lan::Host for Host {
+    fn with(&self, f: &mut dyn FnMut(&AppState)) -> bool {
+        f(&self.0);
+        true
+    }
+}
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -23,8 +33,15 @@ fn main() {
         Ok("spooler") => PrintSink::Spooler,
         _ => PrintSink::Dir(dir.join("prints")),
     };
-    let st = AppState::open(&dir, sink).expect("open data dir");
+    let st = Arc::new(AppState::open(&dir, sink).expect("open data dir"));
     tiquet_lib::aeat::start(dir.join("tiquet.db"));
+    // Cajas in Ajustes: two dev servers can be a shop's main till and another
+    // PC; TIQUET_LAN_BIND=127.0.0.1 keeps the firewall out of it
+    if std::env::var_os("TIQUET_LAN_BIND").is_none() {
+        std::env::set_var("TIQUET_LAN_BIND", "127.0.0.1");
+    }
+    lan::set_host(Arc::new(Host(st.clone())));
+    lan::resume_sharing(&st);
     let server = Server::http(("127.0.0.1", port)).expect("bind");
     eprintln!("devserver http://127.0.0.1:{port} data={}", dir.display());
 

@@ -1,7 +1,7 @@
 // Turns a ticket into fixed-width lines. The same lines feed the on-screen
 // preview and the ESC/POS encoder, so what the cashier sees is what prints.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::book;
 use crate::cash::{Drawer, Session};
@@ -13,7 +13,7 @@ use crate::settings::Settings;
 use crate::tickets::{compute, now, Customer, Payment, SaleLine, ShopInfo, TicketRecord, Totals};
 use crate::verifactu;
 
-#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Size {
     Normal,
@@ -21,7 +21,7 @@ pub enum Size {
     Big,
 }
 
-#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum Line {
     Text { text: String, bold: bool, size: Size },
@@ -560,6 +560,15 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
             d.pair("A pagar al recoger", &eur(due.max(0)), true, Size::Normal);
         }
     }
+    // paid or not, as big as the paper allows: nobody has to work it out
+    if r.open() {
+        d.blank();
+        match (r.pay.as_str(), r.due_cents) {
+            ("paid", _) => d.center("*** PAGADO ***", true, Size::Tall),
+            ("partial" | "unpaid", Some(due)) => d.center(&format!("PENDIENTE: {}", eur(due.max(0))), true, Size::Tall),
+            _ => {}
+        }
+    }
     let terms = r.terms.trim();
     if !terms.is_empty() {
         d.rule('-');
@@ -622,6 +631,21 @@ pub fn repair_slip(r: &Repair, s: &Settings) -> Vec<Line> {
     d.left(&format!("Tel. {}", r.data.customer_phone), false, Size::Normal);
     d.left(&device(r), true, Size::Normal);
     fault(&mut d, r);
+    // whoever hands it back sees at once whether there is money to take
+    if r.open() {
+        let eur = |c: i64| format!("{} €", fmt(c));
+        match (r.pay.as_str(), r.due_cents) {
+            ("paid", _) => {
+                d.rule('-');
+                d.center("PAGADO", true, Size::Big);
+            }
+            ("partial" | "unpaid", Some(due)) => {
+                d.rule('-');
+                d.center(&format!("COBRAR {}", eur(due.max(0))), true, Size::Tall);
+            }
+            _ => {}
+        }
+    }
     d.lines
 }
 
