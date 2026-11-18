@@ -10,7 +10,7 @@ use crate::money::{div_round, fmt, fmt_rate};
 use crate::repairs::Repair;
 use crate::reports::Summary;
 use crate::settings::Settings;
-use crate::tickets::{compute, now, Customer, Payment, SaleLine, ShopInfo, TicketRecord, Totals};
+use crate::tickets::{compute, now, Customer, Payment, SaleLine, ShopInfo, TicketRecord, Totals, VatView};
 use crate::verifactu;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,7 +263,10 @@ pub struct TicketView<'a> {
     // number and date of the sale a refund corrects
     pub refund_of: Option<(&'a str, &'a str)>,
     pub reason: Option<&'a str>,
-    pub show_vat: bool,
+    // how much the paper says about VAT
+    pub vat: VatView,
+    // free words of a bill, under what was sold
+    pub note: Option<&'a str>,
     pub copy: bool,
     pub voided: bool,
     // a full invoice is made out to someone
@@ -344,7 +347,8 @@ fn items(d: &mut Doc, lines: &[SaleLine], full: bool) {
             }
             continue;
         }
-        let mut name = wrap(&d.clean(&l.name), desc).into_iter();
+        let (item, imei) = split_imei(&l.name);
+        let mut name = wrap(&d.clean(item), desc).into_iter();
         let first = name.next().unwrap_or_default();
         d.raw(
             format!("{:>qw$} {}{}{}", l.qty, pad_right(&first, desc), pad_left(&price, 9), pad_left(&total, 9)),
@@ -354,27 +358,58 @@ fn items(d: &mut Doc, lines: &[SaleLine], full: bool) {
         for rest in name {
             d.raw(format!("{}{rest}", " ".repeat(qw + 1)), false, Size::Normal);
         }
+        if let Some(n) = imei {
+            for part in wrap(&d.clean(&format!("IMEI {n}")), d.cols - qw - 1) {
+                d.raw(format!("{}{part}", " ".repeat(qw + 1)), false, Size::Normal);
+            }
+        }
         if full {
             d.raw(format!("{}{}", " ".repeat(qw + 1), net_unit(l)), false, Size::Normal);
         }
     }
 }
 
+// A phone's IMEI or serial number, written after its name on a bill as
+// "name · IMEI 3567…", goes on a line of its own: a number of 15 digits is
+// never cut in two by the edge of the paper.
+fn split_imei(name: &str) -> (&str, Option<&str>) {
+    match name.split_once(" · IMEI ") {
+        Some((item, number)) if !item.trim().is_empty() && !number.trim().is_empty() => (item.trim(), Some(number.trim())),
+        _ => (name, None),
+    }
+}
+
 fn item_two_lines(d: &mut Doc, l: &SaleLine) {
-    d.left(&l.name, false, Size::Normal);
+    let (name, imei) = split_imei(&l.name);
+    d.left(name, false, Size::Normal);
+    if let Some(n) = imei {
+        d.left(&format!("IMEI {n}"), false, Size::Normal);
+    }
     d.pair(&format!("  {} x {}", l.qty, fmt(l.unit_cents)), &fmt(l.total()), false, Size::Normal);
 }
 
 fn vat_table(d: &mut Doc, t: &Totals) {
     let w = ((d.cols - 6) / 3).min(12);
     let first = d.cols - 3 * w;
+    let cells: Vec<[String; 4]> = t.vat.iter().map(|r| [fmt_rate(r.vat_bp), fmt(r.base_cents), fmt(r.vat_cents), fmt(r.total_cents)]).collect();
+    // On 58 mm paper a column holds 8 characters: 1.199,00 would touch the
+    // amount before it, and 10.000,00 would break the line. Amounts that
+    // need the room get a line each.
+    if cells.iter().any(|c| len(&c[0]) >= first || c[1..].iter().any(|a| len(a) >= w)) {
+        for c in &cells {
+            d.left(&format!("IVA {}", c[0]), false, Size::Normal);
+            for (label, amount) in ["Base", "Cuota", "Total"].iter().zip(&c[1..]) {
+                d.pair(label, amount, false, Size::Normal);
+            }
+        }
+        return;
+    }
     let row = |a: &str, b: &str, c: &str, e: &str| {
         format!("{}{}{}{}", pad_right(a, first), pad_left(b, w), pad_left(c, w), pad_left(e, w))
     };
     d.raw(row("IVA", "BASE", "CUOTA", "TOTAL"), false, Size::Normal);
-    for r in &t.vat {
-        let line = row(&fmt_rate(r.vat_bp), &fmt(r.base_cents), &fmt(r.vat_cents), &fmt(r.total_cents));
-        d.raw(line, false, Size::Normal);
+    for c in &cells {
+        d.raw(row(&c[0], &c[1], &c[2], &c[3]), false, Size::Normal);
     }
 }
 
@@ -395,6 +430,8 @@ pub fn ticket(v: &TicketView, s: &Settings, logo: bool) -> Vec<Line> {
         d.blank();
     }
     let full = v.customer.is_some();
+    // each price without VAT too: only an invoice that shows its VAT
+    let detail = full && v.vat == VatView::Full;
     header(&mut d, v.shop, full);
     d.blank();
     let refund = v.kind == "refund";
@@ -431,36 +468,52 @@ pub fn ticket(v: &TicketView, s: &Settings, logo: bool) -> Vec<Line> {
         d.center("*** TICKET ANULADO ***", true, Size::Normal);
     }
     d.rule('-');
-    items(&mut d, v.lines, full);
-    d.rule('-');
+    items(&mut d, v.lines, detail);
+    // the total stands apart between two heavier rules
+    d.rule('=');
     d.pair("TOTAL", &format!("{} €", fmt(v.totals.total_cents)), true, Size::Big);
+    d.rule('=');
     if let Some(p) = v.payment {
-        d.rule('-');
         if refund {
             d.pair(refund_label(&p.method), &fmt(p.tendered_cents.abs()), false, Size::Normal);
         } else {
             d.pair(method_label(&p.method), &fmt(p.tendered_cents), false, Size::Normal);
-            if p.method == "cash" {
+            // the change, when there was any to give
+            if p.method == "cash" && p.change_cents != 0 {
                 d.pair("Cambio", &fmt(p.change_cents), false, Size::Normal);
             }
         }
     }
-    let table = (v.show_vat || full) && !v.totals.vat.is_empty();
+    let table = v.vat == VatView::Full && !v.totals.vat.is_empty();
     if table {
-        d.rule('-');
+        if v.payment.is_some() {
+            d.rule('-');
+        }
         vat_table(&mut d, v.totals);
     }
-    d.rule('-');
+    if table || v.payment.is_some() {
+        d.rule('-');
+    }
     let count = if refund {
         format!("Artículos devueltos: {}", -v.totals.item_count)
     } else {
         format!("Artículos: {}", v.totals.item_count)
     };
-    // without the table the rate is still printed: a simplified invoice must
-    // state the VAT rate applied
+    // Without the table the rate is still printed, as a simplified invoice
+    // asks; a shop that wants nothing about VAT on its paper gets just that.
     let rates: Vec<String> = v.totals.vat.iter().map(|r| fmt_rate(r.vat_bp)).collect();
-    let note = if table || rates.is_empty() { "IVA incluido".to_string() } else { format!("IVA {} incluido", rates.join(" y ")) };
-    d.pair(&count, &note, false, Size::Normal);
+    let words = match v.vat {
+        VatView::None => String::new(),
+        VatView::Note if !rates.is_empty() => format!("IVA {} incluido", rates.join(" y ")),
+        _ => "IVA incluido".to_string(),
+    };
+    d.pair(&count, &words, false, Size::Normal);
+    if let Some(n) = v.note.map(str::trim).filter(|n| !n.is_empty()) {
+        d.blank();
+        for l in n.lines() {
+            d.left(l.trim(), false, Size::Normal);
+        }
+    }
     let footer = v.shop.footer.trim();
     if !footer.is_empty() {
         d.blank();
@@ -494,7 +547,8 @@ pub fn record(r: &TicketRecord, s: &Settings, logo: bool, copy: bool) -> Vec<Lin
         payment: Some(&r.payment),
         refund_of: r.refund_of.as_ref().map(|t| (t.number.as_str(), t.issued_at.as_str())),
         reason: r.refund_reason.as_deref(),
-        show_vat: r.shop.show_vat.unwrap_or(s.show_vat),
+        vat: r.shop.vat_view(r.customer.is_some(), s.show_vat),
+        note: r.note.as_deref(),
         copy,
         voided: r.voided_at.is_some(),
         customer: r.customer.as_ref(),
@@ -909,7 +963,8 @@ mod tests {
             payment: Some(&pay),
             refund_of: None,
             reason: None,
-            show_vat: s.show_vat,
+            vat: VatView::of(&s),
+            note: None,
             copy: true,
             voided: false,
             customer: None,
@@ -917,6 +972,51 @@ mod tests {
             qr: None,
         };
         ticket(&v, &s, true)
+    }
+
+    #[test]
+    fn a_phone_bill_reads_well_on_any_roll() {
+        let phone = SaleLine { name: "iPhone 15 Pro 256 GB Titanio Natural · IMEI 356789012345678".into(), qty: 1, unit_cents: 119_900, vat_bp: 2100, ..SaleLine::default() };
+        for cols in [32, 42, 48] {
+            let out = texts(&render(cols, "cp858", std::slice::from_ref(&phone)));
+            let lines: Vec<&str> = out.iter().map(|(t, _)| t.as_str()).collect();
+            // nothing wider than the paper, and the IMEI whole on a line of its own
+            assert!(out.iter().all(|(t, size)| len(t) <= if *size == Size::Big { cols as usize / 2 } else { cols as usize }), "{cols}: {lines:#?}");
+            assert!(lines.iter().any(|l| l.trim() == "IMEI 356789012345678"), "{cols}: {lines:#?}");
+            assert!(!lines.iter().any(|l| l.contains("·")), "{cols}: {lines:#?}");
+            // 1.199,00 does not fit a column of 8: each amount gets its line
+            if cols == 32 {
+                assert!(lines.iter().any(|l| l.starts_with("Base") && l.ends_with("990,91")) && lines.iter().any(|l| l.starts_with("Total") && l.ends_with("1.199,00")), "{lines:#?}");
+            } else {
+                assert!(lines.iter().any(|l| l.starts_with("IVA") && l.contains("BASE")), "{cols}: {lines:#?}");
+            }
+        }
+        // paid with the exact money: no line for a change of 0,00
+        let s = Settings { columns: 48, ..Settings::default() };
+        let totals = compute(std::slice::from_ref(&phone));
+        let pay = Payment { method: "cash".into(), tendered_cents: totals.total_cents, change_cents: 0, machine: None };
+        let shop = shop();
+        let v = TicketView {
+            shop: &shop,
+            kind: "sale",
+            number: "T2026-000125",
+            issued_at: "2026-10-16T17:00:12",
+            user_name: "Ana",
+            lines: std::slice::from_ref(&phone),
+            totals: &totals,
+            payment: Some(&pay),
+            refund_of: None,
+            reason: None,
+            vat: VatView::None,
+            note: Some("Garantía 1 año"),
+            copy: false,
+            voided: false,
+            customer: None,
+            training: false,
+            qr: None,
+        };
+        let out = plain(&ticket(&v, &s, false), 48);
+        assert!(out.contains("Efectivo") && !out.lines().any(|l| l.starts_with("Cambio ")) && !out.contains("IVA") && out.contains("Garantía 1 año"), "{out}");
     }
 
     fn render_refund(cols: u32, lines: &[SaleLine]) -> Vec<Line> {
@@ -935,7 +1035,8 @@ mod tests {
             payment: Some(&pay),
             refund_of: Some(("T2026-000124", "2026-10-16T17:00:12")),
             reason: Some("No funciona la carga rápida"),
-            show_vat: true,
+            vat: VatView::Full,
+            note: None,
             copy: false,
             voided: false,
             customer: None,
@@ -964,7 +1065,8 @@ mod tests {
             payment: Some(&pay),
             refund_of: None,
             reason: None,
-            show_vat: false,
+            vat: VatView::Full,
+            note: None,
             copy: false,
             voided: false,
             customer: Some(&acme),
@@ -1005,7 +1107,8 @@ mod tests {
             payment: None,
             refund_of: None,
             reason: None,
-            show_vat: false,
+            vat: VatView::Note,
+            note: None,
             copy: false,
             voided: false,
             customer: None,

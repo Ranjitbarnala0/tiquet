@@ -293,7 +293,8 @@ pub fn csv(conn: &Connection, r: &Range) -> Result<String> {
             qty.to_string(),
             plain(unit),
             plain(vat),
-            plain(total),
+            // voided lines stay listed and count for nothing in a sum
+            if voided { String::new() } else { plain(total) },
         ];
         out.push_str(&fields.join(";"));
         out.push_str("\r\n");
@@ -363,12 +364,15 @@ pub fn vat_book(conn: &Connection, r: &Range) -> Result<String> {
             cell(&customer),
             customer_nif,
         ];
+        // a voided ticket (one corrected, too) stays in the book, without
+        // amounts: the columns then add up to what was really sold
+        let amount = |c: i64| if voided { String::new() } else { plain(c) };
         for bp in &rates {
             let (base, vat) = split.get(bp).copied().unwrap_or_default();
-            f.push(plain(base));
-            f.push(plain(vat));
+            f.push(amount(base));
+            f.push(amount(vat));
         }
-        f.push(plain(total));
+        f.push(amount(total));
         f.push(method_label(&method).to_string());
         out.push_str(&f.join(";"));
         out.push_str("\r\n");
@@ -381,8 +385,8 @@ pub fn export_vat_book(conn: &Connection, r: &Range) -> Result<PathBuf> {
     let dir = backup::documents().join("Exportaciones");
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("libro_iva_{}_{}.csv", r.from, r.to));
-    fs::write(&path, out)?;
-    Ok(path)
+    // open in Excel, it cannot be written over: a numbered copy then
+    Ok(crate::share::write_free(&path, out.as_bytes())?)
 }
 
 pub fn export_csv(conn: &Connection, r: &Range) -> Result<PathBuf> {
@@ -390,8 +394,8 @@ pub fn export_csv(conn: &Connection, r: &Range) -> Result<PathBuf> {
     let dir = backup::documents().join("Exportaciones");
     fs::create_dir_all(&dir)?;
     let path = dir.join(format!("ventas_{}_{}.csv", r.from, r.to));
-    fs::write(&path, out)?;
-    Ok(path)
+    // open in Excel, it cannot be written over: a numbered copy then
+    Ok(crate::share::write_free(&path, out.as_bytes())?)
 }
 
 #[cfg(test)]

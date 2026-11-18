@@ -167,9 +167,13 @@ function search(items: Indexed[], q: string): Option[] {
 function sure(options: Option[], q: string): number {
   const first = options[0];
   if (!first) return -1;
-  if (first.kind !== 'product' || options.length === 1) return 0;
   const text = parseQuery(q.trim()).text.trim();
-  return options.findIndex((o) => o.kind === 'product' && (o.product.barcode === text || norm(o.product.name) === norm(text)));
+  const exact = options.findIndex((o) => o.kind === 'product' && (o.product.barcode === text || norm(o.product.name) === norm(text)));
+  // "Funda iPhone 13", typed whole, is that product: not a free item called
+  // "funda iphone" at 13 €, which is how a name and a number read otherwise
+  if (first.kind === 'custom' && exact >= 0) return exact;
+  if (first.kind !== 'product' || options.length === 1) return 0;
+  return exact;
 }
 
 function quick(total: number, most = 4): number[] {
@@ -215,6 +219,7 @@ function PriceInput({ cents, onDone }: { cents: number; onDone: (c: number | nul
     <input
       ref={ref}
       className={`cell-input${v && parsed === null ? ' bad' : ''}`}
+      data-pending="1"
       value={v}
       inputMode="decimal"
       aria-label={tr('Precio', 'Price')}
@@ -243,6 +248,7 @@ function QtyInput({ qty, onChange, onExit, onElse, disabled }: { qty: number; on
     <input
       className="qty-input"
       disabled={disabled}
+      data-pending={v !== String(qty) ? '1' : undefined}
       value={v}
       inputMode="numeric"
       aria-label={tr('Cantidad', 'Quantity')}
@@ -256,6 +262,10 @@ function QtyInput({ qty, onChange, onExit, onElse, disabled }: { qty: number; on
           onElse(t);
         } else {
           setV(t);
+          // on the ticket as it is typed: a charge pressed right after,
+          // without leaving this box, is for what it says
+          const n = Number(t);
+          if (n >= 1 && n !== qty) onChange(n);
         }
       }}
       onBlur={() => {
@@ -353,6 +363,12 @@ function MachinePick({ machines, first, cents, onPick, onClose }: { machines: Ma
         e.preventDefault();
         e.stopPropagation();
       };
+      // a key held down chooses nothing: F10 kept pressed opened this, and
+      // its repeats would charge on the first machine
+      if (e.repeat) {
+        stop();
+        return;
+      }
       if (e.key === 'Escape') {
         stop();
         onClose();
@@ -531,6 +547,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   }, [active, loadTill]);
 
   useEffect(() => onBusy(lines.length > 0 || paying || busy), [lines.length, paying, busy, onBusy]);
+  // "which machine?" belongs to Venta: on another screen its keys would
+  // charge a ticket nobody is looking at
+  useEffect(() => {
+    if (!active) setChoosing(false);
+  }, [active]);
 
   const cards = useMemo(() => cardMachines(settings), [settings]);
   const several = cards.length > 1;
@@ -721,6 +742,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     handled.current = incoming.n;
     const repair = incoming.lines.find((l) => l.repairId);
     if (repair && lines.some((l) => l.repairId === repair.repairId)) {
+      // sent again, perhaps with another final price: its line takes it
+      commit(lines.map((l) => (l.repairId === repair.repairId ? { ...l, name: repair.name, unitCents: repair.unitCents } : l)));
       toast.info(tr('Esa reparación ya está en el ticket', 'That repair is already on the ticket'));
       return;
     }
@@ -839,6 +862,15 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   const ready = () => {
     if (!lines.length || busy) return false;
+    // A price still being typed in a line is not on the ticket yet (it goes
+    // in when its box is left). It goes in now, and the next press charges
+    // the ticket as it then shows: never the old amount.
+    const typing = document.activeElement;
+    if (typing instanceof HTMLInputElement && typing.dataset.pending && typing.closest('.till-lines')) {
+      typing.blur();
+      toast.info(tr('Cambio anotado en el ticket: mira el total y pulsa otra vez para cobrar.', 'Change written on the ticket: check the total and press again to charge.'));
+      return false;
+    }
     if (negative) {
       toast.error(errorText(new ApiError('E_NEGATIVE', '')));
       return false;
@@ -911,16 +943,18 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     refreshPrinter();
   };
 
-  const reprint = async (id: number, copy: boolean) => {
+  // atSale: the print of a sale that never reached the paper, so the drawer
+  // opens with it as it would have
+  const reprint = async (id: number, copy: boolean, atSale = false) => {
     if (printing.current) return;
     printing.current = true;
     try {
-      const r = await call<{ warning: string | null }>('tickets.print', { id, copy });
+      const r = await call<{ warning: string | null }>('tickets.print', { id, copy, atSale });
       if (r.warning) toast.info(warningText(r.warning));
       else toast.ok(tr('Impreso', 'Printed'));
       refreshPrinter();
     } catch (e) {
-      printFailed('', e, () => reprint(id, copy));
+      printFailed('', e, () => reprint(id, copy, atSale));
     } finally {
       printing.current = false;
     }
@@ -948,8 +982,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const finish = async (c: Charge, clockOk = false) => {
     if (busy || !lines.length) return;
     setBusy(true);
-    try {
-      const r = await call<Finalized>('sale.finalize', {
+    // what goes to the core now; anything added while it is on its way is
+    // for the next ticket
+    const sent = new Map(lines.map((l) => [l.key, l.qty]));
+    const send = () =>
+      call<Finalized>('sale.finalize', {
         lines: payload,
         payment: { method: c.method, tenderedCents: c.tendered ?? undefined, machine: c.machine ?? undefined },
         print: c.print && !noPrinter,
@@ -959,11 +996,21 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         customer: c.invoice ? customer : undefined,
         replaces: fixing?.id,
       });
+    try {
+      // This cart's id may be that of a sale whose answer never came back
+      // and which the cashier then cleared: the core says so, and this one
+      // is charged under an id of its own.
+      const r = await send().catch((e) => {
+        if (!(e instanceof ApiError && e.code === 'E_SALE_REUSED')) throw e;
+        saleId.current = newSaleId();
+        return send();
+      });
       history.current = [];
       saleId.current = newSaleId();
       const next = cartFromScans(pendingScans.current.splice(0));
       touched.current = Date.now();
-      setLines(next);
+      // scanned or typed while the charge was on its way: it stays
+      setLines((cur) => [...next, ...cur.flatMap((l) => (!sent.has(l.key) ? [l] : l.qty > (sent.get(l.key) ?? 0) ? [{ ...l, qty: l.qty - (sent.get(l.key) ?? 0) }] : []))]);
       setSel(next[next.length - 1]?.key ?? null);
       setPaying(false);
       setGiven('');
@@ -974,7 +1021,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         toast.info(`${tr('Esta venta ya estaba cobrada', 'This sale had already been charged')}: ${r.ticket.number}`, { sticky: true });
       } else if (r.printError) {
         printFailed(`${r.ticket.number} ${tr('guardado, pero no se imprimió', 'saved, but not printed')}: `, toError(r.printError), () =>
-          reprint(r.ticket.id, false),
+          reprint(r.ticket.id, false, true),
         );
       } else {
         if (payload.some((l) => l.repairId)) toast.ok(`${r.ticket.number} · ${tr('reparación entregada', 'repair handed back')}`);
@@ -1069,7 +1116,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       setQuery('');
     } else if (!query && e.key === 'Delete') {
       e.preventDefault();
-      const t = target();
+      // one press, one line: a key held down does not empty the ticket
+      const t = e.repeat ? null : target();
       if (t) remove(t.key);
     } else if (!query && e.ctrlKey && e.key.toLowerCase() === 'z') {
       e.preventDefault();
@@ -1124,7 +1172,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         } else if (e.key === 'F1' || e.key === 'F2' || e.key === 'F3') {
           e.preventDefault();
           setMethod(e.key === 'F1' ? 'cash' : e.key === 'F2' ? 'card' : 'bizum');
-        } else if (method === 'card' && several && cards[Number(e.key) - 1]) {
+        } else if (method === 'card' && several && cards[Number(e.key) - 1] && !(e.target as HTMLElement).closest?.('input, textarea')) {
           e.preventDefault();
           setMachine(cards[Number(e.key) - 1].id);
         } else if (method === 'cash' && !(e.target as HTMLElement).closest?.('input, textarea') && /^[\d.,]$/.test(e.key)) {
@@ -1324,7 +1372,15 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
             >
               {tr('Quitar', 'Remove')}
             </button>
-            <button className="link" onMouseDown={keep} onClick={() => setLeft([])}>
+            <button
+              className="link"
+              onMouseDown={keep}
+              onClick={() => {
+                // kept on purpose: it is not "forgotten" again a moment later
+                touched.current = Date.now();
+                setLeft([]);
+              }}
+            >
               {tr('Seguir', 'Keep it')}
             </button>
           </div>

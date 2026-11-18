@@ -111,6 +111,37 @@ fn translit(c: char) -> Option<&'static str> {
         'ý' | 'ÿ' => "y",
         'Ý' => "Y",
         'ß' => "ss",
+        // names from Romania, Poland, Czechia, Turkey, Hungary: no code page
+        // of a receipt printer has their letters, and a "?" in the middle of
+        // a customer's name helps nobody
+        'ă' | 'ā' | 'ą' => "a",
+        'Ă' | 'Ā' | 'Ą' => "A",
+        'ć' | 'č' => "c",
+        'Ć' | 'Č' => "C",
+        'ď' | 'đ' => "d",
+        'Ď' | 'Đ' => "D",
+        'ę' | 'ě' | 'ē' | 'ė' => "e",
+        'Ę' | 'Ě' | 'Ē' | 'Ė' => "E",
+        'ğ' => "g",
+        'Ğ' => "G",
+        'ī' | 'į' => "i",
+        'İ' | 'Ī' | 'Į' => "I",
+        'ł' | 'ľ' | 'ĺ' => "l",
+        'Ł' | 'Ľ' | 'Ĺ' => "L",
+        'ń' | 'ň' => "n",
+        'Ń' | 'Ň' => "N",
+        'ő' | 'ō' => "o",
+        'Ő' | 'Ō' => "O",
+        'ř' => "r",
+        'Ř' => "R",
+        'ś' | 'š' | 'ş' | 'ș' => "s",
+        'Ś' | 'Š' | 'Ş' | 'Ș' => "S",
+        'ť' | 'ţ' | 'ț' => "t",
+        'Ť' | 'Ţ' | 'Ț' => "T",
+        'ů' | 'ű' | 'ū' | 'ų' => "u",
+        'Ů' | 'Ű' | 'Ū' | 'Ų' => "U",
+        'ź' | 'ż' | 'ž' => "z",
+        'Ź' | 'Ż' | 'Ž' => "Z",
         '€' => "EUR",
         '£' => "GBP",
         '¿' => "?",
@@ -132,6 +163,12 @@ fn translit(c: char) -> Option<&'static str> {
 pub fn printable(s: &str, cp: CodePage) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
+        // Marks nobody sees take no room on paper: the direction marks
+        // WhatsApp wraps a copied phone number in, zero-width spaces, a soft
+        // hyphen, an accent typed apart from its letter.
+        if matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{2064}' | '\u{feff}' | '\u{ad}' | '\u{300}'..='\u{36f}') {
+            continue;
+        }
         if c.is_control() {
             out.push(' ');
         } else if byte(c, cp).is_some() {
@@ -176,5 +213,8 @@ mod tests {
         assert_eq!(printable("Café 5 €", CodePage::Cp858), "Café 5 €");
         assert_eq!(printable("a\tb\nc", CodePage::Cp858), "a b c");
         assert_eq!(printable("móvil 📱", CodePage::Cp858), "móvil ?");
+        // a phone number copied from WhatsApp, a Romanian name
+        assert_eq!(printable("\u{202a}+34 612 34 56 78\u{202c}", CodePage::Cp858), "+34 612 34 56 78");
+        assert_eq!(printable("Ionuț Dănilă", CodePage::Cp858), "Ionut Danila");
     }
 }

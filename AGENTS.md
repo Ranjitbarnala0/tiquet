@@ -59,18 +59,22 @@ UI, `src`: `Shell.tsx` (screens, settings, updates), `Sale.tsx` (Venta), `Board.
 - **Errors are codes.** The core fails with `E_SOMETHING` (or `E_SOMETHING:detail`), and `src/i18n.ts` turns each into Spanish and English. Something that worked with a caveat returns a warning `W_…` instead. Add the text whenever you add a code.
 - **Issued means unchangeable.** Tickets, their lines and VAT rows, cash moves, repair events and fiscal records are protected by SQLite triggers once sealed. "Delete" is a mark (who, when, why), never an erasure (Ley 11/2021). The only real deletion is wiping practice (training) data.
 - **Numbers without gaps.** Series are prefix + tag + year (`T2026-000001`; tags `F` invoice with customer, `R` return, `P` practice). Each number is the series' highest plus one, never below `series_floor`, and `numeracion.json` beside the database makes sure a restored backup never hands out a number twice.
+- **What a paper says about VAT** is kept with each ticket (`ShopInfo.vat`, a `VatView`): `full` (base, rate and VAT of each rate, and each price without VAT), `note` (the words "IVA incluido" and the rate) or `none` (items, prices, total). A bill made in Facturas is `full` or `none`, by the box on it (`showVat`; the default is `invoiceShowVat`). A receipt of Venta follows **Ajustes › Ticket** (`show_vat` + `vat_note`), and an invoice with a customer made in Venta is `full`. Tickets from before 1.13 have no `vat` and print as they always did (`ShopInfo::vat_view`). The amounts and the VAT rows in the database are the same in all three: only the paper changes.
+- **A sale id used again** for another cart (`E_SALE_REUSED`) is a new sale whose screen kept the id of one it never heard was saved: the screen takes a new id and charges it. The same cart sent twice gets its ticket back.
 - **Corrections** (`sale.finalize` with `replaces`) issue the new ticket and void the old one ("Corregida en …") in one transaction.
   - Allowed only on a live sale of the same mode (practice or real), with no repair line, from this year (`tickets::fixable`).
   - `void_in` then checks the day and that there are no live returns: cashiers may correct their own sales of today, when Ajustes lets them; the owner any day while VERI\*FACTU is off.
-  - A correction made the same day is issued now. One for an earlier day keeps the old ticket's date and time (`correction_time`), so neither day's cash changes.
+  - A correction made the same day is issued now, unless the till was opened or counted since the sale: then, and for an earlier day, it keeps the old ticket's date and time (`correction_time`), so no till count and no day's cash changes.
   - The new paper carries no mark. The trail is in the database (`replaces`, `replaced_by`).
   - A ticket with a customer or the `bill` flag is corrected in Facturas, never in Venta, which would drop the customer.
 - **Settings** are one JSON in the `settings` table. Every field has a default, so an old database still loads. `DEVICE_KEYS` (printer, paper, A4 printer, invoice format, language…) stay on each PC. A screen may meet settings sent by an older main till: read new fields with a fallback (`settings.x ?? ''`).
 - **Printing.**
-  - `printer::target` picks the queue, document, network or serial path. `Settings.one_off` (never saved) is a printer picked for one print, and it wins.
+  - `printer::target` picks the queue, document, network or serial path. `Settings.one_off` (never saved) is a printer picked for one print, and it wins; `OneOff::over` lays the print out for that printer's own paper width.
+  - Which printer is which: a name, driver or port that says receipt makes a receipt printer (`score`). A USB port alone is a weak sign, so a printer whose driver prints pages (180 mm or wider) is an office printer after all (`Entry.page`); until 1.13 such inkjets and lasers were never offered for A4.
+  - `printers.auto`, polled by the screen, sets up the receipt printer and, since 1.13, the A4 printer (`a4_auto`: Windows' default when it prints pages, or the only one that does; never when "None" was chosen on purpose, key `invoicePrinterOff`). A printer picked for an A4 bill on a PC with none is kept (`printers.a4`).
   - The cash drawer always opens on the receipt printer, whatever printer was picked.
   - Paper width is read from the driver (`paper_auto`); unknown means 32 columns, which prints right on any roll.
-  - An invoice asked for on A4 on a PC without an A4 printer comes out as a ticket, with `W_A4_AS_TICKET`.
+  - An invoice asked for on A4 on a PC without an A4 printer comes out as a ticket, with `W_A4_AS_TICKET` (`W_A4_GONE` when the printer set up is no longer in Windows). An A4 printer Windows knows is off or paused takes nothing (`E_PRINT:offline`): the page would otherwise wait in its queue.
   - A print counts as printed only when Windows or the printer has taken all of it. Otherwise the job is cancelled, so no drawer opens later on its own.
 - **Several PCs** (`lan.rs`).
   - The main till answers on port 47713, to private addresses only, and only requests with the header `X-Tiquet: 1`. Each PC has its own sign-in.
@@ -113,7 +117,7 @@ npx vite build
 
 - **A test proves a rule better than a click.** Add one in the module you change. Example: `a_bill_is_corrected_with_a_clean_new_one_and_the_old_keeps_why` in `tickets.rs`.
 - **Look at the packaged app, not only the dev page.** Run a built or installed `tiquet.exe --no-window --data <copy of a data folder>` with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333`, then drive it with [tools/cdp-eval.mjs](tools/cdp-eval.mjs) and [tools/cdp-shot.mjs](tools/cdp-shot.mjs). Item fields too narrow at 1366 px showed up only there (1.12.0).
-- **Have a second reader review a big change for bugs before release.** An independent review of the 1.12.0 diff found eleven real bugs.
+- **Have a second reader review a big change for bugs before release.** An independent review of the 1.12.0 diff found eleven real bugs, and four reviews of the whole of 1.12.1 (money, printing, screens, several PCs) found about forty more.
 
 Environment switches:
 
@@ -153,6 +157,9 @@ Environment switches:
 | 1.11.0 | `cargo fmt` rewrote 31 files | Never format |
 | 1.12.0 | Review before release: practice mode could void real bills; a return could be "corrected" into a sale; a repair could reopen; prices drifted a cent when switching VAT modes; the drawer could open on the picked printer; Editar in Hoy dropped the customer; a picked A4 printer was refused; correcting an earlier day moved its cash into today | The rules in section 4 |
 | 1.12.0 | Item and IMEI fields too narrow at 1366 px, seen only in the packaged app | Look at the packaged screens before publishing |
+| 1.12.1 | Shops asked for a bill with no mention of VAT; it had been asked for before and not built | Build what the shop asks for, as an option, and say so |
+| 1.12.1 | Bills kept printing as tickets: the A4 printer had to be found in Ajustes, and USB office printers were classed as receipt printers | Set up by itself whatever can be worked out; never make the shop configure the obvious |
+| 1.12.1 | Audit of the whole app: items scanned during a charge vanished; a quantity typed and then Efectivo charged the old one; "Funda iPhone 13" + Enter added a free item at 13 €; cashiers could not open Facturas; a return left its discount behind; a lost answer on a second PC lost the next sale | Sections 2 and 4; audit the whole app now and then, not only the diff |
 
 ## 8. Still open
 
@@ -160,4 +167,14 @@ Environment switches:
 - The installer is not code-signed: Windows SmartScreen asks "More info › Run anyway", and Defender can still flag a build.
 - VERI\*FACTU: the producer's details are placeholders and no real record has been sent yet ([docs/verifactu.md](docs/verifactu.md)).
 - Repairs: one deposit ticket per repair, at most 400 €; paying the rest before pickup is not built.
-- Used phones under the margin scheme (REBU), where the invoice must not show VAT, are not supported.
+- Used phones under the margin scheme (REBU): a bill can now leave VAT out of its paper, but the books still count it at the line's rate; the margin scheme itself is not built.
+- From the 1.12.1 audit, known and not yet fixed:
+  - A second PC follows the main till to a new address by its install id alone; a device on the shop WiFi that copies that id could draw its sign-ins. It should prove it knows the PC's token first.
+  - A database restored onto another PC keeps its install id: that PC cannot join the first as a second PC, and both may answer as the main till.
+  - A restore brings back the copy's own sharing and licence rows, and other PCs stay signed in until the main till restarts.
+  - The "database will not open" screen only lists backups from the default folder.
+  - Any device on the WiFi can lock sign-in with wrong passwords; a copy with its `controlUrl` row removed is not judged by the licence.
+  - Practice mode still opens, moves and closes the real till and takes in real repairs.
+  - A return or a cash move sent again after a lost answer is saved twice (recharges, expenses and sales are safe).
+  - A reprinted till close recomputes its parts but keeps the stored expected amount.
+  - A4 and "document" prints count as printed once Windows has spooled them: a printer that Windows believes is on, but is not, still queues the page.

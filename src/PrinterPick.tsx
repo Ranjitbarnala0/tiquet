@@ -8,6 +8,8 @@ import type { PrinterEntry } from './types';
 export interface OneOff {
   name: string;
   kind: 'windows' | 'document';
+  // a receipt printer's characters per line, when Windows knows its paper
+  columns?: number;
 }
 
 interface Choices {
@@ -61,7 +63,8 @@ export function PrinterPick({ format, value, onChange, again }: { format: 'a4' |
         const name = e.target.value;
         if (!name) return onChange(null);
         const p = real.find((x) => x.name === name);
-        onChange({ name, kind: format === 'ticket' && p?.receipt ? 'windows' : 'document' });
+        const receipt = format === 'ticket' && !!p?.receipt;
+        onChange({ name, kind: receipt ? 'windows' : 'document', columns: (receipt && p?.columns) || undefined });
       }}
     >
       <option value="">{usual ? `${usual} · ${tr('la de siempre', 'the usual one')}` : none}</option>

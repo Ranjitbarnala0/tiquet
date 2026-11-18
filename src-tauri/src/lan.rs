@@ -124,6 +124,23 @@ pub fn share(st: &AppState, on: bool) -> Result<()> {
     Ok(())
 }
 
+// Before Tiquet ends to update itself: the requests of the shop's other PCs
+// that are on their way are answered first, and new ones are refused, which
+// a PC retries safely. A sale cut off by the installer would stay saved here
+// with its answer lost. The setting stays, so the new version shares again.
+// It never waits longer than `wait` for a request that does not end.
+pub fn pause(wait: Duration) {
+    let Some(old) = lock(&RUNNING).take() else {
+        return;
+    };
+    let (done, ended) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        old.stop();
+        let _ = done.send(());
+    });
+    let _ = ended.recv_timeout(wait);
+}
+
 // as the app opens: answer again if it did before
 pub fn resume_sharing(st: &AppState) {
     let on = settings::get(&st.conn(), "lanShare")
@@ -734,6 +751,13 @@ pub fn forward(st: &AppState, cmd: &str, args: Value) -> Result<Value> {
         Ok(v) => v,
         // with the main till gone the screen still needs to know what it is
         Err(e) if cmd == "bootstrap" && e.0 == "E_LAN_DOWN" => return Ok(down(st, &m)),
+        // Signing out is this PC's to do, heard by the main till or not:
+        // with the till off, the token must not stay here to sign the same
+        // person in again, with no password, once it is back.
+        Err(_) if cmd == "logout" => {
+            forget_token(st);
+            return Ok(Value::Null);
+        }
         Err(e) => return Err(e),
     };
     if let Some(t) = v
@@ -775,10 +799,21 @@ pub fn forward(st: &AppState, cmd: &str, args: Value) -> Result<Value> {
         }
         v["path"] = json!(path.to_string_lossy());
     }
-    // a WhatsApp chat or an email to write: on this PC
+    // A WhatsApp chat or an email to write: on this PC. Nothing else: an
+    // answer from the network never gets to open a file or a program here.
     if v["opened"] == json!(false) && st.desktop() {
-        if let Some(url) = v["url"].as_str().map(str::to_string) {
-            let can = !url.starts_with("mailto:") || os::handles("mailto");
+        if let Some(mut url) = v["url"].as_str().map(str::to_string) {
+            // the main till chose the WhatsApp app because it has it; this
+            // PC may only have the browser
+            if let Some(rest) = url.strip_prefix("whatsapp://send") {
+                if !os::handles("whatsapp") {
+                    url = format!("https://web.whatsapp.com/send{rest}");
+                }
+            }
+            let known = ["https://web.whatsapp.com/", "https://wa.me/", "whatsapp://send", "mailto:"]
+                .iter()
+                .any(|p| url.starts_with(p));
+            let can = known && (!url.starts_with("mailto:") || os::handles("mailto"));
             v["opened"] = json!(can && os::open(&url));
         }
     }
@@ -890,8 +925,8 @@ fn save_here(file: &Value) -> Result<PathBuf> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
     }
-    std::fs::write(&path, data)?;
-    Ok(path)
+    // open in a reader here, it cannot be written over: a numbered copy
+    Ok(crate::share::write_free(&path, &data)?)
 }
 
 // Ajustes saved here: the printer and the rest of this PC's own settings stay
@@ -922,12 +957,7 @@ fn save_settings(st: &AppState, m: &Main, args: Value) -> Result<Value> {
         let new = new.clean();
         let conn = st.conn();
         settings::put(&conn, "settings", &serde_json::to_string(&new)?)?;
-        // "None" chosen on purpose: no printer is then picked on its own
-        if new.printer_name.trim().is_empty() && !old.printer_name.trim().is_empty() {
-            settings::put(&conn, "printerOff", "1")?;
-        } else if !new.printer_name.trim().is_empty() {
-            settings::clear(&conn, "printerOff")?;
-        }
+        settings::printer_choice(&conn, &old, &new)?;
     }
     call(st, m, "settings.get", &json!({}))
 }

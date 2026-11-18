@@ -259,7 +259,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
       const text = `${head}. ${tr('Guardada, pero no se imprimió', 'Saved, but not printed')}: ${errorText(err)}`;
       const retry = async () => {
         try {
-          if (dep?.printError) await call('tickets.print', { id: dep.ticket.id });
+          if (dep?.printError) await call('tickets.print', { id: dep.ticket.id, atSale: true });
           if (r.printError) await call('repairs.print', { id: r.repair.id, what: 'both' });
           toast.ok(tr('Impreso', 'Printed'));
         } catch (e) {

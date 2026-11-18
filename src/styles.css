@@ -3864,19 +3864,27 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
 .bill-line {
   display: grid;
   grid-template-columns: minmax(140px, 1fr) 54px minmax(96px, 112px) 74px minmax(70px, 88px) 30px;
+  grid-template-areas: 'name qty price vat amount del';
   align-items: center;
   gap: 8px;
 }
 
-/* with the IMEI box it goes under the item's name, so both have room for
-   a long model name and the whole IMEI */
-.bill-lines.imei .bill-line {
-  grid-template-areas: 'name qty price vat amount del' 'imei . . . . .';
-  row-gap: 4px;
+/* a bill that says nothing about VAT has no VAT column either */
+.bill-lines.novat .bill-line {
+  grid-template-columns: minmax(140px, 1fr) 54px minmax(96px, 112px) minmax(70px, 88px) 30px;
+  grid-template-areas: 'name qty price amount del';
 }
 
+/* with the IMEI box it goes under the item's name, so both have room for
+   a long model name and the whole IMEI */
 .bill-lines.imei .bill-line:not(.head) {
+  grid-template-areas: 'name qty price vat amount del' 'imei . . . . .';
+  row-gap: 4px;
   padding-bottom: 6px;
+}
+
+.bill-lines.imei.novat .bill-line:not(.head) {
+  grid-template-areas: 'name qty price amount del' 'imei . . . .';
 }
 
 .bill-line .bl-name {
@@ -3887,8 +3895,24 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
   grid-area: imei;
 }
 
-.bill-line.head .bl-imei {
-  display: none;
+.bill-line .bl-qty {
+  grid-area: qty;
+}
+
+.bill-line .bl-price {
+  grid-area: price;
+}
+
+.bill-line .bl-vat {
+  grid-area: vat;
+}
+
+.bill-line .bl-amount {
+  grid-area: amount;
+}
+
+.bill-line .bl-del {
+  grid-area: del;
 }
 
 .bill-line.head {
@@ -3898,9 +3922,32 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
   font-weight: 600;
 }
 
-.bill-line.head span:nth-last-child(2),
-.bill-line.head span:nth-child(n + 3):not(:last-child) {
+.bill-line.head .bl-qty,
+.bill-line.head .bl-price,
+.bill-line.head .bl-amount {
   text-align: right;
+}
+
+/* under the lines: another item, a discount */
+.bill-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+}
+
+.bill-more .bill-check {
+  margin-left: auto;
+}
+
+.bill-add {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.bill-add:hover {
+  background: var(--accent-softer);
 }
 
 .bill-line .money-input {
@@ -3925,10 +3972,6 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
 
 .bill-line b.num {
   font-size: 14px;
-}
-
-.bill-line.fresh input {
-  border-style: dashed;
 }
 
 .bill-hint {

@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Ban, Building2, Check, FileDown, FilePlus2, FileText, Pencil, Plus, Printer, ReceiptText, Search, Share2, Trash2, TriangleAlert, UserRound } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { Ban, Building2, Check, FileDown, FilePlus2, FileText, Pencil, Plus, Printer, ReceiptText, Search, Share2, Tag, Trash2, TriangleAlert, UserRound } from 'lucide-react';
 import { call, toError } from './api';
 import { dateTime, eur, fmt, isoDate, parseMoney, rate, VAT_RATES } from './format';
 import { errorText, isPrinterSetup, isTransient, tr, warningText } from './i18n';
@@ -86,6 +86,50 @@ function startFormat(s: Settings): Format {
   return (s.invoicePrinter ?? '').trim() ? 'a4' : 'ticket';
 }
 
+// A bill being typed, kept on this PC until it is issued: it comes back after
+// an update, a restart or a power cut. Half a day old at most: yesterday's is
+// nobody's bill any more.
+interface Draft {
+  at: number;
+  full: boolean;
+  customer: { name: string; nif: string; address: string };
+  lines: LineDraft[];
+  method: Method;
+  showVat: boolean;
+  net: boolean;
+  note: string;
+}
+
+function readDraft(key?: string): Draft | null {
+  if (!key) return null;
+  try {
+    const d = JSON.parse(localStorage.getItem(key) ?? 'null') as Draft | null;
+    return d && Array.isArray(d.lines) && d.lines.length > 0 && Date.now() - d.at < 12 * 3_600_000 ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+// Whether a bill already issued shows its VAT. Since 1.13 it says so itself;
+// before, an invoice with a customer did and a simple one followed Ajustes.
+function shownVat(t: TicketRecord, s: Settings) {
+  return t.shop.vat ? t.shop.vat === 'full' : !!t.customer || !!s.invoiceVatTable;
+}
+
+// A printer picked for an A4 bill on a PC that has none set up becomes that
+// PC's A4 printer, so nobody has to find Ajustes for it.
+async function keepA4(picked: OneOff | null, format: Format, settings: Settings, onSettings: ((s: Settings) => void) | undefined, say: (text: string) => void) {
+  if (format !== 'a4' || !picked || (settings.invoicePrinter ?? '').trim()) return;
+  try {
+    const r = await call<{ applied: boolean; settings?: Settings }>('printers.a4', { name: picked.name });
+    if (!r.applied || !r.settings) return;
+    onSettings?.(r.settings);
+    say(tr(`Desde ahora las facturas en A4 de este PC salen por «${picked.name}». Se cambia en Ajustes › Facturas.`, `From now on this PC's A4 invoices print on "${picked.name}". Change it in Settings › Invoices.`));
+  } catch {
+    // only a convenience: the bill itself is printed
+  }
+}
+
 // What the core lets each one void (tickets.rs void_in): the owner any day
 // while VERI*FACTU is off, otherwise today; a cashier their own of today
 // when Ajustes lets them; never across practice and real.
@@ -115,6 +159,10 @@ interface PageProps {
   products: Product[];
   logo: Logo | null;
   onSetupPrinter?: () => void;
+  // this PC's settings changed here (its A4 printer, kept from a pick)
+  onSettings?: (s: Settings) => void;
+  // where the bill being typed is kept
+  draftKey?: string;
   // a bill to correct, sent from Hoy
   fix?: TicketRecord | null;
   onFixTaken?: () => void;
@@ -122,7 +170,7 @@ interface PageProps {
   active?: boolean;
 }
 
-export function Invoices({ user, settings, products, logo, onSetupPrinter, fix, onFixTaken, active = true }: PageProps) {
+export function Invoices({ user, settings, products, logo, onSetupPrinter, onSettings, draftKey, fix, onFixTaken, active = true }: PageProps) {
   const [view, setView] = useState<'new' | 'list'>('new');
   const [fixing, setFixing] = useState<TicketRecord | null>(fix ?? null);
   useEffect(() => {
@@ -169,7 +217,7 @@ export function Invoices({ user, settings, products, logo, onSetupPrinter, fix, 
       </div>
       <div className="bills-body">
         <div hidden={view !== 'new' || !!fixing} className="bills-pane">
-          <BillEditor key={`new-${fresh}`} settings={settings} products={products} logo={logo} onDone={done} onSetupPrinter={onSetupPrinter} />
+          <BillEditor key={`new-${fresh}`} settings={settings} products={products} logo={logo} onDone={done} onSetupPrinter={onSetupPrinter} onSettings={onSettings} draftKey={draftKey} />
         </div>
         {fixing && (
           <div hidden={view !== 'new'} className="bills-pane">
@@ -185,6 +233,7 @@ export function Invoices({ user, settings, products, logo, onSetupPrinter, fix, 
                 setView('list');
               }}
               onSetupPrinter={onSetupPrinter}
+              onSettings={onSettings}
             />
           </div>
         )}
@@ -202,6 +251,7 @@ export function Invoices({ user, settings, products, logo, onSetupPrinter, fix, 
             }}
             onNew={() => setView('new')}
             made={fresh}
+            onSettings={onSettings}
             onSetupPrinter={onSetupPrinter}
           />
         </div>
@@ -220,6 +270,8 @@ interface EditorProps {
   onDone: (t: TicketRecord) => void;
   onCancel?: () => void;
   onSetupPrinter?: () => void;
+  onSettings?: (s: Settings) => void;
+  draftKey?: string;
 }
 
 function linesOf(t: TicketRecord, net: boolean): LineDraft[] {
@@ -242,21 +294,41 @@ function linesOf(t: TicketRecord, net: boolean): LineDraft[] {
     });
 }
 
-function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupPrinter }: EditorProps) {
+function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupPrinter, onSettings, draftKey }: EditorProps) {
   const toast = useToast();
   const vat = settings.defaultVatBp;
-  const [net, setNet] = useState(settings.invoiceNetPrices);
-  const [full, setFull] = useState(!!from?.customer);
-  const [customer, setCustomer] = useState(() => from?.customer ?? { name: '', nif: '', address: '' });
-  const [lines, setLines] = useState<LineDraft[]>(() => [...(from ? linesOf(from, settings.invoiceNetPrices) : []), blank(vat)]);
-  const [method, setMethod] = useState<Method>(from?.payment.method ?? 'cash');
+  const [draft] = useState(() => (from ? null : readDraft(draftKey)));
+  // The bill shows its VAT (base, rate and VAT of each rate) or says nothing
+  // of it: then it is items, prices as typed and a total. Prices without VAT
+  // only make sense on a bill that shows it.
+  const [start] = useState(() => {
+    if (draft) return { shown: !!draft.showVat, net: !!draft.showVat && !!draft.net };
+    const shown = from ? shownVat(from, settings) : !!settings.invoiceShowVat;
+    return { shown, net: shown && !!settings.invoiceNetPrices };
+  });
+  const [showVat, setShowVat] = useState(start.shown);
+  const [net, setNet] = useState(start.net);
+  const [note, setNote] = useState(draft?.note ?? from?.note ?? '');
+  const [full, setFull] = useState(draft ? !!draft.full : !!from?.customer);
+  const [customer, setCustomer] = useState(() => draft?.customer ?? from?.customer ?? { name: '', nif: '', address: '' });
+  const [lines, setLines] = useState<LineDraft[]>(() => {
+    const had = draft ? draft.lines.map((l) => ({ ...l, key: ++keys })) : from ? linesOf(from, start.net) : [];
+    return had.length ? had : [blank(vat)];
+  });
+  const [method, setMethod] = useState<Method>(draft?.method ?? from?.payment.method ?? 'cash');
   const cards = useMemo(() => cardMachines(settings), [settings]);
   const [machine, setMachine] = useState<number>(() => from?.payment.machine ?? (cards.some((m) => m.id === settings.cardMachine) ? settings.cardMachine : (cards[0]?.id ?? 0)));
-  const [format, setFormat] = useState<Format>(() => startFormat(settings));
+  // A4 or ticket: what Ajustes says (by itself, A4 as soon as this PC has an
+  // A4 printer) until someone chooses here
+  const [formatPick, setFormatPick] = useState<Format | null>(null);
+  const format = formatPick ?? startFormat(settings);
   const [printer, setPrinter] = useState<OneOff | null>(null);
+  // a printer picked for one paper is not for the other
+  useEffect(() => setPrinter(null), [format]);
   const [print, setPrint] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [saleId] = useState(newId);
+  // one id per bill, so a retry after a lost answer never issues it twice
+  const saleId = useRef(newId());
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [ticket, setTicket] = useState<PLine[]>([]);
   const [number, setNumber] = useState('');
@@ -267,13 +339,30 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   const form = useRef<HTMLDivElement>(null);
 
   const catalogue = useMemo(() => new Map(products.filter((p) => p.active).map((p) => [p.name.toLowerCase(), p])), [products]);
-  const set = (key: number, patch: Partial<LineDraft>) =>
-    setLines((cur) => {
-      const next = cur.map((l) => (l.key === key ? { ...l, ...patch } : l));
-      // there is always an empty line at the end, ready for the next item
-      const last = next[next.length - 1];
-      return last && (last.name.trim() || last.price.trim()) ? [...next, blank(vat)] : next;
-    });
+  const set = (key: number, patch: Partial<LineDraft>) => setLines((cur) => cur.map((l) => (l.key === key ? { ...l, ...patch } : l)));
+  // Another line, with the cursor in it: the button under the lines, or
+  // Enter on the last price.
+  const [fresh, setFresh] = useState<{ key: number; field: 'name' | 'price' } | null>(null);
+  const add = (line?: Partial<LineDraft>, field: 'name' | 'price' = 'name') => {
+    const l = { ...blank(vat), ...line };
+    setLines((cur) => [...cur, l]);
+    setFresh({ key: l.key, field });
+  };
+  useEffect(() => {
+    if (!fresh) return;
+    focus(`line-${fresh.key}-${fresh.field}`);
+    setFresh(null);
+  }, [fresh]);
+  // Enter walks a line (to its price) and from the last price to the next
+  // line, making one when there is none
+  const onKey = (e: KeyboardEvent, l: LineDraft, field: 'name' | 'imei' | 'qty' | 'price') => {
+    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return;
+    e.preventDefault();
+    if (field !== 'price') return focus(`line-${l.key}-price`);
+    const next = lines[lines.findIndex((x) => x.key === l.key) + 1];
+    if (next) focus(`line-${next.key}-name`);
+    else if (l.name.trim() || l.price.trim()) add();
+  };
   const named = (key: number, name: string) => {
     const p = catalogue.get(name.trim().toLowerCase());
     if (!p) return set(key, { name, productId: undefined });
@@ -296,6 +385,10 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
     );
     setNet(on);
   };
+  const toggleVat = (on: boolean) => {
+    if (!on && net) switchNet(false);
+    setShowVat(on);
+  };
 
   // a line can be a discount (a negative price), never zero
   const parsed = lines.map((l) => ({ l, qty: Number.parseInt(l.qty, 10), cents: parseMoney(l.price) }));
@@ -314,6 +407,18 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   const total = out.reduce((s, l) => s + l.qty * l.unitCents, 0);
   const who = full && customer.name.trim() ? { name: customer.name.trim(), nif: customer.nif.trim(), address: customer.address.trim() } : undefined;
 
+  // what is typed is kept until the bill is issued
+  const typed = lines.some((l) => l.name.trim() || l.price.trim() || l.imei.trim()) || (full && !!(customer.name.trim() || customer.nif.trim() || customer.address.trim())) || !!note.trim();
+  useEffect(() => {
+    if (!draftKey || from) return;
+    try {
+      if (typed) localStorage.setItem(draftKey, JSON.stringify({ at: Date.now(), full, customer, lines, method, showVat, net, note } satisfies Draft));
+      else localStorage.removeItem(draftKey);
+    } catch {
+      // a full disk loses only the draft
+    }
+  }, [draftKey, from, typed, full, customer, lines, method, showVat, net, note]);
+
   // what is still needed, said in words next to the button
   const missing: { text: string; focus: string }[] = [];
   if (full) {
@@ -330,7 +435,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   if (!full && total > SIMPLIFIED_LIMIT) missing.push({ text: tr('los datos del cliente: pasa de 3.000 €', "the customer's details: over 3,000 EUR"), focus: '' });
 
   // the page as it will come out, a moment after each change
-  const previewKey = JSON.stringify({ format, out, who, method, replaces: from?.id });
+  const previewKey = JSON.stringify({ format, out, who, method, replaces: from?.id, showVat, note: note.trim() });
   useEffect(() => {
     const n = ++seq.current;
     setPreviewing(true);
@@ -338,12 +443,12 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
       const args = JSON.parse(previewKey);
       const req =
         args.format === 'a4'
-          ? call<{ sheets: Sheet[]; number: string }>('invoices.preview', { lines: args.out, customer: args.who, payment: { method: args.method }, replaces: args.replaces }).then((r) => {
+          ? call<{ sheets: Sheet[]; number: string }>('invoices.preview', { lines: args.out, customer: args.who, payment: { method: args.method }, replaces: args.replaces, showVat: args.showVat, note: args.note }).then((r) => {
               if (n !== seq.current) return;
               setSheets(r.sheets);
               setNumber(r.number);
             })
-          : call<{ lines: PLine[]; number: string }>('sale.preview', { lines: args.out, customer: args.who, payment: { method: args.method }, replaces: args.replaces }).then((r) => {
+          : call<{ lines: PLine[]; number: string }>('sale.preview', { lines: args.out, customer: args.who, payment: { method: args.method }, replaces: args.replaces, showVat: args.showVat, note: args.note }).then((r) => {
               if (n !== seq.current) return;
               setTicket(r.lines);
               setNumber(r.number);
@@ -369,6 +474,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
     if (!id) return;
     const el = form.current?.querySelector<HTMLInputElement>(`[data-id="${id}"]`);
     el?.focus();
+    el?.select?.();
     el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
   };
 
@@ -381,17 +487,26 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
     }
     setBusy(true);
     try {
-      const r = await call<Finalized>('sale.finalize', {
-        lines: out,
-        payment: { method, machine: method === 'card' ? machine : undefined },
-        customer: full ? { name: customer.name.trim(), nif: customer.nif.trim(), address: customer.address.trim() } : undefined,
-        saleId,
-        expectedCents: total,
-        print,
-        bill: true,
-        format,
-        printer: printer ?? undefined,
-        replaces: from?.id,
+      const send = () =>
+        call<Finalized>('sale.finalize', {
+          lines: out,
+          payment: { method, machine: method === 'card' ? machine : undefined },
+          customer: full ? { name: customer.name.trim(), nif: customer.nif.trim(), address: customer.address.trim() } : undefined,
+          saleId: saleId.current,
+          expectedCents: total,
+          print,
+          bill: true,
+          format,
+          printer: printer ?? undefined,
+          replaces: from?.id,
+          showVat,
+          note: note.trim() || undefined,
+        });
+      // changed after an answer that never came back: it is another bill
+      const r = await send().catch((e) => {
+        if (toError(e).code !== 'E_SALE_REUSED') throw e;
+        saleId.current = newId();
+        return send();
       });
       const what = from ? tr(`Guardada como ${r.ticket.number}. ${from.number} queda anotada en Tiquet como corregida.`, `Saved as ${r.ticket.number}. ${from.number} is noted in Tiquet as corrected.`) : `${tr('Factura', 'Invoice')} ${r.ticket.number}`;
       if (r.printError) {
@@ -400,6 +515,14 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
         toast.error(`${what} · ${tr('no se imprimió', 'not printed')}: ${errorText(e)}`, fix && onSetupPrinter ? { action: { label: tr('Configurar', 'Set up'), run: onSetupPrinter } } : undefined);
       } else if (r.printWarning) toast.info(`${what} · ${warningText(r.printWarning)}`);
       else toast.ok(`${what}${print && !from ? ` · ${tr('impresa', 'printed')}` : ''}`);
+      if (print && !r.printError && !r.printWarning) void keepA4(printer, format, settings, onSettings, toast.info);
+      if (draftKey && !from) {
+        try {
+          localStorage.removeItem(draftKey);
+        } catch {
+          // nothing to do
+        }
+      }
       onDone(r.ticket);
     } catch (e) {
       toast.error(errorText(e));
@@ -501,9 +624,12 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
         <section className="bill-card">
           <div className="bill-card-head">
             <h3>{tr('Qué se vende', 'What is sold')}</h3>
-            <label className="bill-check">
-              <input type="checkbox" checked={!net} onChange={(e) => switchNet(!e.target.checked)} />
-              {tr('Precios con IVA incluido', 'Prices include VAT')}
+            <label
+              className="bill-check"
+              title={tr('Marcada, la factura lleva la base, el tipo y la cuota de IVA. Sin marcar, solo artículos, precios y total.', 'Ticked, the invoice carries the net amount, the rate and the VAT. Unticked, only items, prices and the total.')}
+            >
+              <input data-id="bill-vat" type="checkbox" checked={showVat} onChange={(e) => toggleVat(e.target.checked)} />
+              {tr('Mostrar el IVA en la factura', 'Show VAT on the invoice')}
             </label>
           </div>
           <datalist id="bill-products">
@@ -514,50 +640,63 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
                 <option key={p.id} value={p.name} />
               ))}
           </datalist>
-          <div className={`bill-lines${showImei ? ' imei' : ''}`}>
+          <div className={`bill-lines${showImei ? ' imei' : ''}${showVat ? '' : ' novat'}`}>
             <div className="bill-line head">
-              <span>{tr('Artículo', 'Item')}</span>
-              {showImei && <span className="bl-imei">{tr('IMEI / Nº de serie', 'IMEI / serial')}</span>}
-              <span>{tr('Cant.', 'Qty')}</span>
-              <span>{net ? tr('Precio sin IVA', 'Price excl. VAT') : tr('Precio', 'Price')}</span>
-              <span>IVA</span>
-              <span>{tr('Importe', 'Amount')}</span>
-              <span />
+              <span className="bl-name">{tr('Artículo', 'Item')}</span>
+              <span className="bl-qty">{tr('Cant.', 'Qty')}</span>
+              <span className="bl-price">{net ? tr('Precio sin IVA', 'Price excl. VAT') : tr('Precio', 'Price')}</span>
+              {showVat && <span className="bl-vat">IVA</span>}
+              <span className="bl-amount">{tr('Importe', 'Amount')}</span>
+              <span className="bl-del" />
             </div>
             {lines.map((l, i) => {
               const p = parsed[i];
               const amount = p && !bad(p) ? p.qty * unitOf(l, p.cents ?? 0, net) : null;
-              const last = i === lines.length - 1 && !l.name.trim() && !l.price.trim();
+              // the one line of an empty bill has nothing to remove
+              const only = lines.length === 1 && !l.name.trim() && !l.price.trim() && !l.imei.trim();
               return (
-                <div className={`bill-line${last ? ' fresh' : ''}`} key={l.key}>
-                  <input className="bl-name" data-id={`line-${l.key}-name`} list="bill-products" value={l.name} onChange={(e) => named(l.key, e.target.value)} placeholder={last ? tr('Escribe o elige un artículo', 'Type or pick an item') : ''} maxLength={100} aria-label={tr('Artículo', 'Item')} />
+                <div className="bill-line" key={l.key}>
+                  <input
+                    className="bl-name"
+                    data-id={`line-${l.key}-name`}
+                    list="bill-products"
+                    value={l.name}
+                    onChange={(e) => named(l.key, e.target.value)}
+                    onKeyDown={(e) => onKey(e, l, 'name')}
+                    placeholder={tr('Escribe o elige un artículo', 'Type or pick an item')}
+                    maxLength={100}
+                    aria-label={tr('Artículo', 'Item')}
+                  />
                   {showImei && (
                     <input
                       className="bl-imei"
                       value={l.imei}
                       onChange={(e) => set(l.key, { imei: e.target.value.replace(/\s+/g, '') })}
+                      onKeyDown={(e) => onKey(e, l, 'imei')}
                       placeholder={tr('IMEI o nº de serie (opcional)', 'IMEI or serial (optional)')}
                       maxLength={40}
                       aria-label="IMEI"
                     />
                   )}
-                  <input className="num" value={l.qty} onChange={(e) => set(l.key, { qty: e.target.value.replace(/\D/g, '') })} inputMode="numeric" aria-label={tr('Cantidad', 'Quantity')} />
-                  <div className="money-input">
-                    <input data-id={`line-${l.key}-price`} className="num" value={l.price} onChange={(e) => set(l.key, { price: e.target.value })} inputMode="decimal" placeholder="0,00" aria-label={tr('Precio', 'Price')} />
+                  <input className="num bl-qty" value={l.qty} onChange={(e) => set(l.key, { qty: e.target.value.replace(/\D/g, '') })} onKeyDown={(e) => onKey(e, l, 'qty')} inputMode="numeric" aria-label={tr('Cantidad', 'Quantity')} />
+                  <div className="money-input bl-price">
+                    <input data-id={`line-${l.key}-price`} className="num" value={l.price} onChange={(e) => set(l.key, { price: e.target.value })} onKeyDown={(e) => onKey(e, l, 'price')} inputMode="decimal" placeholder="0,00" aria-label={tr('Precio', 'Price')} />
                     <span>€</span>
                   </div>
-                  <select value={l.vatBp} onChange={(e) => set(l.key, { vatBp: Number(e.target.value), exact: undefined })} aria-label="IVA">
-                    {VAT_RATES.map((v) => (
-                      <option key={v} value={v}>
-                        {rate(v)}
-                      </option>
-                    ))}
-                  </select>
-                  <b className="num">{amount === null ? '' : fmt(amount)}</b>
-                  {last ? (
-                    <span />
+                  {showVat && (
+                    <select className="bl-vat" value={l.vatBp} onChange={(e) => set(l.key, { vatBp: Number(e.target.value), exact: undefined })} aria-label="IVA">
+                      {VAT_RATES.map((v) => (
+                        <option key={v} value={v}>
+                          {rate(v)}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  <b className="num bl-amount">{amount === null ? '' : fmt(amount)}</b>
+                  {only ? (
+                    <span className="bl-del" />
                   ) : (
-                    <button type="button" className="icon-btn" onClick={() => remove(l.key)} aria-label={tr('Quitar la línea', 'Remove the line')}>
+                    <button type="button" className="icon-btn bl-del" onClick={() => remove(l.key)} aria-label={tr('Quitar la línea', 'Remove the line')} title={tr('Quitar la línea', 'Remove the line')}>
                       <Trash2 size={16} />
                     </button>
                   )}
@@ -565,11 +704,33 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
               );
             })}
           </div>
-          <p className="bill-hint">
-            {net
-              ? tr(`Los precios se escriben sin IVA: se añade el de cada línea (${rate(vat)} si no se cambia).`, `Prices are typed without VAT: each line's rate is added (${rate(vat)} unless changed).`)
-              : tr(`Los precios ya llevan el IVA. No hay que tocar nada: ${rate(vat)} si no se cambia.`, `Prices already include VAT. Nothing to change: ${rate(vat)} unless changed.`)}
-          </p>
+          <div className="bill-more">
+            <button type="button" className="btn bill-add" data-id="bill-add" onClick={() => add()}>
+              <Plus size={16} />
+              {tr('Añadir artículo', 'Add item')}
+            </button>
+            <button type="button" className="btn btn-ghost" onClick={() => add({ name: tr('Descuento', 'Discount'), price: '-' }, 'price')} title={tr('Una línea que resta: escribe cuánto', 'A line that takes off: type how much')}>
+              <Tag size={15} />
+              {tr('Descuento', 'Discount')}
+            </button>
+            {showVat && (
+              <label className="bill-check">
+                <input type="checkbox" checked={!net} onChange={(e) => switchNet(!e.target.checked)} />
+                {tr('Precios con IVA incluido', 'Prices include VAT')}
+              </label>
+            )}
+          </div>
+          {showVat && (
+            <p className="bill-hint">
+              {net
+                ? tr(`Los precios se escriben sin IVA: se añade el de cada línea (${rate(vat)} si no se cambia).`, `Prices are typed without VAT: each line's rate is added (${rate(vat)} unless changed).`)
+                : tr(`Los precios ya llevan el IVA: ${rate(vat)} si no se cambia en la línea.`, `Prices already include VAT: ${rate(vat)} unless the line says otherwise.`)}
+            </p>
+          )}
+          {full && !showVat && <p className="bill-hint">{tr('Para una empresa o un autónomo, marca «Mostrar el IVA»: lo necesita para deducirlo.', 'For a business or a self-employed customer, tick "Show VAT": they need it to deduct it.')}</p>}
+          <Field label={tr('Nota en la factura (opcional)', 'Note on the invoice (optional)')}>
+            <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} maxLength={400} placeholder={tr('Garantía, estado del teléfono, nombre del cliente…', "Warranty, the phone's condition, the customer's name…")} />
+          </Field>
         </section>
 
         <section className="bill-card">
@@ -595,10 +756,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
           </span>
           <Segmented
             value={format}
-            onChange={(f) => {
-              setFormat(f);
-              setPrinter(null);
-            }}
+            onChange={setFormatPick}
             options={[
               { value: 'a4', label: tr('Hoja A4', 'A4 page') },
               { value: 'ticket', label: tr('Ticket', 'Receipt') },
@@ -612,7 +770,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
         <div className="bill-total">
           <span>{tr('Total', 'Total')}</span>
           <b>{eur(total)}</b>
-          <small>{tr('IVA incluido', 'VAT included')}</small>
+          {showVat && <small>{tr('IVA incluido', 'VAT included')}</small>}
         </div>
         <div className="bill-print">
           <label className="bill-check">
@@ -658,9 +816,10 @@ interface ListProps {
   // goes up with each bill made here
   made: number;
   onSetupPrinter?: () => void;
+  onSettings?: (s: Settings) => void;
 }
 
-function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onNew, onSetupPrinter, made }: ListProps) {
+function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onNew, onSetupPrinter, made, onSettings }: ListProps) {
   const toast = useToast();
   const [q, setQ] = useState('');
   // a bill just made always shows: a search typed before is cleared
@@ -671,8 +830,10 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
   const [rec, setRec] = useState<TicketRecord | null>(null);
   const [paper, setPaper] = useState<{ lines: PLine[]; logo: Logo | null } | null>(null);
   const [sheets, setSheets] = useState<Sheet[]>([]);
-  const [format, setFormat] = useState<Format>(() => startFormat(settings));
+  const [formatPick, setFormatPick] = useState<Format | null>(null);
+  const format = formatPick ?? startFormat(settings);
   const [printer, setPrinter] = useState<OneOff | null>(null);
+  useEffect(() => setPrinter(null), [format]);
   const [busy, setBusy] = useState('');
   const [sharing, setSharing] = useState(false);
   const [voiding, setVoiding] = useState(false);
@@ -740,7 +901,10 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
     try {
       const r = await call<{ warning: string | null }>('tickets.print', { id: rec.id, format, printer: printer ?? undefined });
       if (r.warning) toast.info(warningText(r.warning));
-      else toast.ok(tr('Impresa', 'Printed'));
+      else {
+        toast.ok(tr('Impresa', 'Printed'));
+        void keepA4(printer, format, settings, onSettings, toast.info);
+      }
       open();
     } catch (e) {
       const err = toError(e);
@@ -844,10 +1008,7 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
               <div className="bill-actions-print">
                 <Segmented
                   value={format}
-                  onChange={(f) => {
-                    setFormat(f);
-                    setPrinter(null);
-                  }}
+                  onChange={setFormatPick}
                   options={[
                     { value: 'a4', label: 'A4' },
                     { value: 'ticket', label: tr('Ticket', 'Receipt') },

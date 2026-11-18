@@ -86,7 +86,18 @@ async fn call(app: AppHandle, cmd: String, mut args: Value) -> Result<Value, Str
         // anyone at the till may update, and so may the failure screen
         "app.update.check" => return update::check(&app).await,
         "app.update.fetch" => return update::fetch(&app).await,
-        "app.update.install" => return update::install(&app).await,
+        "app.update.install" => {
+            // the shop's other PCs are answered and then asked to wait
+            let _ = tauri::async_runtime::spawn_blocking(|| lan::pause(std::time::Duration::from_secs(8))).await;
+            let out = update::install(&app).await;
+            // still here: nothing was installed, and they are answered again
+            if let Some(shell) = app.try_state::<Shell>() {
+                if let Ok(c) = &*shell.core() {
+                    lan::resume_sharing(c);
+                }
+            }
+            return out;
+        }
         "app.ready" if update::testing() => {
             if let Err(e) = update::install(&app).await {
                 args["ok"] = json!(false);

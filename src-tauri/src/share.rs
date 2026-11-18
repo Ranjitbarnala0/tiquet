@@ -59,9 +59,27 @@ pub fn file_name_of(rec: &TicketRecord) -> String {
 pub fn save_pdf(rec: &TicketRecord, s: &Settings, logo: Option<&Logo>) -> crate::error::Result<PathBuf> {
     let dir = crate::backup::documents().join(if rec.customer.is_some() || rec.bill { "Facturas" } else { "Tickets" });
     std::fs::create_dir_all(&dir)?;
-    let path = dir.join(file_name_of(rec));
-    std::fs::write(&path, pdf(rec, s, logo))?;
-    Ok(path)
+    Ok(write_free(&dir.join(file_name_of(rec)), &pdf(rec, s, logo))?)
+}
+
+// Writes a file under its name, or, when that one cannot be written over
+// (it is open in a PDF reader or in Excel, which Windows then locks), under
+// the same name with a number: "Factura-TF2026-000001 (2).pdf". A fresh copy
+// beats an error nobody at the till can do anything about.
+pub fn write_free(path: &std::path::Path, data: &[u8]) -> std::io::Result<PathBuf> {
+    let first = match std::fs::write(path, data) {
+        Ok(()) => return Ok(path.to_path_buf()),
+        Err(e) => e,
+    };
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = path.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    for n in 2..=9 {
+        let other = path.with_file_name(format!("{stem} ({n}){ext}"));
+        if std::fs::write(&other, data).is_ok() {
+            return Ok(other);
+        }
+    }
+    Err(first)
 }
 
 pub fn subject(rec: &TicketRecord) -> String {
@@ -128,6 +146,32 @@ pub fn whatsapp_ticket(text: &str) -> String {
     format!("```\n{text}\n```")
 }
 
+// Windows hands a link to the app that takes it only up to some 2,000
+// characters, and silently cuts what is over: a long ticket would arrive
+// without its total. So a ticket too long for the link goes with its first
+// lines and all of its totals, and "..." where items were left out.
+pub fn whatsapp_fit(phone: &str, text: &str, app: bool) -> String {
+    const MAX: usize = 1950;
+    let url = |t: &str| whatsapp_url(phone, &whatsapp_ticket(t), app);
+    let full = url(text);
+    if full.len() <= MAX {
+        return full;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    // from the rule above TOTAL to the end
+    let cut = lines.iter().rposition(|l| l.starts_with("TOTAL")).map_or(lines.len(), |i| i.saturating_sub(1));
+    let (head, tail) = lines.split_at(cut);
+    let mut keep = head.len();
+    loop {
+        keep = keep.saturating_sub(1);
+        let short = [&head[..keep], &["..."], tail].concat().join("\n");
+        let link = url(&short);
+        if link.len() <= MAX || keep == 0 {
+            return link;
+        }
+    }
+}
+
 // for the mail app this PC has; mail clients cut long links, so the body is
 // left short and the PDF is offered to attach
 pub fn mailto_url(to: &str, subject: &str, body: &str) -> String {
@@ -155,6 +199,14 @@ mod tests {
         let u = whatsapp_url("34612345678", "a b", false);
         assert_eq!(u, "https://web.whatsapp.com/send?phone=34612345678&text=a%20b");
         assert!(whatsapp_url("34612345678", "x", true).starts_with("whatsapp://send?phone=34612345678&text="));
+        // a ticket too long for a link keeps its first lines and all its totals
+        let items: Vec<String> = (1..=40).map(|i| format!("Artículo número {i}\n  1 x 9,95                    9,95")).collect();
+        let long = format!("Mi Tienda\n--------\n{}\n========\nTOTAL   398,00 €\n========\nEfectivo 398,00", items.join("\n"));
+        let link = whatsapp_fit("34612345678", &long, true);
+        assert!(link.len() <= 1950, "{}", link.len());
+        assert!(link.contains("TOTAL") && link.contains("Efectivo") && link.contains("Mi%20Tienda") && link.contains("...") && !link.contains("n%C3%BAmero%2040"));
+        let short = "Mi Tienda\n========\nTOTAL 9,95 €";
+        assert_eq!(whatsapp_fit("34612345678", short, false), whatsapp_url("34612345678", &whatsapp_ticket(short), false));
         let m = mailto_url(" ana@example.com?cc=x ", "Ticket T1", "Hola\nAdiós");
         assert_eq!(m, "mailto:ana@example.comcc=x?subject=Ticket%20T1&body=Hola%0D%0AAdi%C3%B3s");
     }

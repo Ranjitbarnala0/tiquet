@@ -14,7 +14,7 @@ use crate::layout::{self, TicketView};
 use crate::printer::Job;
 use crate::settings::{self, Logo, OneOff, Settings};
 use crate::state::{self, AppState, SessionUser};
-use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
+use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord, VatView};
 use crate::verifactu::{self, Env};
 use crate::{aeat, auth, backup, book, cash, diag, lan, log, mail, money, os, printer, products, recovery, repairs, reports, share, users};
 
@@ -238,12 +238,7 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             if remote {
                 return to(settings::load(&conn)?);
             }
-            // "None" chosen on purpose: no printer is then picked on its own
-            if saved.printer_name.trim().is_empty() && !old.printer_name.trim().is_empty() {
-                settings::put(&conn, "printerOff", "1")?;
-            } else if !saved.printer_name.trim().is_empty() {
-                conn.execute("DELETE FROM settings WHERE key = 'printerOff'", [])?;
-            }
+            settings::printer_choice(&conn, &old, &saved)?;
             to(saved)
         }
         "logo.get" => {
@@ -317,11 +312,14 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let logo = tickets::logo_for(&conn, &rec)?;
                 (rec, settings::load(&conn)?, logo)
             };
-            let s = Settings { one_off: one_off(&a), ..s };
+            let s = OneOff::over(one_off(&a), s);
+            // the retry of a print that failed at the sale: the drawer opens
+            // with it, as it would have (never for a copy)
+            let at_sale = a.get("atSale").and_then(Value::as_bool).unwrap_or(false);
             let warning = match a.get("format").and_then(Value::as_str) {
-                Some("a4") => print_as(st, &rec, &s, logo.as_ref(), false, true)?,
-                Some("ticket") => print_as(st, &rec, &s, logo.as_ref(), false, false)?,
-                _ => print_ticket(st, &rec, &s, logo.as_ref(), false)?,
+                Some("a4") => print_as(st, &rec, &s, logo.as_ref(), at_sale, true)?,
+                Some("ticket") => print_as(st, &rec, &s, logo.as_ref(), at_sale, false)?,
+                _ => print_ticket(st, &rec, &s, logo.as_ref(), at_sale)?,
             };
             Ok(json!({ "warning": warning }))
         }
@@ -379,7 +377,7 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let rec = tickets::load(&conn, id(&a)?)?;
                 (rec.number.clone(), share::text(&rec, &settings::load(&conn)?))
             };
-            let out = whatsapp(st, &phone, &share::whatsapp_ticket(&text), flag(&a, "web", false));
+            let out = whatsapp_ticket(st, &phone, &text, flag(&a, "web", false));
             log::info(format!("ticket {number} sent by WhatsApp"));
             Ok(out)
         }
@@ -847,35 +845,32 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             st.admin()?;
             to(printer::detect(&printer::list()))
         }
-        // A receipt printer set up on its own, asked every few seconds by the
-        // screen: on a new PC, when one is plugged in later, or when Windows
-        // renamed its queue (another USB port makes "POS-80 (Copia 1)"). Only
-        // a clear receipt printer is taken, never over a network or COM
-        // printer, nor when someone chose "None" on purpose.
+        // The receipt printer and the A4 printer of this PC, each set up on
+        // its own when it is clear which one it is.
         "printers.auto" => {
             let me = st.user()?;
-            let (s, off) = {
-                let conn = st.conn();
-                (settings::load(&conn)?, settings::get(&conn, "printerOff")?.is_some())
-            };
-            let name = s.printer_name.trim().to_string();
-            let kind_ok = ["windows", "document"].contains(&s.printer_kind.as_str());
-            if !kind_ok || (name.is_empty() && off) {
+            let mut out = receipt_auto(st, &me)?;
+            if let Some(saved) = a4_auto(st, &me.name)? {
+                out["a4"] = json!(saved.invoice_printer);
+                out["settings"] = to(saved)?;
+            }
+            Ok(out)
+        }
+        // A printer picked for an A4 bill on a PC that had none becomes that
+        // PC's A4 printer: nobody has to find Ajustes for it. One already
+        // chosen is never replaced this way.
+        "printers.a4" => {
+            let me = st.user()?;
+            let name = a.get("name").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+            let conn = st.conn();
+            let s = settings::load_own(&conn)?;
+            if name.is_empty() || !s.invoice_printer.trim().is_empty() {
                 return Ok(json!({ "applied": false }));
             }
-            if !name.is_empty() && printer::status(&st.sink, &s).state != "missing" {
-                return paper_check(st, &me.name, s);
-            }
-            let found = printer::detect(&printer::list());
-            let Some(best) = found.best.clone().filter(|b| *b != name) else {
-                return Ok(json!({ "applied": false, "candidates": found.candidates }));
-            };
-            // the paper its driver or its name says, else 58 mm; a width someone chose stays
-            let columns = if s.paper_auto { found.columns } else { s.columns };
-            let saved = settings::save(&st.conn(), Settings { printer_name: best.clone(), printer_kind: "windows".into(), columns, ..s })?;
-            st.set_paper_read();
-            log::info(format!("receipt printer {best} chosen automatically for {}, {columns} columns (was {name:?})", me.name));
-            Ok(json!({ "applied": true, "name": best, "columns": columns, "replaced": Some(name).filter(|n| !n.is_empty()), "settings": saved }))
+            let saved = settings::save(&conn, Settings { invoice_printer: name.clone(), ..s })?;
+            settings::clear(&conn, "invoicePrinterOff")?;
+            log::info(format!("A4 printer {name} kept for this PC, picked by {}", me.name));
+            Ok(json!({ "applied": true, "settings": saved }))
         }
         "printers.status" => {
             st.user()?;
@@ -1028,6 +1023,14 @@ fn whatsapp(st: &AppState, phone: &str, message: &str, web: bool) -> Value {
     json!({ "url": url, "opened": opened, "app": app })
 }
 
+// a whole ticket: as much of it as a link can carry, its totals always
+fn whatsapp_ticket(st: &AppState, phone: &str, text: &str, web: bool) -> Value {
+    let app = !web && os::handles("whatsapp");
+    let url = share::whatsapp_fit(phone, text, app);
+    let opened = st.desktop() && os::open(&url);
+    json!({ "url": url, "opened": opened, "app": app })
+}
+
 fn bootstrap(st: &AppState) -> Result<Value> {
     let conn = st.conn();
     let s = settings::load(&conn)?;
@@ -1079,6 +1082,9 @@ fn resume(conn: &rusqlite::Connection) -> Result<Option<i64>> {
 #[serde(rename_all = "camelCase")]
 struct SetupIn {
     shop_name: String,
+    // the owner's or the company's name, when the shop trades under another
+    #[serde(default)]
+    legal_name: String,
     #[serde(default)]
     shop_address: String,
     #[serde(default)]
@@ -1107,6 +1113,7 @@ fn setup(st: &AppState, a: SetupIn) -> Result<Value> {
     }
     let s = Settings {
         shop_name: a.shop_name.trim().into(),
+        legal_name: a.legal_name.trim().chars().take(80).collect(),
         shop_address: a.shop_address.trim().into(),
         shop_phone: a.shop_phone.trim().into(),
         shop_nif: crate::nif::normalize(&a.shop_nif),
@@ -1208,6 +1215,11 @@ struct PreviewIn {
     // the sale this one corrects, whose day and time it keeps
     #[serde(default)]
     replaces: Option<i64>,
+    // a bill: whether it shows its VAT, and its note
+    #[serde(default)]
+    show_vat: Option<bool>,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
@@ -1247,7 +1259,8 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
         payment: payment.as_ref(),
         refund_of: None,
         reason: None,
-        show_vat: s.show_vat,
+        vat: a.show_vat.map(VatView::bill).unwrap_or(if customer.is_some() { VatView::Full } else { VatView::of(&s) }),
+        note: a.note.as_deref(),
         copy: false,
         voided: false,
         customer: customer.as_ref(),
@@ -1280,6 +1293,11 @@ struct DraftIn {
     // the bill this one corrects, whose day and time it keeps
     #[serde(default)]
     replaces: Option<i64>,
+    // whether it shows its VAT (left out: as Ajustes says), and its note
+    #[serde(default)]
+    show_vat: Option<bool>,
+    #[serde(default)]
+    note: Option<String>,
 }
 
 // What a bill being made looks like on A4: the next number, today, the
@@ -1322,7 +1340,7 @@ fn invoice_preview(st: &AppState, a: DraftIn) -> Result<Value> {
         vat: totals.vat.clone(),
         prints: Vec::new(),
         payment_changes: Vec::new(),
-        shop: ShopInfo::from_settings(&s),
+        shop: ShopInfo { vat: Some(VatView::bill(a.show_vat.unwrap_or(s.invoice_show_vat))), ..ShopInfo::from_settings(&s) },
         customer,
         training: s.training,
         qr,
@@ -1330,6 +1348,7 @@ fn invoice_preview(st: &AppState, a: DraftIn) -> Result<Value> {
         bill: true,
         replaces: None,
         replaced_by: None,
+        note: a.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
     };
     let sheets = crate::invoice::invoice(&rec, logo.as_ref(), &crate::invoice::InvoiceOpts::of(&s, false));
     Ok(json!({ "sheets": sheets, "number": number, "totals": totals }))
@@ -1414,7 +1433,7 @@ fn finalize(st: &AppState, a: FinalizeIn) -> Result<Value> {
         rec.payment.method,
         me.name
     ));
-    let s = Settings { one_off: printer.filter(|o| !o.name.trim().is_empty()), ..s };
+    let s = OneOff::over(printer, s);
     let out = issue_as(st, rec, &s, logo.as_ref(), print, format.as_deref());
     // the day's copy for a till left open overnight runs beside the till:
     // the first sale of the day never waits for it
@@ -1480,7 +1499,8 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
         payment: Some(&plan.payment),
         refund_of: Some((&plan.original.number, &plan.original.issued_at)),
         reason: Some(&plan.reason),
-        show_vat: s.show_vat,
+        vat: plan.original.shop.vat_view(plan.original.customer.is_some(), s.show_vat),
+        note: None,
         copy: false,
         voided: false,
         customer: plan.original.customer.as_ref(),
@@ -1495,8 +1515,10 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
 // later one, by anyone, says COPIA, and so do the extra copies set in Ajustes.
 // The drawer opens only with the original printed at the sale itself. A full
 // invoice comes out on A4 when this PC has a printer for them.
+// A bill goes to this PC's A4 printer by itself when it has one, unless
+// Ajustes says bills are tickets here.
 fn print_ticket(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>, at_sale: bool) -> Result<Option<String>> {
-    let a4 = (rec.customer.is_some() || rec.bill) && !s.invoice_printer.trim().is_empty();
+    let a4 = (rec.customer.is_some() || rec.bill) && s.invoice_format != "ticket" && !s.invoice_printer.trim().is_empty();
     print_as(st, rec, s, logo, at_sale, a4)
 }
 
@@ -1512,6 +1534,13 @@ fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>
         let (attempt, copy) = tickets::begin_print(&st.conn(), rec.id, false)?;
         let sheets = crate::invoice::invoice(rec, logo, &crate::invoice::InvoiceOpts::of(s, copy));
         let out = printer::send_sheets(&st.sink, s, &rec.number, &sheets);
+        // The usual A4 printer is no longer in Windows (unplugged from the
+        // PC for good, or renamed): nothing was sent, so the bill comes out
+        // as a ticket instead, and the screen says why.
+        if !picked && out.as_ref().is_err_and(|e| e.0.starts_with("E_PRINTER_MISSING")) {
+            tickets::end_print(&st.conn(), attempt, "failed", out.as_ref().err().map(|e| e.0.as_str()))?;
+            return print_as(st, rec, s, logo, at_sale, false).map(|w| Some(w.filter(|w| w.starts_with("W_SAVED:")).unwrap_or_else(|| "W_A4_GONE".into())));
+        }
         // the drawer hangs on the receipt printer
         if at_sale && !copy && drawer_opens(s, &rec.payment.method) {
             printer::send_detached(&st.sink, s, "cajon", &escpos::kick(s));
@@ -1548,6 +1577,74 @@ fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>
     };
     tickets::end_print(&st.conn(), attempt, status, detail)?;
     out
+}
+
+// A receipt printer set up on its own, asked every few seconds by the screen:
+// on a new PC, when one is plugged in later, or when Windows renamed its
+// queue (another USB port makes "POS-80 (Copia 1)"). Only a clear receipt
+// printer is taken, never over a network or COM printer, nor when someone
+// chose "None" on purpose.
+fn receipt_auto(st: &AppState, me: &SessionUser) -> Result<Value> {
+    let (s, off) = {
+        let conn = st.conn();
+        (settings::load(&conn)?, settings::get(&conn, "printerOff")?.is_some())
+    };
+    let name = s.printer_name.trim().to_string();
+    let kind_ok = ["windows", "document"].contains(&s.printer_kind.as_str());
+    if !kind_ok || (name.is_empty() && off) {
+        return Ok(json!({ "applied": false }));
+    }
+    if !name.is_empty() && printer::status(&st.sink, &s).state != "missing" {
+        return paper_check(st, &me.name, s);
+    }
+    let found = printer::detect(&printer::list());
+    let Some(best) = found.best.clone().filter(|b| *b != name) else {
+        return Ok(json!({ "applied": false, "candidates": found.candidates }));
+    };
+    // the paper its driver or its name says, else 58 mm; a width someone chose stays
+    let columns = if s.paper_auto { found.columns } else { s.columns };
+    let saved = settings::save(&st.conn(), Settings { printer_name: best.clone(), printer_kind: "windows".into(), columns, ..s })?;
+    st.set_paper_read();
+    log::info(format!("receipt printer {best} chosen automatically for {}, {columns} columns (was {name:?})", me.name));
+    Ok(json!({ "applied": true, "name": best, "columns": columns, "replaced": Some(name).filter(|n| !n.is_empty()), "settings": saved }))
+}
+
+// The A4 printer of this PC, looked after the same way: with none chosen (and
+// "None" not chosen on purpose), or the one chosen gone from Windows, the
+// default printer is taken when it prints pages, or the only printer that
+// does. Listing printers is not free, so it is asked every half minute at
+// most, and only of the real spooler.
+fn a4_auto(st: &AppState, who: &str) -> Result<Option<Settings>> {
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if !matches!(st.sink, state::PrintSink::Spooler) {
+        return Ok(None);
+    }
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if last.is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(30)) {
+            return Ok(None);
+        }
+        *last = Some(std::time::Instant::now());
+    }
+    let (s, off) = {
+        let conn = st.conn();
+        (settings::load_own(&conn)?, settings::get(&conn, "invoicePrinterOff")?.is_some())
+    };
+    // "None" was chosen on purpose, or this PC's bills are tickets by choice
+    if off || s.invoice_format == "ticket" {
+        return Ok(None);
+    }
+    let name = s.invoice_printer.trim().to_string();
+    let entries = printer::list();
+    if !name.is_empty() && entries.iter().any(|e| e.name == name) {
+        return Ok(None);
+    }
+    let Some(best) = printer::detect_a4(&entries, &printer::page_wide).filter(|b| *b != name) else {
+        return Ok(None);
+    };
+    let saved = settings::save(&st.conn(), Settings { invoice_printer: best.clone(), ..s })?;
+    log::info(format!("A4 printer {best} chosen automatically for {who} (was {name:?})"));
+    Ok(Some(saved))
 }
 
 // Papel automático for the printer already set up, once a run: an install

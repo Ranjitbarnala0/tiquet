@@ -45,13 +45,18 @@ export function useEntrySave(onChanged: () => void) {
   const toast = useToast();
   const last = useRef({ key: '', at: 0 });
   const busy = useRef(false);
+  // one id for each thing saved, sent again when its answer never came back:
+  // the core then returns what it already has instead of saving it twice
+  const pending = useRef({ key: '', id: '' });
   return useCallback(
     async (entry: EntryDraft): Promise<boolean> => {
       const key = JSON.stringify(entry);
       if (busy.current || (last.current.key === key && Date.now() - last.current.at < 1500)) return false;
       busy.current = true;
       try {
-        const r = await call<{ entry: { id: number; concept: string; cents: number }; printError: string | null }>('book.add', { ...entry, clientId: newId() });
+        if (pending.current.key !== key) pending.current = { key, id: newId() };
+        const r = await call<{ entry: { id: number; concept: string; cents: number }; printError: string | null }>('book.add', { ...entry, clientId: pending.current.id });
+        pending.current = { key: '', id: '' };
         last.current = { key, at: Date.now() };
         const id = r.entry.id;
         if (r.printError) toast.error(`${tr('Guardado, pero el justificante no se imprimió', 'Saved, but the receipt did not print')}: ${errorText(toError(r.printError))}`);
@@ -275,6 +280,10 @@ export function ExpenseModal({
   const [vatBp, setVatBp] = useState(entry?.vatBp ?? settings.defaultVatBp);
   const [date, setDate] = useState(entry ? entry.at.slice(0, 10) : '');
   const [sure, setSure] = useState(false);
+  // the amount was read out of the words ("luz 45"): shown first, saved on
+  // the next Enter, because in "Pantalla iPhone 11" the 11 is not money
+  const [guessed, setGuessed] = useState(false);
+  useEffect(() => setGuessed(false), [concept, text]);
   const [recent, setRecent] = useState<Quick[]>([]);
   const amountRef = useRef<HTMLInputElement>(null);
 
@@ -291,6 +300,11 @@ export function ExpenseModal({
   const submit = async (e?: FormEvent) => {
     e?.preventDefault();
     if (!parsed) {
+      amountRef.current?.focus();
+      return;
+    }
+    if (!(typed && typed > 0) && !guessed) {
+      setGuessed(true);
       amountRef.current?.focus();
       return;
     }
@@ -366,6 +380,11 @@ export function ExpenseModal({
           </div>
           <Segmented value={method} onChange={setMethod} options={pays(entry?.method)} />
         </div>
+        {guessed && parsed && !(typed && typed > 0) && (
+          <p className="form-error">
+            {tr(`Se apunta «${parsed.concept}» por ${eur(parsed.cents)}. Enter otra vez para apuntarlo así, o escribe el importe.`, `Saving "${parsed.concept}" for ${eur(parsed.cents)}. Enter again to save it like that, or type the amount.`)}
+          </p>
+        )}
         {sure && parsed && (
           <p className="form-error">
             {tr('Importe alto', 'Large amount')}: {eur(parsed.cents)}. {tr('Pulsa Enter otra vez para apuntarlo.', 'Press Enter again to save it.')}

@@ -85,6 +85,11 @@ const errors: Record<string, [string, string]> = {
   E_NEGATIVE: ['El total no puede ser negativo', 'The total cannot be negative'],
   E_REFUND_INVALID: ['Este ticket no admite devolución', 'This ticket cannot be returned'],
   E_REFUND_QTY: ['No se pueden devolver más unidades de las que quedan en el ticket', 'You cannot return more units than are left on the ticket'],
+  E_REFUND_DISCOUNT: [
+    'Esta venta lleva un descuento: devuelve también la línea del descuento, o saldría más dinero del que se cobró.',
+    'This sale has a discount: return the discount line too, or more money would go out than came in.',
+  ],
+  E_SALE_REUSED: ['Ya hay otra venta guardada con este mismo ticket. Mira en Hoy antes de cobrar otra vez.', 'Another sale is already saved under this same ticket. Check Today before charging again.'],
   E_REFUND_EMPTY: ['Elige al menos un artículo para devolver', 'Pick at least one item to return'],
   E_HAS_REFUNDS: [
     'Esta venta tiene devoluciones: borra antes las devoluciones o haz otra devolución.',
@@ -281,6 +286,7 @@ export function isPrinterSetup(e: unknown): boolean {
 
 const warnings: Record<string, [string, string]> = {
   W_PRINT_SLOW: ['La impresora va lenta: el ticket sigue saliendo.', 'The printer is slow: the ticket is still printing.'],
+  W_A4_GONE: ['La impresora A4 de este PC ya no está en Windows: ha salido como ticket. Elige otra en Ajustes › Facturas.', 'This PC\'s A4 printer is no longer in Windows: it came out as a receipt. Choose another in Settings › Invoices.'],
   W_A4_AS_TICKET: ['Este PC no tiene impresora A4: ha salido como ticket. Elígela en Ajustes › Facturas.', 'This PC has no A4 printer: it came out as a receipt. Choose one in Settings › Invoices.'],
 };
 

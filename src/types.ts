@@ -56,6 +56,8 @@ export interface Settings {
   ticketPrefix: string;
   defaultVatBp: number;
   showVat: boolean;
+  // with the breakdown off: the words "IVA incluido", or nothing about VAT
+  vatNote: boolean;
   ticketNif: boolean;
   ticketAddress: boolean;
   ticketPhone: boolean;
@@ -114,8 +116,10 @@ export interface Settings {
   invoiceTerms: string;
   // what a bill made in Facturas comes out as on this PC
   invoiceFormat: 'auto' | 'a4' | 'ticket';
-  // a simple bill with the table of VAT per rate too
+  // a simple bill with the table of VAT per rate too (bills before 1.13)
   invoiceVatTable: boolean;
+  // a new bill starts with its VAT shown; off, items, prices and a total
+  invoiceShowVat: boolean;
   // the IMEI / serial box on each line of a bill
   invoiceImei: boolean;
   // prices on bills typed without VAT
@@ -304,6 +308,10 @@ export interface TicketRecord {
   // a correction: the number it replaced, or the one that replaced it
   replaces: string | null;
   replacedBy: string | null;
+  // free words printed on a bill
+  note: string | null;
+  // as it was issued; `vat` says how much of the VAT its paper shows
+  shop: { vat?: 'full' | 'note' | 'none' | null };
 }
 
 export interface RefundPreview {
@@ -421,6 +429,8 @@ export interface PrinterEntry {
   virtual: boolean;
   default: boolean;
   receipt: boolean;
+  // a USB printer whose driver prints pages: an office printer
+  page?: boolean;
   // characters per line for the paper its driver is set up for
   columns: number | null;
 }

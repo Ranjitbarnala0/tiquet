@@ -1,10 +1,33 @@
-Download `Tiquet_1.12.1_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.13.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.12.1: **invoices made your way, repairs that ask for nothing, and a printer for each print.**
+New in 1.13.0: **a bill with or without IVA, the A4 printer found by itself, and the whole till audited.**
+
+- **A bill with IVA, or with nothing about it.** Each bill has a box, **Mostrar el IVA en la factura**. Unticked, the bill carries the items, their prices as typed and the total, and does not say "IVA incluido" or anything else about IVA, on A4 and on the roll. Ticked, it shows the base, the rate and the IVA of each rate, and prices can then be typed without IVA. Which way a new bill starts is in **Ajustes › Facturas**.
+- **The same choice for tickets.** **Ajustes › Ticket › IVA en el ticket**: the breakdown, only the words "IVA incluido", or nothing.
+- **Adding items is a button.** **Añadir artículo** under the lines, or Enter on a price. **Descuento** adds a line that takes off. A **Nota** on each bill (a warranty, the state of a used phone, the customer's name) prints on it.
+- **The A4 printer is found by itself.** Tiquet takes Windows' default printer when it prints pages, or the only printer that does, and says so. Many USB inkjets and lasers were being taken for receipt printers and never offered for A4: fixed. A printer picked once for an A4 bill on a PC that had none is kept for the next ones. A bill sent to a printer that is switched off now says so, instead of waiting in its queue to come out later.
+- **Better-looking paper.** A phone's IMEI on a line of its own, never cut in two. The total set apart between two rules. No "Cambio 0,00" when the exact money was given. On 58 mm paper the IVA table no longer runs its amounts together from 1.000 € up. Names such as Ionuț or Dănilă print with plain letters instead of "?".
+- **A bill half typed is never lost.** It comes back after an update, a restart or a power cut.
+- **The whole till, audited.** Four independent reviews of every part found these, all fixed:
+  - Items scanned while a sale was being charged vanished from the next ticket.
+  - A quantity typed in a line and then **Efectivo**, without leaving the box, charged the old quantity.
+  - Typing a product's whole name ending in a number ("Funda iPhone 13") and Enter added a free item at 13 €.
+  - Cashiers could not open **Facturas**.
+  - **Gasto** took "Pantalla iPhone 11" as an expense of 11 € at the first Enter.
+  - A return could take an item back and leave its discount on the sale, paying out more than was paid.
+  - On a second PC, a sale rung after a lost answer could be answered "ya estaba cobrada" and not saved.
+  - The same recharge or expense sent again after a lost answer was saved twice.
+  - A sale corrected after the till had been counted and opened again moved into the afternoon's cash.
+  - The cash drawer stayed shut when a ticket that failed to print was printed with **Reintentar**.
+  - A long ticket sent by WhatsApp could arrive cut off before its total.
+  - A second PC still opened whatever link the main till's answer named, and kept its sign-in after **Bloquear** when the main till was off.
+  - The VAT book counted the amounts of voided and corrected tickets.
+
+Also new in 1.12.1: **invoices made your way, repairs that ask for nothing, and a printer for each print.**
 
 - **Facturas, redone.** The page opens ready to work: the invoice on the left, and on the right the page exactly as it will print, changing as you type. The total and the button are always at the bottom. Next to the button it says what is still missing, if anything, and pressing it takes you there: the button never stays grey without saying why. A half-made invoice waits while you look at another screen.
 - **With or without the customer's details.** **Sin datos** is a simplified invoice, for a cover or a cable: it asks the customer for nothing. **Con nombre y NIF** is a full invoice, for a phone or a business; earlier customers come up as you type their name.

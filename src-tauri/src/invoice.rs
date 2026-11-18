@@ -12,7 +12,7 @@ use crate::codepage::{byte, printable, CodePage};
 use crate::layout::{date, method_label};
 use crate::money::{div_round, fmt, fmt_rate};
 use crate::settings::{Logo, Settings};
-use crate::tickets::{compute, Customer, Payment, SaleLine, ShopInfo, TicketRecord, VatRow};
+use crate::tickets::{compute, Customer, Payment, SaleLine, ShopInfo, TicketRecord, VatRow, VatView};
 use crate::verifactu;
 
 // one A4 page
@@ -94,6 +94,18 @@ const QR: f32 = 32.0;
 // the lines table: description, quantity, unit price without and with VAT,
 // rate, amount; numbers right aligned 2 mm inside their column
 const COLS: [f32; 7] = [LEFT, 104.0, 116.0, 138.0, 160.0, 173.0, RIGHT];
+// and on a bill that says nothing about VAT: description, quantity, price,
+// amount
+const PLAIN: [f32; 5] = [LEFT, 132.0, 148.0, 172.0, RIGHT];
+
+// the table's column edges for what the bill shows
+fn cols(view: VatView) -> &'static [f32] {
+    if view == VatView::None {
+        &PLAIN
+    } else {
+        &COLS
+    }
+}
 const BODY: f32 = 9.0;
 const ROW_LEAD: f32 = 3.8;
 const ROW_PAD: f32 = 0.6;
@@ -535,9 +547,19 @@ fn modules(d: &mut Doc, x: f32, y: f32, rows: &[String]) {
 }
 
 // the lines table's shaded heading, on every page that has rows
-fn table_head(d: &mut Doc, y: f32) -> f32 {
-    let h = 9.0;
+fn table_head(d: &mut Doc, y: f32, view: VatView) -> f32 {
     let f = font(8.0, true);
+    if view == VatView::None {
+        let h = 7.0;
+        d.rect(LEFT, y, RIGHT - LEFT, h, Some(SHADE), false);
+        let one = y + h / 2.0 + f.cap() / 2.0;
+        d.text(PLAIN[0] + 2.0, one, f, Align::Left, "Descripción");
+        for (e, l) in PLAIN[2..].iter().zip(["Cant.", "Precio", "Importe"]) {
+            d.text(*e - 2.0, one, f, Align::Right, l);
+        }
+        return y + h;
+    }
+    let h = 9.0;
     d.rect(LEFT, y, RIGHT - LEFT, h, Some(SHADE), false);
     let one = y + h / 2.0 + f.cap() / 2.0;
     let (a, b) = (y + 3.7, y + 7.1);
@@ -554,18 +576,22 @@ fn table_head(d: &mut Doc, y: f32) -> f32 {
 
 struct Row {
     desc: Vec<String>,
-    cells: [String; 5],
+    // one for each column after the description
+    cells: Vec<String>,
 }
 
 impl Row {
-    // Prices are stored with VAT. A full invoice also states each unit price
-    // without it (RD 1619/2012, art. 6.1 f), as the receipt's does.
-    fn of(l: &SaleLine) -> Row {
-        let net = div_round(l.unit_cents * 10_000, 10_000 + l.vat_bp);
-        Row {
-            desc: wrap(&l.name, font(BODY, false), COLS[1] - COLS[0] - 4.0),
-            cells: [l.qty.to_string(), fmt(net), fmt(l.unit_cents), fmt_rate(l.vat_bp), fmt(l.total())],
+    // Prices are stored with VAT. A bill that shows its VAT also states each
+    // unit price without it (RD 1619/2012, art. 6.1 f), as the receipt's
+    // does; one that does not shows the price as it was typed.
+    fn of(l: &SaleLine, view: VatView) -> Row {
+        let c = cols(view);
+        let desc = wrap(&l.name, font(BODY, false), c[1] - c[0] - 4.0);
+        if view == VatView::None {
+            return Row { desc, cells: vec![l.qty.to_string(), fmt(l.unit_cents), fmt(l.total())] };
         }
+        let net = div_round(l.unit_cents * 10_000, 10_000 + l.vat_bp);
+        Row { desc, cells: vec![l.qty.to_string(), fmt(net), fmt(l.unit_cents), fmt_rate(l.vat_bp), fmt(l.total())] }
     }
 
     fn height(&self) -> f32 {
@@ -573,33 +599,34 @@ impl Row {
     }
 }
 
-fn draw_row(d: &mut Doc, y: f32, r: &Row) -> f32 {
+fn draw_row(d: &mut Doc, y: f32, r: &Row, cols: &[f32]) -> f32 {
     let f = font(BODY, false);
     let base = |i: usize| y + ROW_PAD + ROW_LEAD * (i as f32 + 0.5) + f.cap() / 2.0;
     for (i, l) in r.desc.iter().enumerate() {
-        d.text(COLS[0] + 2.0, base(i), f, Align::Left, l);
+        d.text(cols[0] + 2.0, base(i), f, Align::Left, l);
     }
-    for (i, c) in r.cells.iter().enumerate() {
+    for (i, c) in r.cells.iter().enumerate().take(cols.len().saturating_sub(2)) {
         // a number too long for its column is set smaller, never over the next
-        let room = COLS[i + 2] - COLS[i + 1] - 3.0;
+        let room = cols[i + 2] - cols[i + 1] - 3.0;
         let w = f.width(c);
         let g = if w > room { font(BODY * room / w, false) } else { f };
-        d.text(COLS[i + 2] - 2.0, base(0), g, Align::Right, c);
+        d.text(cols[i + 2] - 2.0, base(0), g, Align::Right, c);
     }
     let bottom = y + r.height();
     d.line(LEFT, bottom, RIGHT, bottom, 0.1);
     bottom
 }
 
-// under the table on the right: VAT per rate, the total, how it was paid. A
-// simplified invoice may leave the VAT table out: the rate of each line is in
-// the table above, and the total says the VAT is in it.
-fn totals(d: &mut Doc, y: f32, rec: &TicketRecord, vat: &[VatRow], table: bool) -> f32 {
+// Under the table on the right: VAT per rate, the total, how it was paid.
+// Without the VAT table the total says the VAT is in it, the rate of each
+// line being in the table above; a bill that says nothing about VAT has the
+// total and how it was paid, no more.
+fn totals(d: &mut Doc, y: f32, rec: &TicketRecord, vat: &[VatRow], view: VatView) -> f32 {
     let x0 = 100.0;
     let edges = [133.0, 149.0, 171.0, RIGHT - 2.0];
     let (head, f, big) = (font(8.0, true), font(BODY, false), font(14.0, true));
     let mut y = y;
-    if table {
+    if view == VatView::Full {
         d.rect(x0, y, RIGHT - x0, 6.5, Some(SHADE), false);
         for (e, l) in edges.iter().zip(["Base imponible", "Tipo IVA", "Cuota IVA", "Total"]) {
             d.text(*e, y + 3.25 + head.cap() / 2.0, head, Align::Right, l);
@@ -620,13 +647,25 @@ fn totals(d: &mut Doc, y: f32, rec: &TicketRecord, vat: &[VatRow], table: bool) 
     d.text(RIGHT - 2.0, base, big, Align::Right, &format!("{} €", fmt(rec.total_cents)));
     y += 10.0;
     let pay = font(9.5, false);
-    if !table {
+    if view == VatView::Note {
         d.text(RIGHT - 2.0, y + 5.0, pay, Align::Right, "IVA incluido");
         y += 5.0;
     }
     let label = if rec.kind == "refund" { "Forma de devolución" } else { "Forma de pago" };
     d.text(RIGHT - 2.0, y + 5.0, pay, Align::Right, &format!("{label}: {}", method_label(&rec.payment.method)));
     y + 6.5
+}
+
+// What the shop wrote on this bill (a warranty, the state of a used phone, a
+// name), beside the totals on the left. Returns its bottom.
+fn note(d: &mut Doc, y: f32, text: &str) -> f32 {
+    let text = text.trim();
+    if text.is_empty() {
+        return y;
+    }
+    let (head, f) = (font(8.0, true), font(9.0, false));
+    d.text(LEFT, y + head.ascent(), head, Align::Left, "Observaciones");
+    d.para(LEFT, y + head.lead() + 0.5, 78.0, f, Align::Left, text)
 }
 
 // The shop's terms at the foot of the last page, or after the totals when
@@ -697,6 +736,7 @@ pub fn sample(s: &Settings) -> TicketRecord {
         bill: true,
         replaces: None,
         replaced_by: None,
+        note: None,
     }
 }
 
@@ -707,8 +747,11 @@ pub fn print(_printer: &str, _sheets: &[Sheet], _copies: u32) -> crate::error::R
 
 pub fn invoice(rec: &TicketRecord, logo: Option<&Logo>, opts: &InvoiceOpts) -> Vec<Sheet> {
     let title = title(rec);
-    // a full invoice always states the VAT of each rate
-    let table = opts.vat_table || rec.customer.is_some();
+    // A bill says how it shows its VAT. One from before 1.13 does not: an
+    // invoice with a customer always stated the VAT of each rate, a simple
+    // one when Ajustes asked for it.
+    let view = rec.shop.vat.unwrap_or(if opts.vat_table || rec.customer.is_some() { VatView::Full } else { VatView::Note });
+    let cols = cols(view);
     let mut banner = Vec::new();
     if rec.training {
         banner.push("PRUEBA · SIN VALIDEZ");
@@ -726,29 +769,32 @@ pub fn invoice(rec: &TicketRecord, logo: Option<&Logo>, opts: &InvoiceOpts) -> V
     let y = d.sheet();
     let y = head(&mut d, y, rec, logo, opts.copy);
     let y = customer(&mut d, y, rec);
-    let mut y = table_head(&mut d, y);
+    let mut y = table_head(&mut d, y, view);
 
     // a reprint shows the VAT stored when the ticket was issued
     let vat = if rec.vat.is_empty() { compute(&rec.lines).vat } else { rec.vat.clone() };
-    let tail = totals(&mut Doc::scratch(), 0.0, rec, &vat, table);
-    let mut rows: Vec<Row> = rec.lines.iter().map(Row::of).collect();
+    let words = rec.note.as_deref().unwrap_or_default();
+    // the totals and the note stand side by side: the taller one counts
+    let tail = totals(&mut Doc::scratch(), 0.0, rec, &vat, view).max(note(&mut Doc::scratch(), 0.0, words));
+    let mut rows: Vec<Row> = rec.lines.iter().map(|l| Row::of(l, view)).collect();
     if rows.is_empty() {
-        rows.push(Row { desc: vec!["(sin artículos)".into()], cells: Default::default() });
+        rows.push(Row { desc: vec!["(sin artículos)".into()], cells: Vec::new() });
     }
     let mut fresh = true;
     for (i, r) in rows.iter().enumerate() {
         let need = r.height() + if i + 1 == rows.len() { GAP + tail } else { 0.0 };
         if !fresh && y + need > BOTTOM {
             y = d.sheet();
-            y = table_head(&mut d, y);
+            y = table_head(&mut d, y, view);
         }
-        y = draw_row(&mut d, y, r);
+        y = draw_row(&mut d, y, r, cols);
         fresh = false;
     }
     if y + GAP + tail > BOTTOM {
         y = d.sheet();
     }
-    let y = totals(&mut d, y + GAP, rec, &vat, table);
+    let under = note(&mut d, y + GAP, words);
+    let y = totals(&mut d, y + GAP, rec, &vat, view).max(under);
     terms(&mut d, y, &opts.terms);
 
     let n = d.sheets.len();
@@ -939,6 +985,12 @@ pub fn print(printer: &str, sheets: &[Sheet], copies: u32) -> crate::error::Resu
     };
     if crate::printer::is_virtual(printer, &port, &driver) {
         return fail(format!("E_PRINTER_VIRTUAL:{printer}"));
+    }
+    // A printer Windows knows is off, unplugged or paused takes nothing: the
+    // page would wait in its queue and come out, with every copy asked for
+    // meanwhile, when someone switches it on.
+    if let Some(state @ ("offline" | "paused")) = crate::printer::queue_state(printer) {
+        return fail(format!("E_PRINT:{state}"));
     }
     match win::draw(printer, "Factura", sheets, copies.clamp(1, 3), None) {
         Ok(()) => Ok(()),
@@ -1381,6 +1433,7 @@ mod tests {
             bill: true,
             replaces: None,
             replaced_by: None,
+            note: None,
         }
     }
 

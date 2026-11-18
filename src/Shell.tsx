@@ -141,7 +141,7 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   }, []);
 
   useEffect(() => {
-    if (!admin && !['sale', 'day', 'repairs'].includes(screen)) setScreen('sale');
+    if (!admin && !['sale', 'day', 'repairs', 'invoices'].includes(screen)) setScreen('sale');
   }, [admin, screen]);
 
   // the core opened the window full screen if Ajustes says so; only the
@@ -205,8 +205,13 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   // checked now and every few seconds. Ajustes can change it any time.
   useEffect(() => {
     const look = () =>
-      call<{ applied: boolean; paper?: boolean; name?: string; columns?: number; replaced?: string | null; settings?: Settings }>('printers.auto')
+      call<{ applied: boolean; paper?: boolean; name?: string; columns?: number; replaced?: string | null; settings?: Settings; a4?: string }>('printers.auto')
         .then((r) => {
+          // this PC's A4 printer, found by itself
+          if (r.a4 && r.settings) {
+            setSettings(r.settings);
+            toast.ok(tr(`Las facturas en A4 saldrán por «${r.a4}». Se cambia en Ajustes › Facturas.`, `A4 invoices will print on "${r.a4}". Change it in Settings › Invoices.`), { sticky: true });
+          }
           // the core has already saved it: shown even when this effect ran
           // again while the answer was on its way, or it would never show
           if (!r.applied || !r.settings) return;
@@ -418,6 +423,8 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
               products={products}
               logo={logo}
               onSetupPrinter={setupPrinter}
+              onSettings={setSettings}
+              draftKey={`tiquet.bill.${installId}.${user.id}`}
               fix={billFix}
               onFixTaken={() => setBillFix(null)}
             />

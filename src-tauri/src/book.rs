@@ -313,9 +313,13 @@ pub fn edit(conn: &Connection, me: &SessionUser, s: &Settings, id: i64, e: Entry
         _ => return fail("E_INVALID:kind"),
     };
     let same_day = e.date.trim().is_empty() || e.date.trim() == &old.at[..10];
-    mark(conn, id, &me.name, CORRECTED)?;
-    let (new, _) = add(conn, me, s, EntryIn { kind: kind.into(), client_id: None, keep_at: same_day.then(|| old.at.clone()), ..e })?;
-    event(conn, new.id, &me.name, "added", Some(&format!("corrige {id}")))?;
+    // both or neither: an entry marked as corrected with nothing in its
+    // place would leave every total and could not be brought back
+    let tx = conn.unchecked_transaction()?;
+    mark(&tx, id, &me.name, CORRECTED)?;
+    let (new, _) = add(&tx, me, s, EntryIn { kind: kind.into(), client_id: None, keep_at: same_day.then(|| old.at.clone()), ..e })?;
+    event(&tx, new.id, &me.name, "added", Some(&format!("corrige {id}")))?;
+    tx.commit()?;
     Ok(new)
 }
 
@@ -648,9 +652,9 @@ pub fn export(conn: &Connection, s: &Settings, r: &Range) -> Result<PathBuf> {
     }
     let dir = backup::documents().join("Exportaciones");
     fs::create_dir_all(&dir)?;
-    let path = dir.join(format!("ventas_{}_{}.csv", r.from, r.to));
-    fs::write(&path, out)?;
-    Ok(path)
+    // (Informes writes "ventas_…": another name, or one would replace the other)
+    let path = dir.join(format!("movimientos_{}_{}.csv", r.from, r.to));
+    Ok(crate::share::write_free(&path, out.as_bytes())?)
 }
 
 // practice entries go with the practice tickets

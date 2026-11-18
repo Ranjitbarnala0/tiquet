@@ -41,6 +41,9 @@ pub struct Entry {
     // looks like a receipt printer: raw ESC/POS suits it; anything else
     // prints tickets as a document through its driver
     pub receipt: bool,
+    // only its USB port said "receipt", and its driver prints pages (A4,
+    // Letter): an office printer after all
+    pub page: bool,
     // characters per line for its paper, from the roll its Windows driver is
     // set up for or a 58 / 80 in its name: 32 on 58 mm rolls, 48 (or 42) on
     // 80 mm; None when nothing says (Generic / Text Only describes a Letter page)
@@ -175,9 +178,13 @@ fn asks_for_file(port: &str) -> bool {
 // where to save it or render garbage: they can never print an ESC/POS ticket
 pub fn is_virtual(name: &str, port: &str, driver: &str) -> bool {
     let all = format!("{name} {port} {driver}").to_lowercase();
-    ["portprompt:", "file:", "nul:", "xpsport", "pdf", "xps", "onenote", "fax"]
-        .iter()
-        .any(|k| all.contains(k))
+    // files, faxes and note-takers, and the "printers" that remote-support
+    // programs install: nothing comes out of any of them in the shop
+    const NOT_PAPER: &[&str] = &[
+        "portprompt:", "file:", "nul:", "xpsport", "pdf", "xps", "onenote", "fax", "anydesk", "teamviewer", "rustdesk", "splashtop",
+        "supremo", "easy print", "document writer", "image writer", "snagit", "evernote", "webex",
+    ];
+    NOT_PAPER.iter().any(|k| all.contains(k))
 }
 
 const ATTR_WORK_OFFLINE: u32 = 0x400;
@@ -191,6 +198,12 @@ const ST_NOT_AVAILABLE: u32 = 0x1000;
 const ST_USER_INTERVENTION: u32 = 0x10_0000;
 const ST_DOOR_OPEN: u32 = 0x40_0000;
 const ST_SERVER_OFFLINE: u32 = 0x200_0000;
+
+// What Windows says of a queue right now: "ready", "offline", "paused",
+// "paper" or "error"; None when it does not answer.
+pub fn queue_state(name: &str) -> Option<&'static str> {
+    win::info(name).ok().map(|i| classify(i.attributes, i.status))
+}
 
 fn classify(attributes: u32, status: u32) -> &'static str {
     if attributes & ATTR_WORK_OFFLINE != 0 || status & (ST_OFFLINE | ST_SERVER_OFFLINE | ST_NOT_AVAILABLE) != 0 {
@@ -432,8 +445,35 @@ fn score(e: &Entry) -> i32 {
     score
 }
 
+fn text_only(e: &Entry) -> bool {
+    e.driver.to_lowercase().contains("generic / text only")
+}
+
+// A page is 210 mm wide (A4) or 216 (Letter); labels and rolls are narrower.
+const PAGE_MM: u32 = 180;
+
+// what its Windows driver says of its paper; a driver that says nothing is
+// taken for a page printer
+pub fn page_wide(name: &str) -> bool {
+    win::paper(name).map_or(true, |(mm, _)| mm >= PAGE_MM)
+}
+
+// The printer bills on A4 go to when nobody chose one: Windows' default
+// printer when it prints pages, else the only one that does. Receipt
+// printers, PDF writers and anything narrower than a page are not page
+// printers. With several to choose from and none of them the default, nobody
+// guesses: the shop picks once. `wide` asks a driver for its paper.
+pub fn detect_a4(entries: &[Entry], wide: &dyn Fn(&str) -> bool) -> Option<String> {
+    let pages: Vec<&Entry> = entries.iter().filter(|e| !e.is_virtual && !e.receipt && !text_only(e) && (e.page || wide(&e.name))).collect();
+    match pages.iter().find(|e| e.default) {
+        Some(e) => Some(e.name.clone()),
+        None if pages.len() == 1 => Some(pages[0].name.clone()),
+        None => None,
+    }
+}
+
 pub fn detect(entries: &[Entry]) -> Detected {
-    let mut scored: Vec<(i32, &Entry)> = entries.iter().filter(|e| !e.is_virtual).map(|e| (score(e), e)).filter(|(s, _)| *s > 0).collect();
+    let mut scored: Vec<(i32, &Entry)> = entries.iter().filter(|e| !e.is_virtual && !e.page).map(|e| (score(e), e)).filter(|(s, _)| *s > 0).collect();
     scored.sort_by_key(|s| std::cmp::Reverse(s.0));
     let clear = match scored.as_slice() {
         [(top, _), (next, _), ..] => top > next,
@@ -458,13 +498,19 @@ pub fn list() -> Vec<Entry> {
                 is_virtual: is_virtual(&name, &port, &driver),
                 default: default.as_deref() == Some(name.as_str()),
                 receipt: false,
+                page: false,
                 columns: None,
                 name,
                 port,
                 driver,
             };
-            e.receipt = !e.is_virtual && score(&e) > 0;
-            let paper = if e.receipt { win::paper(&e.name).and_then(|(mm, dots)| columns_for(mm, dots)) } else { None };
+            // A USB port alone makes a weak case for a receipt printer: many
+            // inkjets and lasers hang on one too. Their driver settles it.
+            let points = if e.is_virtual { 0 } else { score(&e) };
+            let size = if points > 0 { win::paper(&e.name) } else { None };
+            e.page = (1..10).contains(&points) && !text_only(&e) && size.is_some_and(|(mm, _)| mm >= PAGE_MM);
+            e.receipt = points > 0 && !e.page;
+            let paper = if e.receipt { size.and_then(|(mm, dots)| columns_for(mm, dots)) } else { None };
             e.columns = known_columns(paper, named_columns(&format!("{} {}", e.name, e.driver)));
             e
         })
@@ -596,7 +642,10 @@ pub fn send_job(sink: &PrintSink, s: &Settings, doc: &str, job: &Job) -> Result<
         }
         (PrintSink::Spooler, Target::Serial(port, baud)) => {
             let b = job.raw.clone();
-            on_lane(WRITE + Duration::from_secs(8), move || win::serial(&port, baud, &b, WRITE).map(|_| None))
+            // a COM port carries a tenth of its baud in bytes a second: a
+            // logo and two copies at 9600 take longer than any fixed wait
+            let wait = WRITE + Duration::from_secs(b.len() as u64 * 10 / u64::from(baud.max(1200)));
+            on_lane(wait + Duration::from_secs(8), move || win::serial(&port, baud, &b, wait).map(|_| None))
         }
     }
 }
@@ -1423,7 +1472,7 @@ mod tests {
     fn a_printer_chosen_for_one_print_wins_that_once() {
         let s = Settings { printer_kind: "network".into(), printer_host: "10.0.0.9".into(), ..Settings::default() };
         assert_eq!(target(&s), Some(Target::Net("10.0.0.9".into(), 9100)));
-        let pick = |kind: &str| Settings { one_off: Some(crate::settings::OneOff { name: "HP Oficina".into(), kind: kind.into() }), ..s.clone() };
+        let pick = |kind: &str| Settings { one_off: Some(crate::settings::OneOff { name: "HP Oficina".into(), kind: kind.into(), columns: None }), ..s.clone() };
         // a receipt printer gets raw tickets, any other printer a drawn page
         assert_eq!(target(&pick("windows")), Some(Target::Queue("HP Oficina".into())));
         assert_eq!(target(&pick("document")), Some(Target::Doc("HP Oficina".into())));
@@ -1481,6 +1530,9 @@ mod tests {
         assert!(is_virtual("Microsoft XPS Document Writer", "PORTPROMPT:", "Microsoft XPS Document Writer v4"));
         assert!(is_virtual("OneNote (Desktop)", "nul:", "Send to Microsoft OneNote 16 Driver"));
         assert!(is_virtual("Fax", "SHRFAX:", "Microsoft Shared Fax Driver"));
+        assert!(is_virtual("AnyDesk Printer", "AD_Port", "AnyDesk v4 Printer Driver"));
+        assert!(is_virtual("TeamViewer Printer", "TVPort", "TeamViewer Printer"));
+        assert!(!is_virtual("HP LaserJet Pro M404", "WSD-1234", "HP Universal Printing PCL 6"));
         assert!(!is_virtual("POS-80", "USB001", "POS-80C"));
         assert!(!is_virtual("Premier ITP-73", "USB002", "Generic / Text Only"));
     }
@@ -1494,6 +1546,7 @@ mod tests {
             is_virtual: is_virtual(name, port, driver),
             default: false,
             receipt: false,
+            page: false,
             columns: None,
         };
         // an inkjet on USB is not a receipt printer, an Epson TM is
@@ -1517,6 +1570,38 @@ mod tests {
         // 58 mm, which prints right on any roll
         let plain = detect(&[e("Disashop", "USB001", "Generic / Text Only")]);
         assert_eq!((plain.best.as_deref(), plain.columns, plain.measured), (Some("Disashop"), 32, false));
+        // a USB printer nothing else tells apart, whose driver prints pages,
+        // is never taken for the receipt printer
+        let tank = Entry { page: true, ..e("HP Smart Tank 580", "USB003", "HP Smart Tank 580") };
+        assert_eq!(detect(&[tank]).best, None);
+    }
+
+    #[test]
+    fn the_a4_printer_is_found_when_it_is_clear() {
+        let e = |name: &str, port: &str, driver: &str, default: bool| {
+            let mut e = Entry { name: name.into(), port: port.into(), driver: driver.into(), is_virtual: is_virtual(name, port, driver), default, receipt: false, page: false, columns: None };
+            e.receipt = !e.is_virtual && score(&e) > 0;
+            e
+        };
+        let wide: &dyn Fn(&str) -> bool = &|name| !name.contains("Zebra");
+        let pos = e("POS-80C", "USB001", "POS-80C", true);
+        let laser = e("HP LaserJet Pro M404", "WSD-1234", "HP Universal Printing PCL 6", false);
+        let inkjet = e("EPSON L3150 Series", "USB002", "EPSON L3150 Series", false);
+        let pdf = e("Microsoft Print to PDF", "PORTPROMPT:", "Microsoft Print To PDF", false);
+        let labels = e("Zebra ZD220", "WSD-9", "ZDesigner ZD220", false);
+        let text = e("Oficina", "LPT1", "Generic / Text Only", false);
+        // the only page printer, even with the receipt printer as the default
+        assert_eq!(detect_a4(&[pos.clone(), laser.clone(), pdf.clone(), labels.clone(), text.clone()], wide).as_deref(), Some("HP LaserJet Pro M404"));
+        // two page printers and neither the default: the shop picks
+        assert_eq!(detect_a4(&[pos.clone(), laser.clone(), inkjet.clone()], wide), None);
+        // Windows' default printer wins
+        let main = Entry { default: true, ..inkjet.clone() };
+        assert_eq!(detect_a4(&[pos.clone(), laser.clone(), main], wide).as_deref(), Some("EPSON L3150 Series"));
+        // nothing that prints pages: none
+        assert_eq!(detect_a4(&[pos, pdf, labels, text], wide), None);
+        // the USB printer its driver gave away as a page printer counts
+        let tank = Entry { receipt: false, page: true, ..e("HP Smart Tank 580", "USB003", "HP Smart Tank 580", false) };
+        assert_eq!(detect_a4(&[tank], &|_| false).as_deref(), Some("HP Smart Tank 580"));
     }
 
     #[test]

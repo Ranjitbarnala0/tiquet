@@ -527,6 +527,19 @@ ALTER TABLE tickets ADD COLUMN bill INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tickets ADD COLUMN replaces INTEGER;
 "#;
 
+// 1.13: a note on a bill (warranty, the state of a used phone, a name).
+// The columns 1.12 added, and this one, cannot change once issued either.
+const SCHEMA_V14: &str = r#"
+ALTER TABLE tickets ADD COLUMN note TEXT;
+
+DROP TRIGGER tickets_frozen;
+CREATE TRIGGER tickets_frozen BEFORE UPDATE OF
+  id, number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
+  shop, kind, refund_of, refund_reason, client_id,
+  customer_name, customer_nif, customer_address, training, bill, replaces, note ON tickets
+BEGIN SELECT RAISE(ABORT, 'issued tickets cannot be modified'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -547,6 +560,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V11)],
     &[Step::Sql(SCHEMA_V12)],
     &[Step::Sql(SCHEMA_V13)],
+    &[Step::Sql(SCHEMA_V14)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

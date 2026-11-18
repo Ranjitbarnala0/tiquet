@@ -135,6 +135,39 @@ pub fn resolve_payment(p: &PaymentIn, total: i64) -> Result<Payment> {
     Ok(Payment { method: m, tendered_cents: tendered, change_cents: tendered - total, machine: None })
 }
 
+// How much a ticket or a bill says about VAT. The amounts are the same in
+// all three; only the paper changes.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum VatView {
+    // base, rate and VAT for each rate, and each price without VAT
+    Full,
+    // only the words "IVA incluido" and the rate
+    Note,
+    // nothing: items, prices and the total
+    None,
+}
+
+impl VatView {
+    // what Ajustes > Ticket says for the receipts of Venta
+    pub fn of(s: &Settings) -> VatView {
+        match (s.show_vat, s.vat_note) {
+            (true, _) => VatView::Full,
+            (false, true) => VatView::Note,
+            (false, false) => VatView::None,
+        }
+    }
+
+    // a bill made in Facturas shows it all or nothing
+    pub fn bill(shown: bool) -> VatView {
+        if shown {
+            VatView::Full
+        } else {
+            VatView::None
+        }
+    }
+}
+
 // what the ticket looked like when it was issued, so a reprint next year
 // still matches the original
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -150,6 +183,9 @@ pub struct ShopInfo {
     pub logo: i64,
     // None for tickets from before this was kept
     pub show_vat: Option<bool>,
+    // since 1.13, all of it; None for tickets from before, which follow
+    // show_vat and always show the VAT of an invoice with a customer
+    pub vat: Option<VatView>,
     // what the ticket shows of the shop; None (tickets before 1.6) shows it
     pub show_nif: Option<bool>,
     pub show_address: Option<bool>,
@@ -168,6 +204,7 @@ impl Default for ShopInfo {
             legal_name: String::new(),
             logo: -1,
             show_vat: None,
+            vat: None,
             show_nif: None,
             show_address: None,
             show_phone: None,
@@ -187,10 +224,23 @@ impl ShopInfo {
             legal_name: s.legal_name.clone(),
             logo: -1,
             show_vat: Some(s.show_vat),
+            vat: Some(VatView::of(s)),
             show_nif: Some(s.ticket_nif),
             show_address: Some(s.ticket_address),
             show_phone: Some(s.ticket_phone),
             show_cashier: Some(s.ticket_cashier),
+        }
+    }
+}
+
+impl ShopInfo {
+    // How this ticket shows its VAT on a receipt. `table` is what the PC's
+    // settings say for tickets from before 1.13, which kept less.
+    pub fn vat_view(&self, customer: bool, table: bool) -> VatView {
+        match self.vat {
+            Some(v) => v,
+            None if customer || self.show_vat.unwrap_or(table) => VatView::Full,
+            None => VatView::Note,
         }
     }
 }
@@ -340,6 +390,8 @@ pub struct TicketRecord {
     // its place (this one is then voided)
     pub replaces: Option<String>,
     pub replaced_by: Option<String>,
+    // free words printed on a bill
+    pub note: Option<String>,
 }
 
 // how a ticket's payment was put right
@@ -419,6 +471,12 @@ pub struct SaleOpts {
     pub replaces: Option<i64>,
     // made in Facturas: it is listed there, customer or not
     pub bill: bool,
+    // chosen on the bill: its paper shows the VAT in full, or not at all.
+    // Left out, the receipts of Venta follow Ajustes and an invoice with a
+    // customer shows it.
+    pub show_vat: Option<bool>,
+    // free words printed on the bill
+    pub note: Option<String>,
     // the corrected ticket may be from another day: only the owner, and only
     // while VERI*FACTU is off; never taken from the request
     #[serde(skip)]
@@ -599,13 +657,19 @@ struct NewTicket<'a> {
     bill: bool,
     replaces: Option<i64>,
     at: Option<&'a str>,
+    // None: an invoice with a customer shows its VAT, a receipt follows Ajustes
+    vat: Option<VatView>,
+    note: Option<&'a str>,
 }
 
 // The ticket row goes in open (sealed = 0); its lines and VAT rows follow and
 // then it is sealed. The triggers refuse lines for a sealed ticket, so an
 // issued ticket cannot gain lines later.
 fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> Result<i64> {
-    let shop = ShopInfo { logo: settings::logo_id(tx)?, ..ShopInfo::from_settings(s) };
+    let mut shop = ShopInfo { logo: settings::logo_id(tx)?, ..ShopInfo::from_settings(s) };
+    let view = t.vat.unwrap_or(if t.customer.is_some() { VatView::Full } else { VatView::of(s) });
+    shop.vat = Some(view);
+    shop.show_vat = Some(view == VatView::Full);
     let shop = serde_json::to_string(&shop)?;
     // one instant for the ticket and its billing record
     let at = Local::now();
@@ -622,8 +686,8 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
         "INSERT INTO tickets (number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
                               payment_method, tendered_cents, change_cents, shop, kind, refund_of, refund_reason,
                               client_id, sealed, customer_name, customer_nif, customer_address, training,
-                              machine_id, machine_cost_cents, bill, replaces)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                              machine_id, machine_cost_cents, bill, replaces, note)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             number,
             series,
@@ -649,6 +713,7 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
             machine.map_or(0, |m| m.sale_cost(totals.total_cents)),
             t.bill,
             t.replaces,
+            t.note,
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -702,6 +767,16 @@ pub struct Checked {
     replaces: Option<i64>,
     // a correction issued as of the sale it corrects; None is now
     at: Option<String>,
+    vat: Option<VatView>,
+    note: Option<String>,
+}
+
+// free text keeps its line breaks, not its runs of blank space: at most 6
+// lines and 400 letters
+fn note_of(s: Option<&str>) -> Option<String> {
+    let lines: Vec<String> = s.unwrap_or_default().lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).take(6).collect();
+    let text: String = lines.join("\n").chars().take(400).collect();
+    Some(text.trim().to_string()).filter(|t| !t.is_empty())
 }
 
 pub fn check(s: &Settings, lines: Vec<SaleLine>, pay: &PaymentIn, opts: &SaleOpts) -> Result<Checked> {
@@ -727,14 +802,15 @@ pub fn check(s: &Settings, lines: Vec<SaleLine>, pay: &PaymentIn, opts: &SaleOpt
         return fail("E_OVER_LIMIT_SERVICE");
     }
     let payment = resolve_payment(pay, totals.total_cents)?;
-    Ok(Checked { lines, totals, payment, customer, bill: opts.bill, replaces: opts.replaces, at: None })
+    let (vat, note) = (opts.show_vat.map(VatView::bill), note_of(opts.note.as_deref()));
+    Ok(Checked { lines, totals, payment, customer, bill: opts.bill, replaces: opts.replaces, at: None, vat, note })
 }
 
 // Writes a checked sale. The caller holds an IMMEDIATE transaction, which
 // takes the write lock before MAX(seq) is read, so two instances can never
 // hand out the same number.
 pub fn write_sale(tx: &Connection, user: &SessionUser, s: &Settings, c: Checked, sale_id: Option<&str>, clock_ok: bool) -> Result<i64> {
-    let Checked { mut lines, totals, payment, customer, bill, replaces, at } = c;
+    let Checked { mut lines, totals, payment, customer, bill, replaces, at, vat, note } = c;
     // a cart can outlive its products (restored backup, another database);
     // such lines are sold as free items rather than failing the sale. Known
     // ones note the catalogue price, so a price changed at the till shows.
@@ -763,6 +839,8 @@ pub fn write_sale(tx: &Connection, user: &SessionUser, s: &Settings, c: Checked,
         bill,
         replaces,
         at: at.as_deref(),
+        vat,
+        note: note.as_deref(),
     };
     insert(tx, user, s, &t)
 }
@@ -792,7 +870,16 @@ pub fn sell(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if let Some(done) = sale_id.map(|x| by_sale_id(&tx, x)).transpose()?.flatten() {
         drop(tx);
-        return Ok((load(conn, done)?, true));
+        let was = load(conn, done)?;
+        // The same cart sent twice (a retry after a lost answer) gets its
+        // ticket back. Another cart under that id is another sale, whose
+        // screen kept the id of one it never heard was saved: it is told so,
+        // takes a new id and is charged, instead of vanishing as "already
+        // charged".
+        if was.total_cents != c.totals.total_cents || was.lines.len() != c.lines.len() {
+            return fail("E_SALE_REUSED");
+        }
+        return Ok((was, true));
     }
     if let Some(old) = opts.replaces {
         fixable(&tx, old, s)?;
@@ -846,9 +933,17 @@ fn fixable(conn: &Connection, id: i64, s: &Settings) -> Result<()> {
 // bought. With VERI*FACTU every correction is of today, as its chain needs.
 pub fn correction_time(conn: &Connection, s: &Settings, replaces: Option<i64>) -> Result<Option<String>> {
     let Some(old) = replaces.filter(|_| verifactu::Env::of(s).is_none()) else { return Ok(None) };
-    let at: Option<String> = conn.query_row("SELECT issued_at FROM tickets WHERE id = ?1 AND voided_at IS NULL", [old], |r| r.get(0)).optional()?;
-    let today = now();
-    Ok(at.filter(|a| a.get(..10) != today.get(..10)))
+    let Some(at) = conn.query_row("SELECT issued_at FROM tickets WHERE id = ?1 AND voided_at IS NULL", [old], |r| r.get::<_, String>(0)).optional()? else {
+        return Ok(None);
+    };
+    if at.get(..10) != now().get(..10) {
+        return Ok(Some(at));
+    }
+    // The same day, but the till was opened or counted since: the sale stays
+    // in the count it was part of, or the afternoon would be short by a sale
+    // of the morning.
+    let counted: bool = conn.query_row("SELECT EXISTS (SELECT 1 FROM cash_sessions WHERE opened_at > ?1 OR closed_at > ?1)", [&at], |r| r.get(0))?;
+    Ok(counted.then_some(at))
 }
 
 // Shared by the preview and the real refund so both always agree. Only units
@@ -892,6 +987,17 @@ pub fn plan_refund(conn: &Connection, a: &RefundIn) -> Result<RefundPlan> {
     if !wanted.is_empty() {
         return fail("E_REFUND_INVALID");
     }
+    // What stays on the sale must still be worth something at each rate:
+    // taking an item back and leaving its discount there would pay out more
+    // than was paid.
+    let mut stays: BTreeMap<i64, i64> = BTreeMap::new();
+    for src in &original.lines {
+        let now_back: i64 = lines.iter().filter(|(_, of)| Some(*of) == src.id).map(|(l, _)| -l.qty).sum();
+        *stays.entry(src.vat_bp).or_default() += (src.qty - src.refunded - now_back) * src.unit_cents;
+    }
+    if stays.values().any(|v| *v < 0) {
+        return fail("E_REFUND_DISCOUNT");
+    }
     let totals = compute(&lines.iter().map(|(l, _)| l.clone()).collect::<Vec<_>>());
     if totals.total_cents >= 0 {
         return fail("E_REFUND_INVALID");
@@ -926,6 +1032,8 @@ pub fn refund(conn: &mut Connection, user: &SessionUser, s: &Settings, a: &Refun
         bill: plan.original.bill,
         replaces: None,
         at: None,
+        vat: plan.original.shop.vat,
+        note: None,
     };
     let id = insert(&tx, user, s, &t)?;
     tx.commit()?;
@@ -949,7 +1057,8 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                     tendered_cents, change_cents, voided_at, voided_by, void_reason, shop, kind, refund_of, refund_reason,
                     customer_name, customer_nif, customer_address, training, machine_id, bill,
                     (SELECT o.number FROM tickets o WHERE o.id = tickets.replaces),
-                    (SELECT n.number FROM tickets n WHERE n.replaces = tickets.id ORDER BY n.id DESC LIMIT 1)
+                    (SELECT n.number FROM tickets n WHERE n.replaces = tickets.id ORDER BY n.id DESC LIMIT 1),
+                    note
              FROM tickets WHERE id = ?1",
             [id],
             |r| {
@@ -985,6 +1094,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                         bill: r.get(21)?,
                         replaces: r.get(22)?,
                         replaced_by: r.get(23)?,
+                        note: r.get(24)?,
                     },
                     r.get::<_, Option<i64>>(14)?,
                 ))
@@ -1402,6 +1512,80 @@ mod tests {
         .unwrap();
         conn.execute("UPDATE tickets SET sealed = 1 WHERE id = ?1", [id]).unwrap();
         id
+    }
+
+    #[test]
+    fn what_the_audit_of_1_12_found_stays_fixed() {
+        let (mut conn, user, s) = setup();
+        // an id used again for another cart is another sale, never "already charged"
+        let first = SaleOpts { sale_id: Some("cart-1".into()), ..SaleOpts::default() };
+        let (a, dup) = sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &first).unwrap();
+        assert!(!dup);
+        let (again, dup) = sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &first).unwrap();
+        assert!(dup && again.id == a.id);
+        assert_eq!(sell(&mut conn, &user, &s, vec![line("Funda", 1, 2500)], &cash(None), &first).unwrap_err().0, "E_SALE_REUSED");
+
+        // a return never leaves the discount behind: with it, or not at all
+        let cart = vec![line("Funda", 1, 2000), line("Descuento 10%", 1, -200)];
+        let (t, _) = sell(&mut conn, &user, &s, cart, &cash(None), &SaleOpts::default()).unwrap();
+        let (funda, discount) = (t.lines[0].id.unwrap(), t.lines[1].id.unwrap());
+        assert_eq!(refund(&mut conn, &user, &s, &back(t.id, &[(funda, 1)])).unwrap_err().0, "E_REFUND_DISCOUNT");
+        let ret = refund(&mut conn, &user, &s, &back(t.id, &[(funda, 1), (discount, 1)])).unwrap();
+        assert_eq!(ret.total_cents, -1800);
+
+        // corrected the same day after the till was counted and opened again:
+        // the sale stays in the count it was part of
+        let (morning, _) = sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &SaleOpts::default()).unwrap();
+        assert_eq!(correction_time(&conn, &s, Some(morning.id)).unwrap(), None);
+        conn.execute("INSERT INTO cash_sessions (opened_at, opened_by, float_cents) VALUES ('2999-01-01T00:00:00', 'Ana', 0)", []).unwrap();
+        assert_eq!(correction_time(&conn, &s, Some(morning.id)).unwrap(), Some(morning.issued_at.clone()));
+    }
+
+    #[test]
+    fn a_bill_shows_its_vat_or_says_nothing_of_it() {
+        let (mut conn, user, s) = setup();
+        let s = Settings { shop_nif: "B12345674".into(), ..s };
+        let has = |r: &TicketRecord, s: &Settings, word: &str| crate::layout::plain(&crate::layout::record(r, s, false, false), 48).contains(word);
+        let page = |r: &TicketRecord| -> String {
+            let sheets = crate::invoice::invoice(r, None, &crate::invoice::InvoiceOpts::default());
+            let words = sheets.iter().flat_map(|p| &p.items).filter_map(|m| if let crate::invoice::Mark::Text { text, .. } = m { Some(text.clone()) } else { None });
+            words.collect::<Vec<_>>().join("|")
+        };
+        // a simple bill: items, prices and the total, nothing about VAT, on
+        // the receipt and on the page; its note is kept tidy
+        let plain = SaleOpts { bill: true, show_vat: Some(false), note: Some("  Garantía 1 año \n\n Batería   91% ".into()), ..SaleOpts::default() };
+        let (t, _) = sell(&mut conn, &user, &s, vec![line("Funda", 2, 900)], &cash(None), &plain).unwrap();
+        assert_eq!((t.shop.vat, t.note.as_deref()), (Some(VatView::None), Some("Garantía 1 año\nBatería 91%")));
+        assert!(!has(&t, &s, "IVA") && has(&t, &s, "Garantía 1 año") && has(&t, &s, "18,00"));
+        let a4 = page(&t);
+        assert!(!a4.contains("IVA") && !a4.contains("Base") && a4.contains("Observaciones") && a4.contains("Batería 91%") && a4.contains("Importe"), "{a4}");
+        // the VAT stays in the books all the same
+        assert_eq!(t.vat.iter().map(|v| (v.vat_bp, v.total_cents)).collect::<Vec<_>>(), [(2100, 1800)]);
+        // with the box ticked: base, rate and VAT, customer or not
+        let shown = SaleOpts { bill: true, show_vat: Some(true), ..SaleOpts::default() };
+        let (t, _) = sell(&mut conn, &user, &s, vec![line("Funda", 2, 900)], &cash(None), &shown).unwrap();
+        assert_eq!((t.shop.vat, t.note.as_deref()), (Some(VatView::Full), None));
+        assert!(has(&t, &s, "BASE") && page(&t).contains("Base imponible"));
+        // a receipt of Venta follows Ajustes: the table, the words, or nothing
+        for (show_vat, vat_note, view, word) in [(true, true, VatView::Full, "BASE"), (false, true, VatView::Note, "IVA 21% incluido"), (false, false, VatView::None, "")] {
+            let s = Settings { show_vat, vat_note, ..s.clone() };
+            let (t, _) = sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &SaleOpts::default()).unwrap();
+            assert_eq!(t.shop.vat, Some(view));
+            assert!(if word.is_empty() { !has(&t, &s, "IVA") } else { has(&t, &s, word) }, "{view:?}");
+        }
+        // an invoice with a customer made in Venta shows its VAT whatever
+        // the receipts do, and so does its return
+        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: String::new() };
+        let quiet = Settings { show_vat: false, vat_note: false, ..s.clone() };
+        let (inv, _) = sell(&mut conn, &user, &quiet, vec![line("iPhone", 1, 69_900)], &cash(None), &SaleOpts { customer: Some(acme), ..SaleOpts::default() }).unwrap();
+        assert_eq!(inv.shop.vat, Some(VatView::Full));
+        let ret = refund(&mut conn, &user, &quiet, &back(inv.id, &[(inv.lines[0].id.unwrap(), 1)])).unwrap();
+        assert_eq!(ret.shop.vat, Some(VatView::Full));
+        // a ticket from before 1.13 prints as it always did
+        let old = TicketRecord { shop: ShopInfo { vat: None, show_vat: Some(false), ..t.shop.clone() }, ..t.clone() };
+        assert!(has(&old, &s, "IVA 21% incluido") && !has(&old, &s, "BASE") && page(&old).contains("IVA incluido"));
+        let old = TicketRecord { shop: ShopInfo { vat: None, show_vat: Some(false), ..inv.shop.clone() }, ..inv.clone() };
+        assert!(has(&old, &s, "BASE") && page(&old).contains("Base imponible"));
     }
 
     #[test]

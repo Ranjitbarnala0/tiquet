@@ -612,7 +612,26 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   </select>
                 </Field>
               </div>
-              <Toggle checked={d.showVat} onChange={(v) => set('showVat', v)} label={tr('Imprimir desglose de IVA', 'Print VAT breakdown')} hint={tr('Base, cuota y total por tipo de IVA', 'Net, VAT and total per rate')} />
+              <Field
+                label={tr('IVA en el ticket', 'VAT on the receipt')}
+                hint={
+                  d.showVat
+                    ? tr('Base, cuota y total por cada tipo de IVA.', 'Net, VAT and total for each rate.')
+                    : (d.vatNote ?? true)
+                      ? tr('Solo las palabras «IVA incluido» y el tipo.', 'Only the words "IVA incluido" and the rate.')
+                      : tr('Artículos, precios y total: el ticket no nombra el IVA.', 'Items, prices and the total: the receipt does not mention VAT.')
+                }
+              >
+                <Segmented
+                  value={d.showVat ? 'full' : (d.vatNote ?? true) ? 'note' : 'none'}
+                  onChange={(v) => setD((cur) => ({ ...cur, showVat: v === 'full', vatNote: v !== 'none' }))}
+                  options={[
+                    { value: 'full', label: tr('Desglose', 'Breakdown') },
+                    { value: 'note', label: tr('«IVA incluido»', '"VAT included"') },
+                    { value: 'none', label: tr('Nada', 'Nothing') },
+                  ]}
+                />
+              </Field>
               <Field label={tr('Datos del comercio en el ticket', 'Shop details on the ticket')} hint={tr('Quita lo que no quieras imprimir. Sin NIF, el ticket sale como «TICKET» en vez de factura simplificada. Las facturas con datos del cliente siempre llevan NIF y dirección.', 'Leave out what you do not want printed. Without the NIF the ticket says "TICKET" instead of simplified invoice. Invoices with customer details always carry the NIF and address.')}>
                 <div className="grid2">
                   <Toggle checked={d.ticketNif || d.verifactu !== 'off'} onChange={(v) => set('ticketNif', v)} label={tr('NIF', 'NIF')} hint={d.verifactu !== 'off' ? tr('Obligatorio con VERI*FACTU', 'Required with VERI*FACTU') : undefined} />
@@ -893,7 +912,10 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 <div className="a4-row">
                   <Field
                     label={tr('Impresora A4 de este PC', 'This PC’s A4 printer')}
-                    hint={tr('Es de este PC: cada PC de la tienda elige la suya. Sin ella, las facturas salen por la de tickets.', 'It belongs to this PC: each PC of the shop picks its own. Without one, invoices come out of the receipt printer.')}
+                    hint={tr(
+                      'Tiquet la elige sola cuando está claro cuál es: la predeterminada de Windows si imprime hojas, o la única que lo hace. Es de este PC; sin ella, las facturas salen por la de tickets.',
+                      'Tiquet picks it by itself when it is clear which one it is: Windows\' default printer if it prints pages, or the only one that does. It belongs to this PC; without one, invoices come out of the receipt printer.',
+                    )}
                   >
                     <select value={d.invoicePrinter} onChange={(e) => set('invoicePrinter', e.target.value)}>
                       <option value="">{tr('Ninguna: por la impresora de tickets', 'None: the receipt printer')}</option>
@@ -916,22 +938,27 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               <section className="form-section">
                 <h2>{tr('Al hacer una factura', 'When making an invoice')}</h2>
                 <Toggle
-                  checked={!d.invoiceNetPrices}
-                  onChange={(v) => set('invoiceNetPrices', !v)}
-                  label={tr('Los precios se escriben con el IVA incluido', 'Prices are typed with VAT included')}
-                  hint={tr('Apagado, se escriben sin IVA y se añade solo. En cada factura se puede cambiar.', 'Off, they are typed without VAT and it is added by itself. It can be changed on each invoice.')}
+                  checked={!!d.invoiceShowVat}
+                  onChange={(v) => set('invoiceShowVat', v)}
+                  label={tr('Las facturas muestran el IVA', 'Invoices show the VAT')}
+                  hint={tr(
+                    'Apagado, una factura lleva los artículos, sus precios y el total, sin nombrar el IVA. Encendido, lleva la base, el tipo y la cuota. En cada factura se puede cambiar con una casilla.',
+                    'Off, an invoice carries the items, their prices and the total, and does not mention VAT. On, it carries the net amount, the rate and the VAT. A box on each invoice can change it.',
+                  )}
                 />
+                {d.invoiceShowVat && (
+                  <Toggle
+                    checked={!d.invoiceNetPrices}
+                    onChange={(v) => set('invoiceNetPrices', !v)}
+                    label={tr('Los precios se escriben con el IVA incluido', 'Prices are typed with VAT included')}
+                    hint={tr('Apagado, se escriben sin IVA y se añade solo. En cada factura se puede cambiar.', 'Off, they are typed without VAT and it is added by itself. It can be changed on each invoice.')}
+                  />
+                )}
                 <Toggle
                   checked={d.invoiceImei}
                   onChange={(v) => set('invoiceImei', v)}
                   label={tr('Casilla de IMEI o nº de serie en cada línea', 'IMEI or serial box on each line')}
                   hint={tr('Para vender teléfonos: sale en la factura junto al artículo. Se puede dejar vacía.', 'For selling phones: it prints next to the item. It can be left empty.')}
-                />
-                <Toggle
-                  checked={d.invoiceVatTable}
-                  onChange={(v) => set('invoiceVatTable', v)}
-                  label={tr('Desglose del IVA también en las simplificadas', 'VAT breakdown on simplified ones too')}
-                  hint={tr('Apagado, ponen «IVA incluido» y el tipo de cada línea. Las completas siempre llevan el desglose.', 'Off, they say "VAT included" and each line’s rate. Full ones always have the breakdown.')}
                 />
               </section>
               <section className="form-section">

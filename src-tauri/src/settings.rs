@@ -69,6 +69,9 @@ pub struct Settings {
     pub ticket_prefix: String,
     pub default_vat_bp: i64,
     pub show_vat: bool,
+    // with the breakdown off: the words "IVA incluido" and the rate, or
+    // (false) nothing about VAT at all, only items, prices and the total
+    pub vat_note: bool,
     // what the ticket shows of the shop: a shop that only wants a simple
     // ticket can leave its NIF, address, phone or the cashier off (a full
     // invoice and VERI*FACTU always carry the NIF)
@@ -169,6 +172,10 @@ pub struct Settings {
     // a simple A4 bill with the table of VAT per rate too; off, it says
     // "IVA incluido" (a full invoice always has the table)
     pub invoice_vat_table: bool,
+    // a new bill in Facturas starts with its VAT shown (base, rate and VAT);
+    // off, it shows items, prices and the total and says nothing of VAT.
+    // Each bill can change it.
+    pub invoice_show_vat: bool,
     // the IMEI / serial box on each line of a bill
     pub invoice_imei: bool,
     // prices on bills are typed without VAT, which is added on top
@@ -188,6 +195,23 @@ pub struct Settings {
 pub struct OneOff {
     pub name: String,
     pub kind: String,
+    // characters per line of a receipt printer picked this way, when its
+    // driver or its name says; else the 32 that print right on any roll
+    pub columns: Option<u32>,
+}
+
+impl OneOff {
+    // The settings a print on this printer is laid out with: a receipt
+    // printer of another width gets lines of its own width, not the usual
+    // printer's, which would break every one of them.
+    pub fn over(printer: Option<OneOff>, s: Settings) -> Settings {
+        let printer = printer.filter(|o| !o.name.trim().is_empty());
+        let columns = match &printer {
+            Some(o) if o.kind != "document" => o.columns.filter(|c| [32, 42, 48].contains(c)).unwrap_or(32),
+            _ => s.columns,
+        };
+        Settings { one_off: printer, columns, ..s }
+    }
 }
 
 impl Default for Settings {
@@ -202,6 +226,7 @@ impl Default for Settings {
             ticket_prefix: "T".into(),
             default_vat_bp: 2100,
             show_vat: true,
+            vat_note: true,
             ticket_nif: true,
             ticket_address: true,
             ticket_phone: true,
@@ -257,6 +282,7 @@ impl Default for Settings {
             invoice_terms: "Garantía legal de 3 años en productos nuevos. Conserve esta factura: es necesaria para cualquier garantía o devolución.".into(),
             invoice_format: "auto".into(),
             invoice_vat_table: false,
+            invoice_show_vat: false,
             invoice_imei: true,
             invoice_net_prices: false,
             repair_required: String::new(),
@@ -564,6 +590,31 @@ pub fn upgrade(conn: &Connection) -> Result<()> {
             put(conn, "settings", &serde_json::to_string(&s)?)?;
         }
         put(conn, "machines19", "1")?;
+    }
+    // 1.13: each bill says whether it shows its VAT. A shop that had asked
+    // for the VAT table on simple bills keeps seeing it.
+    if get(conn, "vat113")?.is_none() {
+        if get(conn, "settings")?.is_some() {
+            let mut s = load(conn)?;
+            if s.invoice_vat_table && !s.invoice_show_vat {
+                s.invoice_show_vat = true;
+                put(conn, "settings", &serde_json::to_string(&s)?)?;
+            }
+        }
+        put(conn, "vat113", "1")?;
+    }
+    Ok(())
+}
+
+// "None" chosen on purpose, for receipts or for A4 pages: no printer is then
+// picked on its own. Choosing one again lets Tiquet look after it.
+pub fn printer_choice(conn: &Connection, old: &Settings, new: &Settings) -> Result<()> {
+    for (key, was, is) in [("printerOff", &old.printer_name, &new.printer_name), ("invoicePrinterOff", &old.invoice_printer, &new.invoice_printer)] {
+        if is.trim().is_empty() && !was.trim().is_empty() {
+            put(conn, key, "1")?;
+        } else if !is.trim().is_empty() {
+            clear(conn, key)?;
+        }
     }
     Ok(())
 }
