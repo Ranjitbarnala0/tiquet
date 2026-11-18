@@ -56,7 +56,7 @@ const toEnd = (lines: CartLine[], line: CartLine) => [...lines.filter((l) => l.k
 const newSaleId = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 
 // what `sale.status` says of a sale id
-type Saved = { ticket: { number: string; voided?: boolean } | null };
+type Saved = { ticket: { number: string; totalCents?: number; voided?: boolean } | null };
 
 // said when the core turns out to have kept a sale this screen never heard of
 const savedBefore = (number: string) =>
@@ -434,6 +434,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   // and typed again, or its lines brought back next to others), the cashier
   // is told what the core kept under these.
   const unanswered = useRef<string[]>(Array.isArray(restored.lost) ? restored.lost.filter((id) => typeof id === 'string').slice(-5) : []);
+  // goes up when they change and nothing else does, so they are stored too:
+  // a restart right after a charge that got no answer must not forget it
+  const [noted, setNoted] = useState(0);
   const [clock, setClock] = useState<{ last: string; charge: Charge } | null>(null);
   const history = useRef<CartLine[][]>([]);
   const [query, setQuery] = useState('');
@@ -513,7 +516,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     } catch {
       // storage unavailable: the cart simply isn't restored
     }
-  }, [lines, fixing, left, cartKey]);
+  }, [lines, fixing, left, cartKey, noted]);
 
   // a ticket nobody has touched for a while is marked, so the next customer's
   // things never end up on it unnoticed
@@ -532,8 +535,21 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     if (!restored.lines.length) return;
     call<Saved>('sale.status', { saleId: restored.saleId })
       .then((r) => {
-        // (a ticket deleted since is no longer this sale)
-        if (!r.ticket || r.ticket.voided || saleId.current !== restored.saleId) return;
+        if (!r.ticket || saleId.current !== restored.saleId) return;
+        // Deleted since: what is on the screen is still to be charged, as a
+        // sale of its own.
+        if (r.ticket.voided) {
+          saleId.current = newSaleId();
+          return;
+        }
+        // Something was added or changed after the charge that got no answer:
+        // this is no longer that sale, and emptying it would say "charged" of
+        // things that were not. It stays; charging it names the ticket the
+        // core kept.
+        const now = linesNow.current.reduce((sum, l) => sum + l.qty * l.unitCents, 0);
+        if (typeof r.ticket.totalCents === 'number' && r.ticket.totalCents !== now) return;
+        // (said right here, so not once more after the next charge)
+        unanswered.current = unanswered.current.filter((id) => id !== restored.saleId);
         saleId.current = newSaleId();
         history.current = [];
         setLines([]);
@@ -1004,6 +1020,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       .catch(() => {
         // no answer now either: asked again after the next charge
         if (!unanswered.current.includes(id)) unanswered.current = [...unanswered.current, id].slice(-5);
+        setNoted((n) => n + 1);
       });
   };
 
@@ -1013,12 +1030,16 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     // what goes to the core now; anything added while it is on its way is
     // for the next ticket
     const sent = new Map(lines.map((l) => [l.key, l.qty]));
+    // The id this charge goes under. While its answer is on its way the
+    // ticket on the screen may be emptied and start another sale, under
+    // another id: what happens to this charge is noted under this one.
+    let sentId = saleId.current;
     const send = () =>
       call<Finalized>('sale.finalize', {
         lines: payload,
         payment: { method: c.method, tenderedCents: c.tendered ?? undefined, machine: c.machine ?? undefined },
         print: c.print && !noPrinter,
-        saleId: saleId.current,
+        saleId: sentId,
         clockOk,
         expectedCents: total,
         customer: c.invoice ? customer : undefined,
@@ -1031,8 +1052,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       const r = await send().catch((e) => {
         if (!(e instanceof ApiError && e.code === 'E_SALE_REUSED')) throw e;
         // (named right here, so not once more after the charge)
-        unanswered.current = unanswered.current.filter((id) => id !== saleId.current);
-        saleId.current = newSaleId();
+        unanswered.current = unanswered.current.filter((id) => id !== sentId);
+        const again = newSaleId();
+        if (saleId.current === sentId) saleId.current = again;
+        sentId = again;
         toast.info(savedBefore(e.detail), { sticky: true });
         return send();
       });
@@ -1040,7 +1063,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       // Charged under another id than one that got no answer: what the core
       // kept under that one is named, so nothing is paid or kept twice
       // without anyone knowing.
-      const lost = unanswered.current.filter((id) => id !== saleId.current);
+      const lost = unanswered.current.filter((id) => id !== sentId);
       unanswered.current = [];
       lost.forEach(tellLost);
       saleId.current = newSaleId();
@@ -1070,7 +1093,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     } catch (e) {
       // whether the core kept it is not known here: remembered until this
       // ticket is charged
-      if (!unanswered.current.includes(saleId.current)) unanswered.current = [...unanswered.current, saleId.current].slice(-5);
+      if (!unanswered.current.includes(sentId)) unanswered.current = [...unanswered.current, sentId].slice(-5);
+      setNoted((n) => n + 1);
       if (e instanceof ApiError && e.code === 'E_CLOCK') setClock({ last: e.detail, charge: c });
       else {
         if (e instanceof ApiError && (e.code === 'E_OVER_LIMIT' || e.code === 'E_OVER_LIMIT_SERVICE')) setInvoice(true);
