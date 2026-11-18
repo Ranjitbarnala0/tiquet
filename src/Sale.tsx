@@ -55,13 +55,23 @@ const uid = () => `l${Date.now().toString(36)}${(seq++).toString(36)}`;
 const toEnd = (lines: CartLine[], line: CartLine) => [...lines.filter((l) => l.key !== line.key), line];
 const newSaleId = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
 
+// what `sale.status` says of a sale id
+type Saved = { ticket: { number: string; voided?: boolean } | null };
+
+// said when the core turns out to have kept a sale this screen never heard of
+const savedBefore = (number: string) =>
+  tr(
+    `Antes se guardó ${number || 'otra venta'} desde este mismo ticket y su aviso no llegó. Mírala en Hoy: si sobra, bórrala.`,
+    `${number || 'Another sale'} was saved from this same ticket earlier and its answer never arrived. Check it in Today: delete it if it is one too many.`,
+  );
+
 // the sale this cart corrects: charging it replaces that ticket
 type Fixing = { id: number; number: string };
 
 // what survives a crash: the lines, the sale they correct, the moment they last
 // changed, and the id the core uses to tell a retry of this same cart from a
 // new sale
-function storedCart(key: string): { saleId: string; lines: CartLine[]; fixing?: Fixing | null; touched?: number; left?: string[] } {
+function storedCart(key: string): { saleId: string; lines: CartLine[]; fixing?: Fixing | null; touched?: number; left?: string[]; lost?: string[] } {
   try {
     const v = JSON.parse(localStorage.getItem(key) ?? 'null');
     if (Array.isArray(v)) return { saleId: newSaleId(), lines: v };
@@ -419,6 +429,11 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   linesNow.current = lines;
   const [fixing, setFixing] = useState<Fixing | null>(restored.fixing ?? null);
   const saleId = useRef(restored.saleId);
+  // The ids of charges that got no answer: whether the core kept them is not
+  // known here. When this ticket is then charged under another id (emptied
+  // and typed again, or its lines brought back next to others), the cashier
+  // is told what the core kept under these.
+  const unanswered = useRef<string[]>(Array.isArray(restored.lost) ? restored.lost.filter((id) => typeof id === 'string').slice(-5) : []);
   const [clock, setClock] = useState<{ last: string; charge: Charge } | null>(null);
   const history = useRef<CartLine[][]>([]);
   const [query, setQuery] = useState('');
@@ -494,7 +509,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     // run this again, and again, for as long as the ticket is empty
     if (!lines.length) setLeft((cur) => (cur.length ? [] : cur));
     try {
-      localStorage.setItem(cartKey, JSON.stringify({ saleId: saleId.current, lines, fixing, touched: touched.current, left }));
+      localStorage.setItem(cartKey, JSON.stringify({ saleId: saleId.current, lines, fixing, touched: touched.current, left, lost: unanswered.current }));
     } catch {
       // storage unavailable: the cart simply isn't restored
     }
@@ -515,9 +530,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   // back, but the core already has its ticket
   useEffect(() => {
     if (!restored.lines.length) return;
-    call<{ ticket: { number: string } | null }>('sale.status', { saleId: restored.saleId })
+    call<Saved>('sale.status', { saleId: restored.saleId })
       .then((r) => {
-        if (!r.ticket || saleId.current !== restored.saleId) return;
+        // (a ticket deleted since is no longer this sale)
+        if (!r.ticket || r.ticket.voided || saleId.current !== restored.saleId) return;
         saleId.current = newSaleId();
         history.current = [];
         setLines([]);
@@ -979,6 +995,18 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     }
   };
 
+  // what the core kept under an id this ticket has left behind
+  const tellLost = (id: string) => {
+    call<Saved>('sale.status', { saleId: id })
+      .then((r) => {
+        if (r.ticket && !r.ticket.voided) toast.info(savedBefore(r.ticket.number), { sticky: true });
+      })
+      .catch(() => {
+        // no answer now either: asked again after the next charge
+        if (!unanswered.current.includes(id)) unanswered.current = [...unanswered.current, id].slice(-5);
+      });
+  };
+
   const finish = async (c: Charge, clockOk = false) => {
     if (busy || !lines.length) return;
     setBusy(true);
@@ -1002,17 +1030,19 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       // is charged under an id of its own.
       const r = await send().catch((e) => {
         if (!(e instanceof ApiError && e.code === 'E_SALE_REUSED')) throw e;
+        // (named right here, so not once more after the charge)
+        unanswered.current = unanswered.current.filter((id) => id !== saleId.current);
         saleId.current = newSaleId();
-        toast.info(
-          tr(
-            `Antes se guardó ${e.detail || 'otra venta'} desde este mismo ticket y su aviso no llegó. Mírala en Hoy: si sobra, bórrala.`,
-            `${e.detail || 'Another sale'} was saved from this same ticket earlier and its answer never arrived. Check it in Today: delete it if it is one too many.`,
-          ),
-          { sticky: true },
-        );
+        toast.info(savedBefore(e.detail), { sticky: true });
         return send();
       });
       history.current = [];
+      // Charged under another id than one that got no answer: what the core
+      // kept under that one is named, so nothing is paid or kept twice
+      // without anyone knowing.
+      const lost = unanswered.current.filter((id) => id !== saleId.current);
+      unanswered.current = [];
+      lost.forEach(tellLost);
       saleId.current = newSaleId();
       const next = cartFromScans(pendingScans.current.splice(0));
       touched.current = Date.now();
@@ -1038,6 +1068,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       onSold();
       loadDay();
     } catch (e) {
+      // whether the core kept it is not known here: remembered until this
+      // ticket is charged
+      if (!unanswered.current.includes(saleId.current)) unanswered.current = [...unanswered.current, saleId.current].slice(-5);
       if (e instanceof ApiError && e.code === 'E_CLOCK') setClock({ last: e.detail, charge: c });
       else {
         if (e instanceof ApiError && (e.code === 'E_OVER_LIMIT' || e.code === 'E_OVER_LIMIT_SERVICE')) setInvoice(true);
@@ -1070,6 +1103,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       await call('tickets.void', { id: t.id, reason: 'Cobrada por error' });
       setLast(null);
       touched.current = Date.now();
+      // back as a sale of its own, never under an id the core already knows
+      saleId.current = newSaleId();
       setLines(t.lines.map((l) => ({ key: uid(), productId: l.productId ?? undefined, name: l.name, qty: l.qty, unitCents: l.unitCents, vatBp: l.vatBp })));
       toast.info(`${t.number} ${tr('borrada: sus artículos vuelven al ticket', 'deleted: its items are back on the ticket')}`);
       onSold();

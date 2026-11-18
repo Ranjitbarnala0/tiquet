@@ -381,11 +381,13 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
     else if (l.name.trim() || l.price.trim()) add();
   };
   const named = (key: number, name: string) => {
-    const p = catalogue.get(name.trim().toLowerCase());
+    // A discount is a discount whatever it is called. Its words may pass
+    // through a product's name while they are typed ("Funda gratis"): that
+    // must not turn it into the product, at its price and with a plus.
+    const p = lines.find((l) => l.key === key)?.discount ? undefined : catalogue.get(name.trim().toLowerCase());
     if (!p) return set(key, { name, productId: undefined });
     const price = fmt(net ? netOf(p.priceCents, p.vatBp) : p.priceCents);
-    // (a product is never a discount, whatever button made the line)
-    set(key, { name, productId: p.id, price, vatBp: p.vatBp, exact: p.priceCents, exactFor: price, discount: undefined });
+    set(key, { name, productId: p.id, price, vatBp: p.vatBp, exact: p.priceCents, exactFor: price });
   };
   const remove = (key: number) => setLines((cur) => (cur.length > 1 ? cur.filter((l) => l.key !== key) : [blank(vat)]));
 

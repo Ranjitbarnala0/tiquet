@@ -293,7 +293,7 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
             let sale_id = a.get("saleId").and_then(Value::as_str).unwrap_or_default();
             let conn = st.conn();
             let t = tickets::by_sale_id(&conn, sale_id)?.map(|id| tickets::load(&conn, id)).transpose()?;
-            Ok(json!({ "ticket": t.map(|t| json!({ "id": t.id, "number": t.number, "totalCents": t.total_cents })) }))
+            Ok(json!({ "ticket": t.map(|t| json!({ "id": t.id, "number": t.number, "totalCents": t.total_cents, "voided": t.voided_at.is_some() })) }))
         }
 
         "tickets.list" => {
@@ -2004,6 +2004,7 @@ mod tests {
         assert_eq!(again["ticket"]["number"], first["ticket"]["number"]);
         let status = dispatch(&st, "sale.status", json!({ "saleId": "7f3e2a10-cart" })).unwrap();
         assert_eq!(status["ticket"]["number"], first["ticket"]["number"]);
+        assert_eq!(status["ticket"]["voided"], false);
         assert_eq!(dispatch(&st, "sale.status", json!({ "saleId": "other" })).unwrap()["ticket"], Value::Null);
         assert_eq!(dispatch(&st, "tickets.list", json!({})).unwrap().as_array().unwrap().len(), 1);
     }
