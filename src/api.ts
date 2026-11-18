@@ -10,6 +10,9 @@ export class ApiError extends Error {
 }
 
 export function toError(e: unknown): ApiError {
+  // already one: read again from its message, its detail would start with a
+  // space and no longer be the word the screens look up
+  if (e instanceof ApiError) return e;
   const raw = typeof e === 'string' ? e : e instanceof Error ? e.message : JSON.stringify(e);
   if (raw.startsWith('E_')) {
     const i = raw.indexOf(':');

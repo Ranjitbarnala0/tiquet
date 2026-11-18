@@ -664,6 +664,10 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     history.current.push(lines);
     if (history.current.length > 60) history.current.shift();
     touched.current = Date.now();
+    // A first line on an empty ticket starts another sale, with an id of its
+    // own, however the ticket was emptied: it never passes for a retry of
+    // the one before. Lines brought back with Deshacer keep theirs.
+    if (!lines.length && next.length) saleId.current = newSaleId();
     setLines(next);
   };
   const pulse = (key: string) => {
@@ -822,9 +826,6 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     const cleared = lines;
     commit([]);
     setSel(null);
-    // an emptied ticket is another sale: it never passes for a retry of the
-    // one before
-    saleId.current = newSaleId();
     // brings back exactly what was cleared, ahead of anything added since
     const back = () => setLines((cur) => [...cleared, ...cur.filter((l) => !cleared.some((c) => c.key === l.key))]);
     toast.info(tr('Ticket vaciado', 'Ticket cleared'), { action: { label: tr('Deshacer', 'Undo'), run: back } });

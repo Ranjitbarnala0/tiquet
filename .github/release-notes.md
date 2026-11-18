@@ -1,10 +1,10 @@
-Download `Tiquet_1.13.1_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.13.2_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.13.1: **a bill with or without IVA, the A4 printer found by itself, and the whole till audited.**
+New in 1.13.2: **a bill with or without IVA, the A4 printer found by itself, and the whole till audited.**
 
 - **A bill with IVA, or with nothing about it.** Each bill has a box, **Mostrar el IVA en la factura**. Unticked, the bill carries the items, their prices as typed and the total, and does not say "IVA incluido" or anything else about IVA, on A4 and on the roll. Ticked, it shows the base, the rate and the IVA of each rate, and prices can then be typed without IVA. A bill with no customer details starts unticked (**Ajustes › Facturas** can change that); one with name and NIF starts ticked, because a business needs its IVA, and the box can be unticked there too.
 - **The same choice for tickets.** **Ajustes › Ticket › IVA en el ticket**: the breakdown, only the words "IVA incluido", or nothing.
@@ -26,6 +26,7 @@ New in 1.13.1: **a bill with or without IVA, the A4 printer found by itself, and
   - A long ticket sent by WhatsApp could arrive cut off before its total.
   - A second PC still opened whatever link the main till's answer named, and kept its sign-in after **Bloquear** when the main till was off.
   - The VAT book counted the amounts of voided and corrected tickets.
+- **1.13.2 over 1.13.1,** from one more review, on a second PC whose answer from the main till was lost: a ticket emptied with **Vaciar** and brought back with **Deshacer** could be charged a second time, and a ticket emptied line by line kept the old sale's number for the next customer (Tiquet said so and charged it right, now it does not even have to). In **Facturas**, a **Descuento** line given a product's name stayed negative, and a bill that came back half typed no longer set its IVA box by the kind of bill. A bill printed again from **Emitidas** that failed now says why (the printer is off, out of paper) instead of a bare code.
 
 Also new in 1.12.1: **invoices made your way, repairs that ask for nothing, and a printer for each print.**
 

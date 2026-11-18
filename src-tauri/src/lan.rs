@@ -151,6 +151,8 @@ pub fn share(st: &AppState, on: bool) -> Result<()> {
         }
     }
     drop(r);
+    // a choice made by hand, or sharing that is back: nothing waits any more
+    PAUSED.store(false, Ordering::SeqCst);
     settings::put(&st.conn(), "lanShare", if on { "1" } else { "0" })?;
     log::info(format!("sharing this till with the shop's other PCs: {on}"));
     Ok(())

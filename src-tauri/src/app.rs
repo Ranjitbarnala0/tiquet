@@ -91,17 +91,22 @@ async fn call(app: AppHandle, cmd: String, mut args: Value) -> Result<Value, Str
             // Still here: nothing was installed. If the shop's other PCs had
             // been asked to wait for it, they are answered again; the port
             // may take a moment to come free.
-            if let Some(shell) = app.try_state::<Shell>() {
+            let handle = app.clone();
+            let _ = tauri::async_runtime::spawn_blocking(move || {
+                let Some(shell) = handle.try_state::<Shell>() else { return };
                 for _ in 0..6 {
-                    if let Ok(c) = &*shell.core() {
-                        lan::resume_sharing(c);
-                    }
                     if !lan::paused() {
                         break;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if let Ok(c) = &*shell.core() {
+                        lan::resume_sharing(c);
+                    }
+                    if lan::paused() {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                    }
                 }
-            }
+            })
+            .await;
             return out;
         }
         "app.ready" if update::testing() => {

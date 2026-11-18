@@ -104,6 +104,8 @@ interface Draft {
   lines: LineDraft[];
   method: Method;
   showVat: boolean;
+  // someone ticked or unticked the box: it no longer follows the bill type
+  vatChosen?: boolean;
   net: boolean;
   note: string;
 }
@@ -319,7 +321,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   });
   const [showVat, setShowVat] = useState(start.shown);
   // once someone has ticked or unticked the box, it is theirs
-  const vatChosen = useRef(!!draft || !!from);
+  const vatChosen = useRef(draft ? !!draft.vatChosen : !!from);
   const [net, setNet] = useState(start.net);
   const [note, setNote] = useState(draft?.note ?? from?.note ?? '');
   const [full, setFull] = useState(draft ? !!draft.full : !!from?.customer);
@@ -342,6 +344,8 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   const [busy, setBusy] = useState(false);
   // one id per bill, so a retry after a lost answer never issues it twice
   const saleId = useRef(draft?.saleId ?? newId());
+  // goes up when the bill takes another id, so the draft is kept with it
+  const [idTaken, setIdTaken] = useState(0);
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [ticket, setTicket] = useState<PLine[]>([]);
   const [number, setNumber] = useState('');
@@ -380,7 +384,8 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
     const p = catalogue.get(name.trim().toLowerCase());
     if (!p) return set(key, { name, productId: undefined });
     const price = fmt(net ? netOf(p.priceCents, p.vatBp) : p.priceCents);
-    set(key, { name, productId: p.id, price, vatBp: p.vatBp, exact: p.priceCents, exactFor: price });
+    // (a product is never a discount, whatever button made the line)
+    set(key, { name, productId: p.id, price, vatBp: p.vatBp, exact: p.priceCents, exactFor: price, discount: undefined });
   };
   const remove = (key: number) => setLines((cur) => (cur.length > 1 ? cur.filter((l) => l.key !== key) : [blank(vat)]));
 
@@ -434,12 +439,12 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   useEffect(() => {
     if (!draftKey || from) return;
     try {
-      if (typed) localStorage.setItem(draftKey, JSON.stringify({ at: Date.now(), saleId: saleId.current, full, customer, lines, method, showVat, net, note } satisfies Draft));
+      if (typed) localStorage.setItem(draftKey, JSON.stringify({ at: Date.now(), saleId: saleId.current, full, customer, lines, method, showVat, vatChosen: vatChosen.current, net, note } satisfies Draft));
       else localStorage.removeItem(draftKey);
     } catch {
       // a full disk loses only the draft
     }
-  }, [draftKey, from, typed, full, customer, lines, method, showVat, net, note]);
+  }, [draftKey, from, typed, full, customer, lines, method, showVat, net, note, idTaken]);
 
   // what is still needed, said in words next to the button
   const missing: { text: string; focus: string }[] = [];
@@ -531,6 +536,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
         const err = toError(e);
         if (err.code !== 'E_SALE_REUSED') throw e;
         saleId.current = newId();
+        setIdTaken((n) => n + 1);
         toast.info(
           tr(
             `Antes se guardó ${err.detail || 'otra factura'} desde esta misma pantalla y su aviso no llegó. Mírala en Emitidas: si sobra, anúlala.`,
