@@ -117,6 +117,8 @@ To restore a backup, use **Ajustes > Datos y copias > Restaurar una copia**. The
 
 ## Build from source
 
+Changing the code? Read [AGENTS.md](AGENTS.md) first: the rules, how the parts fit together, the checks and how a release is made.
+
 Requirements: Windows 10/11, [Rust](https://rustup.rs) (stable, MSVC), Node.js 20 or newer, Visual Studio Build Tools with the C++ workload.
 
 ```
