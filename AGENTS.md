@@ -182,5 +182,10 @@ Environment switches:
   - Practice mode still opens, moves and closes the real till and takes in real repairs.
   - A return or a cash move sent again after a lost answer is saved twice (recharges, expenses and sales are safe).
   - In Facturas, a bill cleared by hand after a lost answer and typed again identical is answered as already saved, by its number (the sale screen asks the core and says so; the bill editor only on other lines).
+- From the review of 1.13.4, on a second PC with a slow or lost answer (each rare, none in ordinary use):
+  - A charge that hangs and then succeeds, after the cashier removed its line and typed it again meanwhile, leaves the retyped line on the ticket and says nothing; charged again it is a second ticket. `finish` should name the ticket just saved whenever `saleId.current !== sentId` at that moment.
+  - A restored ticket whose total is no longer the saved ticket's stays without a word until it is charged; emptied and typed again instead, the earlier ticket is never named. It should be named at once.
+  - An id reaches `unanswered` only when its charge fails: Tiquet closed while a charge waits, after the ticket was typed again, forgets the id that was sent. It should be noted before `send()`.
+  - A restored ticket with the saved ticket's total but other lines is still emptied as already charged; `sale.status` would have to return the lines.
   - A reprinted till close recomputes its parts but keeps the stored expected amount.
   - A4 and "document" prints count as printed once Windows has spooled them: a printer that Windows believes is on, but is not, still queues the page.
