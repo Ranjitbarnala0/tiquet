@@ -3868,8 +3868,27 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
   gap: 8px;
 }
 
+/* with the IMEI box it goes under the item's name, so both have room for
+   a long model name and the whole IMEI */
 .bill-lines.imei .bill-line {
-  grid-template-columns: minmax(120px, 1.5fr) minmax(90px, 1fr) 54px minmax(96px, 112px) 74px minmax(70px, 88px) 30px;
+  grid-template-areas: 'name qty price vat amount del' 'imei . . . . .';
+  row-gap: 4px;
+}
+
+.bill-lines.imei .bill-line:not(.head) {
+  padding-bottom: 6px;
+}
+
+.bill-line .bl-name {
+  grid-area: name;
+}
+
+.bill-line .bl-imei {
+  grid-area: imei;
+}
+
+.bill-line.head .bl-imei {
+  display: none;
 }
 
 .bill-line.head {

@@ -517,7 +517,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
           <div className={`bill-lines${showImei ? ' imei' : ''}`}>
             <div className="bill-line head">
               <span>{tr('Artículo', 'Item')}</span>
-              {showImei && <span>{tr('IMEI / Nº de serie', 'IMEI / serial')}</span>}
+              {showImei && <span className="bl-imei">{tr('IMEI / Nº de serie', 'IMEI / serial')}</span>}
               <span>{tr('Cant.', 'Qty')}</span>
               <span>{net ? tr('Precio sin IVA', 'Price excl. VAT') : tr('Precio', 'Price')}</span>
               <span>IVA</span>
@@ -530,8 +530,17 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
               const last = i === lines.length - 1 && !l.name.trim() && !l.price.trim();
               return (
                 <div className={`bill-line${last ? ' fresh' : ''}`} key={l.key}>
-                  <input data-id={`line-${l.key}-name`} list="bill-products" value={l.name} onChange={(e) => named(l.key, e.target.value)} placeholder={last ? tr('Escribe o elige un artículo', 'Type or pick an item') : ''} maxLength={100} aria-label={tr('Artículo', 'Item')} />
-                  {showImei && <input value={l.imei} onChange={(e) => set(l.key, { imei: e.target.value.replace(/\s+/g, '') })} placeholder={tr('opcional', 'optional')} maxLength={40} aria-label="IMEI" />}
+                  <input className="bl-name" data-id={`line-${l.key}-name`} list="bill-products" value={l.name} onChange={(e) => named(l.key, e.target.value)} placeholder={last ? tr('Escribe o elige un artículo', 'Type or pick an item') : ''} maxLength={100} aria-label={tr('Artículo', 'Item')} />
+                  {showImei && (
+                    <input
+                      className="bl-imei"
+                      value={l.imei}
+                      onChange={(e) => set(l.key, { imei: e.target.value.replace(/\s+/g, '') })}
+                      placeholder={tr('IMEI o nº de serie (opcional)', 'IMEI or serial (optional)')}
+                      maxLength={40}
+                      aria-label="IMEI"
+                    />
+                  )}
                   <input className="num" value={l.qty} onChange={(e) => set(l.key, { qty: e.target.value.replace(/\D/g, '') })} inputMode="numeric" aria-label={tr('Cantidad', 'Quantity')} />
                   <div className="money-input">
                     <input data-id={`line-${l.key}-price`} className="num" value={l.price} onChange={(e) => set(l.key, { price: e.target.value })} inputMode="decimal" placeholder="0,00" aria-label={tr('Precio', 'Price')} />
@@ -660,6 +669,7 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
   }, [made]);
   const [list, setList] = useState<BillRow[] | null>(null);
   const [rec, setRec] = useState<TicketRecord | null>(null);
+  const [paper, setPaper] = useState<{ lines: PLine[]; logo: Logo | null } | null>(null);
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [format, setFormat] = useState<Format>(() => startFormat(settings));
   const [printer, setPrinter] = useState<OneOff | null>(null);
@@ -706,9 +716,14 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
     if (recId.current !== id) {
       setRec(null);
       setSheets([]);
+      setPaper(null);
     }
-    call<{ ticket: TicketRecord }>('tickets.get', { id })
-      .then((r) => opened.current === id && setRec(r.ticket))
+    call<{ ticket: TicketRecord; lines: PLine[]; logo: Logo | null }>('tickets.get', { id })
+      .then((r) => {
+        if (opened.current !== id) return;
+        setRec(r.ticket);
+        setPaper({ lines: r.lines, logo: r.logo });
+      })
       .catch((e) => opened.current === id && toast.error(errorText(e)));
     call<{ sheets: Sheet[] }>('invoices.sheets', { id })
       .then((r) => opened.current === id && setSheets(r.sheets))
@@ -869,7 +884,7 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
             </div>
             <p className="bill-reprint">{tr('Así la recibió el cliente. Si se vuelve a imprimir, sale con «COPIA», como pide la ley.', 'As the customer got it. Printed again, it says "COPIA", as the law asks.')}</p>
             <div className="bill-paper">
-              <SheetView sheets={sheets} />
+              {format === 'ticket' ? paper && <Paper lines={paper.lines} logo={paper.logo} cols={settings.columns} /> : <SheetView sheets={sheets} />}
             </div>
           </div>
         ) : (

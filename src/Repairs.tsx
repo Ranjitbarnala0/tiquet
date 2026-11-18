@@ -219,7 +219,8 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
   // (a main till still on 1.11 sends no such setting: nothing is required)
   const required = (settings.repairRequired ?? '').split(',').map((x) => x.trim()).filter(Boolean);
   const need = (k: string) => required.includes(k);
-  const opt = (k: string) => (need(k) ? '' : tr(' (opcional)', ' (optional)'));
+  // what must be filled in says so; everything else may stay blank
+  const opt = (k: string) => (need(k) ? tr(' (obligatorio)', ' (required)') : '');
   const missing: string[] = [];
   if (need('name') && !d.customerName.trim()) missing.push(tr('el nombre del cliente', "the customer's name"));
   if (need('phone') && !d.customerPhone.trim()) missing.push(tr('el teléfono', 'the phone'));
@@ -350,6 +351,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
     <Drawer wide title={repair ? `${tr('Editar', 'Edit')} ${repair.number}` : tr('Nueva reparación', 'New repair')} onClose={onClose} dirty={dirty} footer={footer}>
       <div className="repair-form">
         <div className="stack">
+          {required.length === 0 && !repair && <p className="muted small">{tr('Todo es opcional: pon lo que el cliente quiera dar.', 'Everything is optional: fill in what the customer wants to give.')}</p>}
           <div className="grid2">
             <Field label={tr('Cliente', 'Customer') + opt('name')}>
               <input autoFocus value={d.customerName} onChange={(e) => set('customerName', e.target.value)} maxLength={120} />
