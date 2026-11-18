@@ -19,7 +19,7 @@ import { UpdateBar, useUpdate } from './Update';
 import { sendError, stuck } from './Verifactu';
 
 type Screen = 'sale' | 'day' | 'invoices' | 'repairs' | 'products' | 'settings';
-export type SettingsTab = 'shop' | 'sale' | 'machines' | 'ticket' | 'printer' | 'mail' | 'users' | 'lan' | 'data' | 'verifactu';
+export type SettingsTab = 'shop' | 'sale' | 'machines' | 'ticket' | 'printer' | 'bills' | 'repairs' | 'mail' | 'users' | 'lan' | 'data' | 'verifactu';
 
 const VERSION_KEY = 'tiquet.version';
 
@@ -45,6 +45,14 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [leave, setLeave] = useState<null | (() => void)>(null);
   const [incoming, setIncoming] = useState<{ lines: ItemDraft[]; from: string; n: number; replaces?: { id: number; number: string } } | null>(null);
+  // a bill corrected from Hoy opens in Facturas, customer and all
+  const [billFix, setBillFix] = useState<TicketRecord | null>(null);
+  // Facturas stays open once visited, like Venta, so a bill half typed
+  // survives a look at another screen
+  const [billsSeen, setBillsSeen] = useState(false);
+  useEffect(() => {
+    if (screen === 'invoices') setBillsSeen(true);
+  }, [screen]);
   const [vf, setVf] = useState<VerifactuStatus | null>(null);
   // a ticket on the screen or being charged
   const [saleBusy, setSaleBusy] = useState(false);
@@ -388,6 +396,11 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
               request={dayRequest}
               onSetupPrinter={setupPrinter}
               onRepeat={(t: TicketRecord, correct: boolean) => {
+                if (correct && (t.customer || t.bill)) {
+                  setBillFix(t);
+                  setScreen('invoices');
+                  return;
+                }
                 const lines = t.lines
                   .filter((l) => l.qty > 0 && !l.repairId)
                   .map((l) => ({ name: l.name, qty: l.qty, unitCents: l.unitCents, vatBp: l.vatBp, productId: l.productId ?? undefined }));
@@ -396,7 +409,19 @@ export function Shell({ installId, version, user, setUser, lang, onLang, onLogou
               }}
             />
           )}
-          {screen === 'invoices' && <Invoices settings={settings} products={products} onSetupPrinter={setupPrinter} />}
+          {(screen === 'invoices' || billsSeen) && (
+            <Invoices
+              key={user.id}
+              active={screen === 'invoices'}
+              user={user}
+              settings={settings}
+              products={products}
+              logo={logo}
+              onSetupPrinter={setupPrinter}
+              fix={billFix}
+              onFixTaken={() => setBillFix(null)}
+            />
+          )}
           {screen === 'repairs' && (
             <Repairs
               user={user}

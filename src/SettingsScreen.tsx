@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BadgeCheck, CreditCard, Download, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Network, Printer, ReceiptText, RefreshCw, ScanSearch, ShoppingBag, Store, Trash2, Users as UsersIcon } from 'lucide-react';
+import { BadgeCheck, CreditCard, Download, FileText, FolderOpen, HardDrive, History, ImagePlus, LifeBuoy, Mail, Network, Printer, ReceiptText, RefreshCw, ScanSearch, ShoppingBag, Store, Trash2, Users as UsersIcon, Wrench } from 'lucide-react';
 import { call, native } from './api';
 import { dateTime, fmt, parseMoney, rate, VAT_RATES } from './format';
 import { errorText, printerStateText, tr, warningText, type Lang } from './i18n';
@@ -7,6 +7,7 @@ import { LanTab } from './Lan';
 import { loadImage, rasterize, type LogoMode } from './logo';
 import { DayCells, MachinesTab } from './MachinesTab';
 import { Paper } from './Paper';
+import { SheetView, type Sheet } from './Sheets';
 import { useToast } from './toast';
 import type { SettingsTab } from './Shell';
 import type { Logo, MailConfig, PLine, PortEntry, PrinterEntry, Preview, Settings, User, UserRow } from './types';
@@ -103,6 +104,30 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
     }, 120);
     return () => clearTimeout(t);
   }, [d, logo, toast]);
+
+  // on the Reparaciones tab, the receipt a customer gets for a repair
+  const [resguardo, setResguardo] = useState<PLine[] | null>(null);
+  useEffect(() => {
+    if (tab !== 'repairs') return;
+    const t = setTimeout(() => {
+      call<{ resguardo: PLine[] }>('repairs.preview', { sample: true, settings: d })
+        .then((p) => setResguardo(p.resguardo))
+        .catch(() => {});
+    }, 150);
+    return () => clearTimeout(t);
+  }, [tab, d, logo]);
+
+  // on the Facturas tab the sample is an A4 bill, with these settings
+  const [sheets, setSheets] = useState<Sheet[]>([]);
+  useEffect(() => {
+    if (tab !== 'bills') return;
+    const t = setTimeout(() => {
+      call<{ sheets: Sheet[] }>('invoices.preview', { sample: true, settings: d, payment: { method: 'card' } })
+        .then((p) => setSheets(p.sheets))
+        .catch(() => {});
+    }, 150);
+    return () => clearTimeout(t);
+  }, [tab, d, logo]);
 
   // looks for the receipt printer among those installed; the choice still
   // has to be saved
@@ -310,6 +335,8 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
     { id: 'machines', label: tr('Máquinas', 'Machines'), icon: CreditCard },
     { id: 'ticket', label: tr('Ticket', 'Ticket'), icon: ReceiptText },
     { id: 'printer', label: tr('Impresora', 'Printer'), icon: Printer },
+    { id: 'bills', label: tr('Facturas', 'Invoices'), icon: FileText },
+    { id: 'repairs', label: tr('Reparaciones', 'Repairs'), icon: Wrench },
     { id: 'mail', label: tr('Enviar tickets', 'Send tickets'), icon: Mail },
     { id: 'users', label: tr('Usuarios', 'Users'), icon: UsersIcon },
     { id: 'lan', label: tr('Cajas', 'Tills'), icon: Network },
@@ -475,18 +502,17 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               <Field label={tr('Pie del ticket', 'Ticket footer')} hint={tr('Agradecimiento, horario, política de cambios…', 'Thank-you note, opening hours, returns policy…')}>
                 <textarea rows={3} value={d.footer} onChange={(e) => set('footer', e.target.value)} />
               </Field>
-              <Field
-                label={tr('Condiciones del resguardo de reparación', 'Repair receipt conditions')}
-                hint={tr('Salen en el resguardo que se lleva el cliente al dejar un equipo', 'Printed on the receipt customers get when they leave a device')}
-              >
-                <textarea rows={3} value={d.repairTerms} onChange={(e) => set('repairTerms', e.target.value)} maxLength={600} />
-              </Field>
-              <Field
-                label={tr('Pie de las facturas A4', 'A4 invoice footer')}
-                hint={tr('Debajo del total de cada factura: garantía, devoluciones…', 'Under the total of every invoice: guarantee, returns…')}
-              >
-                <textarea rows={3} value={d.invoiceTerms} onChange={(e) => set('invoiceTerms', e.target.value)} maxLength={800} />
-              </Field>
+              <p className="muted small">
+                {tr('El pie de las facturas está en ', 'The invoice footer is in ')}
+                <button className="link" onClick={() => setTab('bills')}>
+                  {tr('Ajustes › Facturas', 'Settings › Invoices')}
+                </button>
+                {tr(', y las condiciones del resguardo en ', ', and the repair receipt conditions in ')}
+                <button className="link" onClick={() => setTab('repairs')}>
+                  {tr('Ajustes › Reparaciones', 'Settings › Repairs')}
+                </button>
+                .
+              </p>
 
               <div className="field">
                 <span className="field-label">Logo</span>
@@ -826,16 +852,49 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               </div>
               {dirty && <p className="field-hint">{tr('Las pruebas usan estos ajustes aunque aún no estén guardados.', 'Tests use these settings even before you save them.')}</p>}
 
-              <section className="form-section a4-section">
-                <h2>{tr('Facturas en A4', 'Invoices on A4')}</h2>
+              <p className="muted small a4-section">
+                {tr('La impresora de hojas A4 para las facturas está en ', 'The A4 printer for invoices is in ')}
+                <button className="link" onClick={() => setTab('bills')}>
+                  {tr('Ajustes › Facturas', 'Settings › Invoices')}
+                </button>
+                .
+              </p>
+            </div>
+          )}
+
+          {tab === 'bills' && (
+            <div className="stack">
+              <section className="form-section">
+                <h2>{tr('Cómo salen', 'How they come out')}</h2>
                 <p className="muted small">
                   {tr(
-                    'Una factura con los datos del cliente sale sola por esta impresora, en una hoja A4. Sin ella, sale por la de tickets. Es de este PC: cada PC de la tienda elige la suya.',
-                    'An invoice with the customer’s details comes out of this printer by itself, on an A4 page. Without one, it comes out of the receipt printer. It belongs to this PC: each PC of the shop picks its own.',
+                    'Todo lo de las facturas está aquí. Una factura sin datos del cliente es una factura simplificada; con nombre y NIF, una completa. Las dos pueden salir en hoja A4 o como ticket, y al imprimir se puede elegir otra impresora.',
+                    'Everything about invoices is here. An invoice without customer details is a simplified invoice; with name and NIF, a full one. Both can come out on an A4 page or as a receipt, and another printer can be picked when printing.',
                   )}
                 </p>
+                <Field
+                  label={tr('Al emitir en Facturas, salen como', 'Issued in Invoices, they come out as')}
+                  hint={
+                    d.invoiceFormat === 'auto'
+                      ? tr('En hoja A4 si este PC tiene impresora A4; si no, como ticket. En cada factura se puede cambiar.', 'On an A4 page if this PC has an A4 printer; if not, as a receipt. It can be changed on each invoice.')
+                      : tr('En cada factura se puede cambiar.', 'It can be changed on each invoice.')
+                  }
+                >
+                  <Segmented
+                    value={d.invoiceFormat}
+                    onChange={(v) => set('invoiceFormat', v)}
+                    options={[
+                      { value: 'auto', label: tr('Automático', 'Automatic') },
+                      { value: 'a4', label: tr('Hoja A4', 'A4 page') },
+                      { value: 'ticket', label: tr('Ticket', 'Receipt') },
+                    ]}
+                  />
+                </Field>
                 <div className="a4-row">
-                  <Field label={tr('Impresora de facturas', 'Invoice printer')}>
+                  <Field
+                    label={tr('Impresora A4 de este PC', 'This PC’s A4 printer')}
+                    hint={tr('Es de este PC: cada PC de la tienda elige la suya. Sin ella, las facturas salen por la de tickets.', 'It belongs to this PC: each PC of the shop picks its own. Without one, invoices come out of the receipt printer.')}
+                  >
                     <select value={d.invoicePrinter} onChange={(e) => set('invoicePrinter', e.target.value)}>
                       <option value="">{tr('Ninguna: por la impresora de tickets', 'None: the receipt printer')}</option>
                       {printers
@@ -853,6 +912,73 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                     {tr('Imprimir factura de prueba', 'Print a test invoice')}
                   </button>
                 </div>
+              </section>
+              <section className="form-section">
+                <h2>{tr('Al hacer una factura', 'When making an invoice')}</h2>
+                <Toggle
+                  checked={!d.invoiceNetPrices}
+                  onChange={(v) => set('invoiceNetPrices', !v)}
+                  label={tr('Los precios se escriben con el IVA incluido', 'Prices are typed with VAT included')}
+                  hint={tr('Apagado, se escriben sin IVA y se añade solo. En cada factura se puede cambiar.', 'Off, they are typed without VAT and it is added by itself. It can be changed on each invoice.')}
+                />
+                <Toggle
+                  checked={d.invoiceImei}
+                  onChange={(v) => set('invoiceImei', v)}
+                  label={tr('Casilla de IMEI o nº de serie en cada línea', 'IMEI or serial box on each line')}
+                  hint={tr('Para vender teléfonos: sale en la factura junto al artículo. Se puede dejar vacía.', 'For selling phones: it prints next to the item. It can be left empty.')}
+                />
+                <Toggle
+                  checked={d.invoiceVatTable}
+                  onChange={(v) => set('invoiceVatTable', v)}
+                  label={tr('Desglose del IVA también en las simplificadas', 'VAT breakdown on simplified ones too')}
+                  hint={tr('Apagado, ponen «IVA incluido» y el tipo de cada línea. Las completas siempre llevan el desglose.', 'Off, they say "VAT included" and each line’s rate. Full ones always have the breakdown.')}
+                />
+              </section>
+              <section className="form-section">
+                <h2>{tr('Pie de las facturas', 'Invoice footer')}</h2>
+                <Field label={tr('Texto', 'Text')} hint={tr('Debajo del total de cada factura en A4: garantía, devoluciones…', 'Under the total of every A4 invoice: guarantee, returns…')}>
+                  <textarea rows={4} value={d.invoiceTerms} onChange={(e) => set('invoiceTerms', e.target.value)} maxLength={800} />
+                </Field>
+              </section>
+            </div>
+          )}
+
+          {tab === 'repairs' && (
+            <div className="stack">
+              <section className="form-section">
+                <h2>{tr('Qué hay que poner al recibir un equipo', 'What must be filled in when taking a device in')}</h2>
+                <p className="muted small">
+                  {tr(
+                    'Lo que no se marque se puede dejar en blanco: si el cliente no da su nombre o su teléfono, se recibe igual, y el número del resguardo basta para encontrarlo.',
+                    'Whatever is not ticked can be left blank: if the customer gives no name or phone it is taken in anyway, and the number on the receipt is enough to find it.',
+                  )}
+                </p>
+                {(
+                  [
+                    ['name', tr('Nombre del cliente', 'Customer name')],
+                    ['phone', tr('Teléfono', 'Phone')],
+                    ['device', tr('Marca o modelo', 'Make or model')],
+                    ['fault', tr('Avería', 'Fault')],
+                  ] as const
+                ).map(([k, label]) => {
+                  const list = (d.repairRequired ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+                  const on = list.includes(k);
+                  return (
+                    <Toggle
+                      key={k}
+                      checked={on}
+                      onChange={(v) => set('repairRequired', (v ? [...list, k] : list.filter((x) => x !== k)).join(','))}
+                      label={label}
+                      hint={on ? tr('Obligatorio', 'Required') : tr('Opcional', 'Optional')}
+                    />
+                  );
+                })}
+              </section>
+              <section className="form-section">
+                <h2>{tr('Condiciones del resguardo', 'Receipt conditions')}</h2>
+                <Field label={tr('Texto', 'Text')} hint={tr('Salen en el resguardo que se lleva el cliente al dejar un equipo', 'Printed on the receipt customers get when they leave a device')}>
+                  <textarea rows={4} value={d.repairTerms} onChange={(e) => set('repairTerms', e.target.value)} maxLength={600} />
+                </Field>
               </section>
             </div>
           )}
@@ -1137,9 +1263,23 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
 
       <aside className="side settings-side">
         <div className="side-head">
-          <span>{tr('Ticket de ejemplo', 'Sample ticket')}</span>
+          <span>
+            {tab === 'bills'
+              ? tr('Factura simplificada de ejemplo', 'Sample simplified invoice')
+              : tab === 'repairs'
+                ? tr('Resguardo de ejemplo', 'Sample repair receipt')
+                : tr('Ticket de ejemplo', 'Sample ticket')}
+          </span>
         </div>
-        <div className="paper-scroll">{preview && <Paper lines={preview} logo={logo} cols={d.columns} />}</div>
+        {tab === 'bills' ? (
+          <div className="paper-scroll">
+            <SheetView sheets={sheets} />
+          </div>
+        ) : tab === 'repairs' ? (
+          <div className="paper-scroll">{resguardo && <Paper lines={resguardo} logo={logo} cols={d.columns} />}</div>
+        ) : (
+          <div className="paper-scroll">{preview && <Paper lines={preview} logo={logo} cols={d.columns} />}</div>
+        )}
       </aside>
     </div>
   );

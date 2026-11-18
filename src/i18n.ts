@@ -90,6 +90,18 @@ const errors: Record<string, [string, string]> = {
     'Esta venta tiene devoluciones: borra antes las devoluciones o haz otra devolución.',
     'This sale has returns: delete those returns first, or make another return.',
   ],
+  E_FIX_TRAINING: [
+    'En modo prueba solo se corrigen facturas de prueba, y fuera de él solo las reales.',
+    'In training mode only practice invoices can be corrected, and outside it only real ones.',
+  ],
+  E_FIX_KIND: [
+    'Esta no se corrige así: es una devolución o entregó una reparación. Arréglala con una devolución en Hoy.',
+    'This one cannot be corrected like that: it is a return or it handed back a repair. Put it right with a return in Today.',
+  ],
+  E_FIX_YEAR: [
+    'Es de un año ya cerrado y no se toca. Haz una devolución en Hoy y una factura nueva.',
+    'It belongs to a closed year and stays as it is. Make a return in Today and a new invoice.',
+  ],
   E_VOID_OLD: [
     'Solo se borran ventas de hoy. Para una venta de otro día, haz una devolución.',
     'Only today\'s sales can be deleted. For an earlier sale, make a return.',
@@ -108,7 +120,7 @@ const errors: Record<string, [string, string]> = {
     'Este PC aún no ha comprobado su licencia. Conéctalo a internet y pulsa Comprobar, arriba.',
     'This PC has not checked its licence yet. Connect it to the internet and press Check, at the top.',
   ],
-  E_NO_A4_PRINTER: ['Este PC no tiene impresora A4 para facturas. Elígela en Ajustes › Impresora.', 'This PC has no A4 printer for invoices. Choose one in Settings › Printer.'],
+  E_NO_A4_PRINTER: ['Este PC no tiene impresora A4 para facturas. Elígela en Ajustes › Facturas.', 'This PC has no A4 printer for invoices. Choose one in Settings › Invoices.'],
   E_PRINTER_MISSING: ['La impresora «{s}» no está instalada en este equipo', 'The printer "{s}" is not installed on this computer'],
   E_PRINTER_VIRTUAL: [
     '«{s}» es una impresora virtual (PDF, XPS…) y no imprime tickets. Elige la impresora de tickets en Ajustes.',
@@ -269,6 +281,7 @@ export function isPrinterSetup(e: unknown): boolean {
 
 const warnings: Record<string, [string, string]> = {
   W_PRINT_SLOW: ['La impresora va lenta: el ticket sigue saliendo.', 'The printer is slow: the ticket is still printing.'],
+  W_A4_AS_TICKET: ['Este PC no tiene impresora A4: ha salido como ticket. Elígela en Ajustes › Facturas.', 'This PC has no A4 printer: it came out as a receipt. Choose one in Settings › Invoices.'],
 };
 
 export function warningText(code: string): string {

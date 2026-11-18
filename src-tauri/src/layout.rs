@@ -541,9 +541,12 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
     }
     d.rule('-');
     let x = &r.data;
-    d.left(&format!("Cliente: {}", x.customer_name), false, Size::Normal);
-    d.left(&format!("Teléfono: {}", x.customer_phone), false, Size::Normal);
-    d.left(&format!("Equipo: {}", device(r)), false, Size::Normal);
+    // what was not given is left out, not printed empty
+    for (label, value) in [("Cliente", x.customer_name.clone()), ("Teléfono", x.customer_phone.clone()), ("Equipo", device(r))] {
+        if !value.trim().is_empty() {
+            d.left(&format!("{label}: {}", value.trim()), false, Size::Normal);
+        }
+    }
     if !x.imei.is_empty() {
         d.left(&format!("IMEI/N.º serie: {}", x.imei), false, Size::Normal);
     }
@@ -600,9 +603,12 @@ pub fn repair_delivery(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
     d.pair(&format!("Nº {}", r.number), &datetime(&at), false, Size::Normal);
     d.rule('-');
     let x = &r.data;
-    d.left(&format!("Cliente: {}", x.customer_name), false, Size::Normal);
-    d.left(&format!("Teléfono: {}", x.customer_phone), false, Size::Normal);
-    d.left(&format!("Equipo: {}", device(r)), false, Size::Normal);
+    // what was not given is left out, not printed empty
+    for (label, value) in [("Cliente", x.customer_name.clone()), ("Teléfono", x.customer_phone.clone()), ("Equipo", device(r))] {
+        if !value.trim().is_empty() {
+            d.left(&format!("{label}: {}", value.trim()), false, Size::Normal);
+        }
+    }
     if !x.imei.is_empty() {
         d.left(&format!("IMEI/N.º serie: {}", x.imei), false, Size::Normal);
     }
@@ -627,9 +633,15 @@ pub fn repair_slip(r: &Repair, s: &Settings) -> Vec<Line> {
     d.center(&r.number, true, Size::Big);
     d.center(&datetime(&r.created_at), false, Size::Normal);
     d.rule('-');
-    d.left(&r.data.customer_name, true, Size::Normal);
-    d.left(&format!("Tel. {}", r.data.customer_phone), false, Size::Normal);
-    d.left(&device(r), true, Size::Normal);
+    if !r.data.customer_name.trim().is_empty() {
+        d.left(&r.data.customer_name, true, Size::Normal);
+    }
+    if !r.data.customer_phone.trim().is_empty() {
+        d.left(&format!("Tel. {}", r.data.customer_phone), false, Size::Normal);
+    }
+    if !device(r).trim().is_empty() {
+        d.left(&device(r), true, Size::Normal);
+    }
     fault(&mut d, r);
     // whoever hands it back sees at once whether there is money to take
     if r.open() {

@@ -520,6 +520,13 @@ WHEN OLD.voided_at IS NOT NULL OR NOT EXISTS (
 BEGIN SELECT RAISE(ABORT, 'a change of payment is written down first'); END;
 "#;
 
+// 1.12: a bill made in Facturas (an A4 simplified invoice has no customer
+// to tell it apart), and the ticket a correction took the place of
+const SCHEMA_V13: &str = r#"
+ALTER TABLE tickets ADD COLUMN bill INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE tickets ADD COLUMN replaces INTEGER;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -539,6 +546,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V10)],
     &[Step::Sql(SCHEMA_V11)],
     &[Step::Sql(SCHEMA_V12)],
+    &[Step::Sql(SCHEMA_V13)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

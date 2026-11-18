@@ -112,6 +112,16 @@ export interface Settings {
   // this PC's printer for A4 invoices; empty prints them as receipts
   invoicePrinter: string;
   invoiceTerms: string;
+  // what a bill made in Facturas comes out as on this PC
+  invoiceFormat: 'auto' | 'a4' | 'ticket';
+  // a simple bill with the table of VAT per rate too
+  invoiceVatTable: boolean;
+  // the IMEI / serial box on each line of a bill
+  invoiceImei: boolean;
+  // prices on bills typed without VAT
+  invoiceNetPrices: boolean;
+  // what a repair cannot be taken in without: name, phone, device, fault
+  repairRequired: string;
 }
 
 export interface Customer {
@@ -289,6 +299,11 @@ export interface TicketRecord {
   training: boolean;
   qr: string | null;
   aeat: TicketAeat | null;
+  // made in Facturas
+  bill: boolean;
+  // a correction: the number it replaced, or the one that replaced it
+  replaces: string | null;
+  replacedBy: string | null;
 }
 
 export interface RefundPreview {

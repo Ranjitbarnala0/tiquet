@@ -3581,137 +3581,517 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
 }
 
 /* Facturas */
-.invoice-form {
+.bills {
   display: flex;
   flex-direction: column;
-  gap: 26px;
+  height: 100%;
+  min-height: 0;
 }
 
-.invoice-warn {
+.bills-head {
   display: flex;
   align-items: center;
+  gap: 20px;
+  padding: 14px 22px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.bills-head h1 {
+  font-size: 20px;
+  font-weight: 700;
+  margin: 0 0 12px;
+}
+
+.bills-views {
+  display: flex;
+  gap: 4px;
+  align-self: flex-end;
+}
+
+.bills-views button {
+  display: inline-flex;
+  align-items: center;
   gap: 8px;
-  margin: 0 12px 8px;
-  padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--warn-soft);
-  color: var(--warn);
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.invoice-view {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  padding-bottom: 24px;
-}
-
-.invoice-customer {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 12px 14px;
-  border: 1px solid var(--line-2);
-  border-radius: 12px;
-  background: var(--panel-2);
-}
-
-.invoice-customer > span:first-child {
-  font-size: 11.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  padding: 10px 14px 11px;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  background: none;
   color: var(--muted);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
 }
 
-.invoice-customer b {
-  font-size: 16px;
+.bills-views button:hover {
+  color: var(--ink);
 }
 
-.invoice-customer .pre {
-  white-space: pre-line;
+.bills-views button.on {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.bills-count {
+  min-width: 22px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--hover);
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.bills-body,
+.bills-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.bills-pane[hidden] {
+  display: none;
+}
+
+/* the editor: the form and the page side by side, the total and the button
+   always in sight at the bottom */
+.bill {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(340px, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.bill-form {
+  overflow: auto;
+  padding: 18px 22px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--bg);
+}
+
+.bill-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  box-shadow: var(--shadow-1);
+}
+
+.bill-card h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--ink-2);
 }
 
-.invoice-lines {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 14px;
-}
-
-.invoice-lines th {
-  padding: 8px 10px;
-  background: var(--panel-2);
-  color: var(--muted);
-  font-size: 12px;
-  font-weight: 600;
-  text-align: right;
-}
-
-.invoice-lines td {
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--line-soft);
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.invoice-lines th:first-child,
-.invoice-lines td:first-child {
-  text-align: left;
-}
-
-.invoice-total,
-.invoice-due {
+.bill-card-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
 }
 
-.invoice-total {
+.bill-fixing {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   padding: 12px 14px;
   border-radius: 12px;
-  background: var(--panel-2);
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-size: 13.5px;
 }
 
-.invoice-total b,
-.invoice-due b {
-  font-size: 22px;
-  font-variant-numeric: tabular-nums;
+.bill-fixing svg {
+  flex: none;
+  margin-top: 2px;
+  color: var(--accent);
 }
 
-.invoice-due {
-  flex: 1;
-  margin-right: 16px;
-}
-
-.invoice-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.invoice-form-lines {
-  display: flex;
-  flex-direction: column;
+.bill-types {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   gap: 10px;
 }
 
-.invoice-form-line {
-  display: grid;
-  grid-template-columns: minmax(180px, 2.2fr) minmax(120px, 1.3fr) 64px minmax(110px, 1fr) 84px 36px;
-  align-items: end;
-  gap: 8px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--line-soft);
+.bill-types button {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1.5px solid var(--line-2);
+  border-radius: 12px;
+  background: var(--panel);
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
 }
 
-.invoice-form-line .field {
+.bill-types button:hover {
+  border-color: var(--accent);
+}
+
+.bill-types button.on {
+  border-color: var(--accent);
+  background: var(--accent-softer);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.bill-types button > svg:first-child {
+  flex: none;
+  margin-top: 1px;
+  color: var(--accent);
+}
+
+.bill-types span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bill-types b {
+  font-size: 15px;
+}
+
+.bill-types small {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+
+.bill-tick {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  color: var(--accent);
+}
+
+.bill-customer {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+.bill-customer .field {
   margin: 0;
 }
 
-.invoice-form-line .icon-btn {
-  margin-bottom: 4px;
+.bill-suggest {
+  position: relative;
+}
+
+.bill-suggest input {
+  width: 100%;
+}
+
+.bill-known {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  display: flex;
+  flex-direction: column;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid var(--line-2);
+  border-radius: 10px;
+  background: var(--panel);
+  box-shadow: var(--shadow-2);
+}
+
+.bill-known button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: none;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.bill-known button:hover {
+  background: var(--accent-softer);
+}
+
+.bill-known span {
+  display: flex;
+  flex-direction: column;
+}
+
+.bill-known small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bill-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.bill-check input {
+  width: 17px;
+  height: 17px;
+  accent-color: var(--accent);
+}
+
+/* the lines: one grid, the heading as the first row */
+.bill-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bill-line {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 54px minmax(96px, 112px) 74px minmax(70px, 88px) 30px;
+  align-items: center;
+  gap: 8px;
+}
+
+.bill-lines.imei .bill-line {
+  grid-template-columns: minmax(120px, 1.5fr) minmax(90px, 1fr) 54px minmax(96px, 112px) 74px minmax(70px, 88px) 30px;
+}
+
+.bill-line.head {
+  padding: 0 2px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.bill-line.head span:nth-last-child(2),
+.bill-line.head span:nth-child(n + 3):not(:last-child) {
+  text-align: right;
+}
+
+.bill-line .money-input {
+  min-width: 0;
+}
+
+.bill-line .money-input input {
+  width: 100%;
+  min-width: 0;
+}
+
+.bill-line input,
+.bill-line select {
+  width: 100%;
+  min-width: 0;
+}
+
+.bill-line .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.bill-line b.num {
+  font-size: 14px;
+}
+
+.bill-line.fresh input {
+  border-style: dashed;
+}
+
+.bill-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+
+/* the page as it will come out */
+.bill-preview {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+  background: var(--side);
+}
+
+.bill-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+
+.bill-preview-head small {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.bill-paper {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 18px;
+}
+
+.sheets {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  transition: opacity 0.15s;
+}
+
+.sheets.busy {
+  opacity: 0.6;
+}
+
+.sheet {
+  width: 100%;
+  max-width: 620px;
+  height: auto;
+  background: #fff;
+  border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(16, 20, 32, 0.12), 0 8px 24px rgba(16, 20, 32, 0.08);
+}
+
+/* the bottom bar: total, printer, and what is missing beside the button */
+.bill-foot {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 22px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  box-shadow: 0 -6px 18px rgba(16, 20, 32, 0.06);
+}
+
+.bill-total {
+  display: flex;
+  flex-direction: column;
+  min-width: 150px;
+}
+
+.bill-total span,
+.bill-total small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.bill-total b {
+  font-size: 26px;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.bill-print {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.printer-pick {
+  max-width: 280px;
+  min-width: 180px;
+}
+
+.bill-go {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.bill-missing {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 420px;
+  color: var(--warn);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+}
+
+.bill-missing svg {
+  flex: none;
+}
+
+/* issued bills */
+.bills-split {
+  flex: 1;
+  min-height: 0;
+}
+
+.bill-detail {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.bill-detail-head {
+  padding: 16px 20px 10px;
+  background: var(--panel);
+}
+
+.bill-detail-head h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+
+.bill-detail-head p {
+  margin: 2px 0;
+}
+
+.bill-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 20px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.bill-actions-print,
+.bill-actions-more {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.bill-reprint {
+  margin: 0;
+  padding: 8px 20px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--muted);
+  font-size: 12.5px;
 }
 
 .a4-section {
@@ -3730,6 +4110,22 @@ body:has(.sale:not([hidden])):has(.pay) .toasts {
 .a4-row .field {
   flex: 1 1 260px;
   margin: 0;
+}
+
+.req-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 1180px) {
+  .bill {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  .bill-preview {
+    display: none;
+  }
 }
 
 /* The control server about this copy */

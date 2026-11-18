@@ -163,6 +163,31 @@ pub struct Settings {
     pub invoice_printer: String,
     // under the totals of every A4 invoice
     pub invoice_terms: String,
+    // what a bill made in Facturas comes out as on this PC: "a4", "ticket",
+    // or "auto": on A4 when this PC has an A4 printer, a ticket when not
+    pub invoice_format: String,
+    // a simple A4 bill with the table of VAT per rate too; off, it says
+    // "IVA incluido" (a full invoice always has the table)
+    pub invoice_vat_table: bool,
+    // the IMEI / serial box on each line of a bill
+    pub invoice_imei: bool,
+    // prices on bills are typed without VAT, which is added on top
+    pub invoice_net_prices: bool,
+    // what a repair cannot be taken in without, comma separated: name,
+    // phone, device, fault; nothing by default
+    pub repair_required: String,
+    // a printer chosen for one print only, never saved
+    #[serde(skip)]
+    pub one_off: Option<OneOff>,
+}
+
+// a printer chosen for one print: a Windows queue, as a receipt printer
+// ("windows", raw) or a page printer ("document", drawn)
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct OneOff {
+    pub name: String,
+    pub kind: String,
 }
 
 impl Default for Settings {
@@ -230,6 +255,12 @@ impl Default for Settings {
             repair_terms: "Si el equipo no se recoge en 3 meses desde el aviso de que está listo, la tienda deja de responder de él. La reparación tiene 3 meses de garantía. Haga una copia de sus datos antes de dejar el equipo.".into(),
             invoice_printer: String::new(),
             invoice_terms: "Garantía legal de 3 años en productos nuevos. Conserve esta factura: es necesaria para cualquier garantía o devolución.".into(),
+            invoice_format: "auto".into(),
+            invoice_vat_table: false,
+            invoice_imei: true,
+            invoice_net_prices: false,
+            repair_required: String::new(),
+            one_off: None,
         }
     }
 }
@@ -254,6 +285,9 @@ impl Settings {
         }
         if !["windows", "document", "network", "serial"].contains(&self.printer_kind.as_str()) {
             self.printer_kind = "windows".into();
+        }
+        if !["auto", "a4", "ticket"].contains(&self.invoice_format.as_str()) {
+            self.invoice_format = "auto".into();
         }
         // "com5", " COM5 " or a whole "\\.\COM5": the port's own name
         let com = self.printer_com.trim().trim_start_matches(r"\\.\").to_uppercase();
@@ -405,6 +439,7 @@ pub const DEVICE_KEYS: &[&str] = &[
     "printerName",
     "printerKind",
     "invoicePrinter",
+    "invoiceFormat",
     "printerHost",
     "printerPort",
     "printerCom",

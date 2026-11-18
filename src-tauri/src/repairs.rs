@@ -61,18 +61,22 @@ impl RepairIn {
         }
     }
 
-    fn checked(&self) -> Result<RepairIn> {
+    // Nothing is asked for unless the shop says so in Ajustes (`required`,
+    // comma separated: name, phone, device, fault): a customer who gives no
+    // name still leaves the phone, and the number on the resguardo finds it.
+    fn checked(&self, required: &str) -> Result<RepairIn> {
         let r = self.cleaned();
-        if r.customer_name.is_empty() {
+        let need = |f: &str| required.split(',').any(|x| x.trim() == f);
+        if need("name") && r.customer_name.is_empty() {
             return fail("E_INVALID:customerName");
         }
-        if r.customer_phone.is_empty() {
+        if need("phone") && r.customer_phone.is_empty() {
             return fail("E_INVALID:customerPhone");
         }
-        if r.brand.is_empty() && r.model.is_empty() {
+        if need("device") && r.brand.is_empty() && r.model.is_empty() {
             return fail("E_INVALID:device");
         }
-        if r.fault.is_empty() {
+        if need("fault") && r.fault.is_empty() {
             return fail("E_INVALID:fault");
         }
         if r.estimate_cents.is_some_and(|e| !(0..=MAX_PRICE).contains(&e)) {
@@ -88,7 +92,8 @@ impl RepairIn {
 
 // the name of the line that delivers it, on the ticket and in Venta
 fn line_name(number: &str, device: &str) -> String {
-    format!("Reparación {number}: {device}").chars().take(120).collect()
+    let name = if device.trim().is_empty() { format!("Reparación {number}") } else { format!("Reparación {number}: {device}") };
+    name.chars().take(120).collect()
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -287,7 +292,7 @@ pub fn create(conn: &mut Connection, user: &SessionUser, s: &Settings, n: &NewRe
     if request.is_some_and(|x| x.len() > 64 || !x.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
         return fail("E_INVALID:requestId");
     }
-    let data = n.repair.checked()?;
+    let data = n.repair.checked(&s.repair_required)?;
     if !(0..=MAX_PRICE).contains(&n.deposit_cents) {
         return fail("E_INVALID:deposit");
     }
@@ -365,8 +370,8 @@ fn open_one(conn: &Connection, id: i64) -> Result<Repair> {
 
 // Corrections while the phone is still in the shop. The history says what
 // changed; the estimate also how.
-pub fn update(conn: &mut Connection, id: i64, by: &str, input: &RepairIn) -> Result<Repair> {
-    let data = input.checked()?;
+pub fn update(conn: &mut Connection, id: i64, by: &str, input: &RepairIn, required: &str) -> Result<Repair> {
+    let data = input.checked(required)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let cur = open_one(&tx, id)?;
     let old = &cur.data;
@@ -798,14 +803,18 @@ mod tests {
         assert!(!first.duplicate && again.duplicate);
         assert_eq!(first.repair.id, again.repair.id);
 
+        // nothing is required unless Ajustes says so
+        let bare = create(&mut conn, &user, &s, &NewRepair { repair: RepairIn::default(), ..NewRepair::default() }).unwrap().repair;
+        assert!(bare.data.customer_name.is_empty() && bare.number.starts_with("REP"));
+        let strict = Settings { repair_required: "name,phone,device,fault".into(), ..s.clone() };
         let mut bad = phone();
         bad.customer_phone = " ".into();
-        let err = |r: RepairIn, c: &mut Connection| create(c, &user, &s, &NewRepair { repair: r, ..NewRepair::default() }).unwrap_err().0;
+        let err = |r: RepairIn, c: &mut Connection| create(c, &user, &strict, &NewRepair { repair: r, ..NewRepair::default() }).unwrap_err().0;
         assert_eq!(err(bad, &mut conn), "E_INVALID:customerPhone");
         assert_eq!(err(RepairIn { brand: String::new(), model: String::new(), ..phone() }, &mut conn), "E_INVALID:device");
         assert_eq!(err(RepairIn { fault: "\n ".into(), ..phone() }, &mut conn), "E_INVALID:fault");
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM repairs", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 4);
+        assert_eq!(n, 5);
     }
 
     #[test]
@@ -865,12 +874,12 @@ mod tests {
         assert!(r.events.iter().all(|e| e.at.len() == 19));
         assert_eq!(set_status(&mut conn, r.id, "Ana", "delivered").unwrap_err().0, "E_INVALID:status");
 
-        let r = update(&mut conn, r.id, "Jordi", &RepairIn { customer_phone: "611 000 111".into(), estimate_cents: Some(9500), ..phone() }).unwrap();
+        let r = update(&mut conn, r.id, "Jordi", &RepairIn { customer_phone: "611 000 111".into(), estimate_cents: Some(9500), ..phone() }, "").unwrap();
         let e = r.events.last().unwrap();
         assert_eq!((e.kind.as_str(), e.status.as_str()), ("edited", "ready"));
         assert_eq!(e.detail.as_ref().unwrap(), &json!({ "fields": ["customerPhone", "estimate"], "estimateFrom": 8000, "estimateTo": 9500 }));
         // the same data again changes nothing
-        assert_eq!(update(&mut conn, r.id, "Jordi", &RepairIn { customer_phone: "611 000 111".into(), estimate_cents: Some(9500), ..phone() }).unwrap().events.len(), 4);
+        assert_eq!(update(&mut conn, r.id, "Jordi", &RepairIn { customer_phone: "611 000 111".into(), estimate_cents: Some(9500), ..phone() }, "").unwrap().events.len(), 4);
         assert!(conn.execute("UPDATE repair_events SET by_name = 'x'", []).is_err());
         assert!(conn.execute("DELETE FROM repair_events", []).is_err());
     }
@@ -934,11 +943,11 @@ mod tests {
         let (mut conn, user, s) = setup();
         let r = take(&mut conn, &user, &s, 2000).repair;
         assert_eq!(deliver(&mut conn, r.id, "Ana").unwrap_err().0, "E_REPAIR_DUE");
-        let r = update(&mut conn, r.id, "Ana", &RepairIn { estimate_cents: Some(1000), ..phone() }).unwrap();
+        let r = update(&mut conn, r.id, "Ana", &RepairIn { estimate_cents: Some(1000), ..phone() }, "").unwrap();
         assert_eq!(deliver(&mut conn, r.id, "Ana").unwrap_err().0, "E_REPAIR_DEPOSIT_HIGH");
-        let r = update(&mut conn, r.id, "Ana", &RepairIn { estimate_cents: None, ..phone() }).unwrap();
+        let r = update(&mut conn, r.id, "Ana", &RepairIn { estimate_cents: None, ..phone() }, "").unwrap();
         assert_eq!(deliver(&mut conn, r.id, "Ana").unwrap_err().0, "E_REPAIR_PRICE");
-        update(&mut conn, r.id, "Ana", &RepairIn { estimate_cents: Some(2000), ..phone() }).unwrap();
+        update(&mut conn, r.id, "Ana", &RepairIn { estimate_cents: Some(2000), ..phone() }, "").unwrap();
         let r = deliver(&mut conn, r.id, "Jordi").unwrap();
         assert_eq!((r.status.as_str(), r.closed_by.as_deref(), r.ticket.is_none()), ("delivered", Some("Jordi"), true));
         assert_eq!(cancel(&mut conn, r.id, "Ana", "error").unwrap_err().0, "E_REPAIR_CLOSED");

@@ -334,6 +334,12 @@ pub struct TicketRecord {
     // the AEAT's QR printed on it, and how its billing record went
     pub qr: Option<String>,
     pub aeat: Option<TicketAeat>,
+    // made in Facturas
+    pub bill: bool,
+    // a correction: the number it took the place of, or the one that took
+    // its place (this one is then voided)
+    pub replaces: Option<String>,
+    pub replaced_by: Option<String>,
 }
 
 // how a ticket's payment was put right
@@ -411,6 +417,12 @@ pub struct SaleOpts {
     pub customer: Option<Customer>,
     // the ticket this sale corrects: it is voided in the same step
     pub replaces: Option<i64>,
+    // made in Facturas: it is listed there, customer or not
+    pub bill: bool,
+    // the corrected ticket may be from another day: only the owner, and only
+    // while VERI*FACTU is off; never taken from the request
+    #[serde(skip)]
+    pub any_day: bool,
 }
 
 pub struct RefundPlan {
@@ -584,6 +596,9 @@ struct NewTicket<'a> {
     clock_ok: bool,
     customer: Option<&'a Customer>,
     training: bool,
+    bill: bool,
+    replaces: Option<i64>,
+    at: Option<&'a str>,
 }
 
 // The ticket row goes in open (sealed = 0); its lines and VAT rows follow and
@@ -594,8 +609,8 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
     let shop = serde_json::to_string(&shop)?;
     // one instant for the ticket and its billing record
     let at = Local::now();
-    let issued_at = stamp(&at);
-    if !t.training {
+    let issued_at = t.at.map_or_else(|| stamp(&at), str::to_string);
+    if !t.training && t.at.is_none() {
         check_clock(tx, &issued_at, t.clock_ok)?;
     }
     let tag = series_tag(t.kind, t.customer.is_some(), t.training);
@@ -607,8 +622,8 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
         "INSERT INTO tickets (number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
                               payment_method, tendered_cents, change_cents, shop, kind, refund_of, refund_reason,
                               client_id, sealed, customer_name, customer_nif, customer_address, training,
-                              machine_id, machine_cost_cents)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20, ?21, ?22)",
+                              machine_id, machine_cost_cents, bill, replaces)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             number,
             series,
@@ -632,6 +647,8 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
             t.training,
             machine.map(|m| m.id),
             machine.map_or(0, |m| m.sale_cost(totals.total_cents)),
+            t.bill,
+            t.replaces,
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -681,6 +698,10 @@ pub struct Checked {
     totals: Totals,
     payment: Payment,
     customer: Option<Customer>,
+    bill: bool,
+    replaces: Option<i64>,
+    // a correction issued as of the sale it corrects; None is now
+    at: Option<String>,
 }
 
 pub fn check(s: &Settings, lines: Vec<SaleLine>, pay: &PaymentIn, opts: &SaleOpts) -> Result<Checked> {
@@ -706,14 +727,14 @@ pub fn check(s: &Settings, lines: Vec<SaleLine>, pay: &PaymentIn, opts: &SaleOpt
         return fail("E_OVER_LIMIT_SERVICE");
     }
     let payment = resolve_payment(pay, totals.total_cents)?;
-    Ok(Checked { lines, totals, payment, customer })
+    Ok(Checked { lines, totals, payment, customer, bill: opts.bill, replaces: opts.replaces, at: None })
 }
 
 // Writes a checked sale. The caller holds an IMMEDIATE transaction, which
 // takes the write lock before MAX(seq) is read, so two instances can never
 // hand out the same number.
 pub fn write_sale(tx: &Connection, user: &SessionUser, s: &Settings, c: Checked, sale_id: Option<&str>, clock_ok: bool) -> Result<i64> {
-    let Checked { mut lines, totals, payment, customer } = c;
+    let Checked { mut lines, totals, payment, customer, bill, replaces, at } = c;
     // a cart can outlive its products (restored backup, another database);
     // such lines are sold as free items rather than failing the sale. Known
     // ones note the catalogue price, so a price changed at the till shows.
@@ -739,6 +760,9 @@ pub fn write_sale(tx: &Connection, user: &SessionUser, s: &Settings, c: Checked,
         clock_ok,
         customer: customer.as_ref(),
         training: s.training,
+        bill,
+        replaces,
+        at: at.as_deref(),
     };
     insert(tx, user, s, &t)
 }
@@ -759,7 +783,7 @@ pub fn sell(
     }
     let mut lines = lines;
     repairs::canon(conn, &mut lines)?;
-    let c = check(s, lines, pay, opts)?;
+    let mut c = check(s, lines, pay, opts)?;
     let delivers = c.lines.iter().any(|l| l.repair_id.is_some());
     // a practice sale must not hand a real phone back
     if delivers && s.training {
@@ -770,16 +794,61 @@ pub fn sell(
         drop(tx);
         return Ok((load(conn, done)?, true));
     }
+    if let Some(old) = opts.replaces {
+        fixable(&tx, old, s)?;
+    }
+    c.at = correction_time(&tx, s, opts.replaces)?;
     let id = write_sale(&tx, user, s, c, sale_id, opts.clock_ok)?;
     if delivers {
         repairs::delivered(&tx, id, &user.name)?;
     }
     if let Some(old) = opts.replaces {
         let number: String = tx.query_row("SELECT number FROM tickets WHERE id = ?1", [id], |r| r.get(0))?;
-        void_in(&tx, old, &user.name, &format!("Corregida en {number}"), false)?;
+        void_in(&tx, old, &user.name, &format!("Corregida en {number}"), opts.any_day)?;
     }
     tx.commit()?;
     Ok((load(conn, id)?, false))
+}
+
+// What a correction may replace: a live sale of the same mode (practice or
+// real), of this year, with no repair handed back on it. A return, a sale
+// that delivered a repair, or one of a closed year is put right with a
+// return in Hoy instead. (void_in then checks the day and live returns.)
+fn fixable(conn: &Connection, id: i64, s: &Settings) -> Result<()> {
+    let row: Option<(String, bool, String, i64)> = conn
+        .query_row(
+            "SELECT kind, training, issued_at,
+                    (SELECT COUNT(*) FROM ticket_lines l WHERE l.ticket_id = tickets.id AND l.repair_id IS NOT NULL)
+             FROM tickets WHERE id = ?1 AND voided_at IS NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((kind, training, issued, repairs)) = row else {
+        return fail("E_NOT_FOUND");
+    };
+    if training != s.training {
+        return fail("E_FIX_TRAINING");
+    }
+    if kind != "sale" || repairs > 0 {
+        return fail("E_FIX_KIND");
+    }
+    if issued.get(..4) != now().get(..4) {
+        return fail("E_FIX_YEAR");
+    }
+    Ok(())
+}
+
+// A correction made the same day is issued now, like any sale. One of an
+// earlier day (only the owner, only without VERI*FACTU) keeps the day and
+// time of the sale it replaces: that is when it was sold and paid, so
+// neither day's cash moves, and the customer's paper shows the day they
+// bought. With VERI*FACTU every correction is of today, as its chain needs.
+pub fn correction_time(conn: &Connection, s: &Settings, replaces: Option<i64>) -> Result<Option<String>> {
+    let Some(old) = replaces.filter(|_| verifactu::Env::of(s).is_none()) else { return Ok(None) };
+    let at: Option<String> = conn.query_row("SELECT issued_at FROM tickets WHERE id = ?1 AND voided_at IS NULL", [old], |r| r.get(0)).optional()?;
+    let today = now();
+    Ok(at.filter(|a| a.get(..10) != today.get(..10)))
 }
 
 // Shared by the preview and the real refund so both always agree. Only units
@@ -854,6 +923,9 @@ pub fn refund(conn: &mut Connection, user: &SessionUser, s: &Settings, a: &Refun
         clock_ok: a.clock_ok,
         customer: plan.original.customer.as_ref(),
         training: plan.original.training,
+        bill: plan.original.bill,
+        replaces: None,
+        at: None,
     };
     let id = insert(&tx, user, s, &t)?;
     tx.commit()?;
@@ -875,7 +947,9 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
         .query_row(
             "SELECT id, number, issued_at, user_name, total_cents, item_count, payment_method,
                     tendered_cents, change_cents, voided_at, voided_by, void_reason, shop, kind, refund_of, refund_reason,
-                    customer_name, customer_nif, customer_address, training, machine_id
+                    customer_name, customer_nif, customer_address, training, machine_id, bill,
+                    (SELECT o.number FROM tickets o WHERE o.id = tickets.replaces),
+                    (SELECT n.number FROM tickets n WHERE n.replaces = tickets.id ORDER BY n.id DESC LIMIT 1)
              FROM tickets WHERE id = ?1",
             [id],
             |r| {
@@ -908,6 +982,9 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                         training: r.get(19)?,
                         qr: None,
                         aeat: None,
+                        bill: r.get(21)?,
+                        replaces: r.get(22)?,
+                        replaced_by: r.get(23)?,
                     },
                     r.get::<_, Option<i64>>(14)?,
                 ))
@@ -974,6 +1051,43 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
 pub struct InvoiceQuery {
     pub q: Option<String>,
     pub limit: Option<i64>,
+    // practice bills in practice mode, real ones otherwise; set by the core
+    #[serde(skip)]
+    pub training: bool,
+}
+
+// a customer of an earlier invoice, to fill the next one in one tap
+#[derive(Serialize, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct KnownCustomer {
+    pub name: String,
+    pub nif: String,
+    pub address: String,
+    pub last: String,
+}
+
+// The customers of earlier invoices that fit what is typed (name or NIF),
+// the most recent first, each once.
+pub fn customers(conn: &Connection, q: &str) -> Result<Vec<KnownCustomer>> {
+    let words: Vec<String> = q.to_lowercase().split_whitespace().map(str::to_string).collect();
+    let mut stmt = conn.prepare(
+        "SELECT customer_name, COALESCE(customer_nif, ''), COALESCE(customer_address, ''), MAX(issued_at)
+         FROM tickets WHERE customer_name IS NOT NULL AND training = 0
+         GROUP BY UPPER(COALESCE(customer_nif, '')), customer_name ORDER BY MAX(issued_at) DESC LIMIT 500",
+    )?;
+    let rows = stmt.query_map([], |r| Ok(KnownCustomer { name: r.get(0)?, nif: r.get(1)?, address: r.get(2)?, last: r.get(3)? }))?;
+    let mut out = Vec::new();
+    for c in rows {
+        let c = c?;
+        let hay = format!("{} {}", c.name, c.nif).to_lowercase();
+        if words.iter().all(|w| hay.contains(w.as_str())) {
+            out.push(c);
+            if out.len() == 12 {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 #[derive(Serialize, Debug)]
@@ -989,6 +1103,10 @@ pub struct InvoiceRow {
     pub voided: bool,
     pub customer_name: String,
     pub customer_nif: String,
+    // "Corregida en TF2026-000014", "Borrada por Ana"...
+    pub void_reason: Option<String>,
+    // the one it took the place of
+    pub replaces: Option<String>,
 }
 
 // The full invoices, refunds of them included, newest first. Every word typed
@@ -998,10 +1116,11 @@ pub fn invoices(conn: &Connection, q: &InvoiceQuery) -> Result<Vec<InvoiceRow>> 
     let words: Vec<String> = q.q.as_deref().unwrap_or_default().to_lowercase().split_whitespace().map(|w| w.replace(',', ".")).collect();
     let mut stmt = conn.prepare(
         "SELECT id, kind, number, issued_at, user_name, total_cents, payment_method, voided_at IS NOT NULL,
-                COALESCE(customer_name, ''), COALESCE(customer_nif, '')
-         FROM tickets WHERE customer_name IS NOT NULL AND training = 0 ORDER BY id DESC",
+                COALESCE(customer_name, ''), COALESCE(customer_nif, ''), void_reason,
+                (SELECT o.number FROM tickets o WHERE o.id = tickets.replaces)
+         FROM tickets WHERE (customer_name IS NOT NULL OR bill = 1) AND training = ?1 ORDER BY id DESC",
     )?;
-    let rows = stmt.query_map([], |r| {
+    let rows = stmt.query_map([q.training], |r| {
         Ok(InvoiceRow {
             id: r.get(0)?,
             kind: r.get(1)?,
@@ -1013,6 +1132,8 @@ pub fn invoices(conn: &Connection, q: &InvoiceQuery) -> Result<Vec<InvoiceRow>> 
             voided: r.get(7)?,
             customer_name: r.get(8)?,
             customer_nif: r.get(9)?,
+            void_reason: r.get(10)?,
+            replaces: r.get(11)?,
         })
     })?;
     let mut out = Vec::new();
@@ -1266,8 +1387,9 @@ mod tests {
         conn.execute(
             "INSERT INTO tickets (number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
                                   payment_method, tendered_cents, change_cents, shop, sealed)
-             VALUES ('T' || substr(?1, 1, 4) || '-000001', 'T' || substr(?1, 1, 4), 1, ?1, 1, 'Ana', 1380, 2,
-                     'card', 1380, 0, '{}', 0)",
+             SELECT 'T' || substr(?1, 1, 4) || '-' || printf('%06d', n), 'T' || substr(?1, 1, 4), n, ?1, 1, 'Ana', 1380, 2,
+                    'card', 1380, 0, '{}', 0
+             FROM (SELECT COALESCE(MAX(seq), 0) + 1 AS n FROM tickets WHERE series = 'T' || substr(?1, 1, 4))",
             [issued_at],
         )
         .unwrap();
@@ -1280,6 +1402,70 @@ mod tests {
         .unwrap();
         conn.execute("UPDATE tickets SET sealed = 1 WHERE id = ?1", [id]).unwrap();
         id
+    }
+
+    #[test]
+    fn a_bill_is_corrected_with_a_clean_new_one_and_the_old_keeps_why() {
+        let (mut conn, user, s) = setup();
+        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: String::new() };
+        let s = Settings { shop_nif: "B12345674".into(), ..s };
+        let opts = SaleOpts { customer: Some(acme.clone()), bill: true, ..SaleOpts::default() };
+        let (wrong, _) = sell(&mut conn, &user, &s, vec![line("iPhone 14", 1, 69_900)], &cash(None), &opts).unwrap();
+        // the right model, in its place
+        let fix = SaleOpts { replaces: Some(wrong.id), ..opts.clone() };
+        let (right, _) = sell(&mut conn, &user, &s, vec![line("iPhone 15", 1, 79_900)], &cash(None), &fix).unwrap();
+        assert_eq!((right.bill, right.replaces.as_deref(), right.voided_at.is_none()), (true, Some(wrong.number.as_str()), true));
+        let old = load(&conn, wrong.id).unwrap();
+        assert_eq!((old.void_reason, old.replaced_by), (Some(format!("Corregida en {}", right.number)), Some(right.number.clone())));
+        // nothing on the new paper says it was corrected
+        let page = crate::invoice::invoice(&right, None, &crate::invoice::InvoiceOpts::default());
+        let words: Vec<String> = page.iter().flat_map(|p| &p.items).filter_map(|m| if let crate::invoice::Mark::Text { text, .. } = m { Some(text.to_uppercase()) } else { None }).collect();
+        assert!(!words.iter().any(|w| w.contains("CORREG") || w.contains("RECTIFIC") || w.contains("COPIA") || w.contains("ANULAD")), "{words:?}");
+        // Facturas lists both, the old one saying where it went
+        let list = invoices(&conn, &InvoiceQuery::default()).unwrap();
+        assert_eq!(list.iter().map(|r| (r.number.as_str(), r.voided)).collect::<Vec<_>>(), [(right.number.as_str(), false), (wrong.number.as_str(), true)]);
+        assert_eq!(list[0].replaces.as_deref(), Some(wrong.number.as_str()));
+        // a simple bill with no customer is in Facturas too; a sale from Venta is not
+        sell(&mut conn, &user, &s, vec![line("Funda", 1, 900)], &cash(None), &SaleOpts { bill: true, ..SaleOpts::default() }).unwrap();
+        sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &SaleOpts::default()).unwrap();
+        assert_eq!(invoices(&conn, &InvoiceQuery::default()).unwrap().len(), 3);
+        // the customer comes back for the next invoice
+        let known = customers(&conn, "acme").unwrap();
+        assert_eq!(known.iter().map(|c| (c.name.as_str(), c.nif.as_str())).collect::<Vec<_>>(), [("Acme Telecom SL", "B12345674")]);
+        assert!(customers(&conn, "nadie").unwrap().is_empty());
+
+        // corrected the same day, it is issued now
+        assert!(right.issued_at >= wrong.issued_at);
+
+        // a bill from an earlier day: only when the caller may (the owner,
+        // VERI*FACTU off), never by default
+        let year = &now()[..4];
+        let day = if now()[5..10] == *"01-01" { "12-31" } else { "01-01" };
+        let yesterday = old_ticket(&conn, &format!("{year}-{day}T10:00:00"));
+        let late = SaleOpts { replaces: Some(yesterday), ..SaleOpts::default() };
+        assert_eq!(sell(&mut conn, &user, &s, vec![line("Cable", 2, 690)], &cash(None), &late).unwrap_err().0, "E_VOID_OLD");
+        let owner = SaleOpts { any_day: true, ..late };
+        let (fixed, _) = sell(&mut conn, &user, &s, vec![line("Cable", 2, 690)], &cash(None), &owner).unwrap();
+        assert!(load(&conn, yesterday).unwrap().voided_at.is_some());
+        // it stays on the day it was sold: that day's cash and today's are untouched
+        assert_eq!(fixed.issued_at, load(&conn, yesterday).unwrap().issued_at);
+        assert!(fixed.number.starts_with(&format!("T{year}")), "{}", fixed.number);
+
+        // never one of a closed year, a return, a sale that handed a repair
+        // back, or across practice and real
+        let closed = old_ticket(&conn, "2020-03-01T10:00:00");
+        let fix = |id: i64| SaleOpts { replaces: Some(id), any_day: true, ..SaleOpts::default() };
+        assert_eq!(sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &fix(closed)).unwrap_err().0, "E_FIX_YEAR");
+        let (sold, _) = sell(&mut conn, &user, &s, vec![line("Funda", 2, 900)], &cash(None), &SaleOpts::default()).unwrap();
+        let back = refund(&mut conn, &user, &s, &back(sold.id, &[(sold.lines[0].id.unwrap(), 1)])).unwrap();
+        assert_eq!(sell(&mut conn, &user, &s, vec![line("Funda", 1, 900)], &cash(None), &fix(back.id)).unwrap_err().0, "E_FIX_KIND");
+        let practice = Settings { training: true, ..s.clone() };
+        assert_eq!(sell(&mut conn, &user, &practice, vec![line("Funda", 1, 900)], &cash(None), &fix(fixed.id)).unwrap_err().0, "E_FIX_TRAINING");
+        // and the list is of the mode the till is in
+        let real = invoices(&conn, &InvoiceQuery::default()).unwrap().len();
+        sell(&mut conn, &user, &practice, vec![line("Funda", 1, 900)], &cash(None), &SaleOpts { bill: true, ..SaleOpts::default() }).unwrap();
+        assert_eq!(invoices(&conn, &InvoiceQuery::default()).unwrap().len(), real);
+        assert_eq!(invoices(&conn, &InvoiceQuery { training: true, ..InvoiceQuery::default() }).unwrap().len(), 1);
     }
 
     #[test]

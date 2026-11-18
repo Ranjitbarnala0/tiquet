@@ -573,6 +573,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     lines: payload,
     payment: paying ? { method, tenderedCents: tendered ?? undefined } : undefined,
     customer: paying && invoice && customerOk ? customer : undefined,
+    replaces: fixing?.id,
   });
 
   // totals, VAT and the ticket itself always come from the core; requests can

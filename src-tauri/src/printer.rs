@@ -66,6 +66,10 @@ pub struct Job {
     // a full page (an A4 invoice) for the PC's page printer instead
     #[serde(default)]
     pub sheets: Vec<crate::invoice::Sheet>,
+    // the printer chosen for this print only, which another PC of the shop
+    // must use too
+    #[serde(default)]
+    pub one_off: Option<crate::settings::OneOff>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -126,6 +130,11 @@ pub enum Target {
 
 // None: no printer set up yet
 pub fn target(s: &Settings) -> Option<Target> {
+    // a printer chosen for this print only
+    if let Some(o) = s.one_off.as_ref().filter(|o| !o.name.trim().is_empty()) {
+        let name = o.name.trim().to_string();
+        return Some(if o.kind == "document" { Target::Doc(name) } else { Target::Queue(name) });
+    }
     let (name, host, com) = (s.printer_name.trim(), s.printer_host.trim(), s.printer_com.trim());
     match s.printer_kind.as_str() {
         "network" if host.is_empty() => None,
@@ -538,7 +547,7 @@ pub fn send(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) -> Result<Op
 pub fn send_job(sink: &PrintSink, s: &Settings, doc: &str, job: &Job) -> Result<Option<String>> {
     // made for another PC of the shop: it goes back to be printed there
     if let Some(c) = crate::state::caller() {
-        c.jobs.borrow_mut().push((doc.to_string(), job.clone()));
+        c.jobs.borrow_mut().push((doc.to_string(), Job { one_off: s.one_off.clone(), ..job.clone() }));
         return Ok(None);
     }
     let Some(to) = target(s) else {
@@ -622,10 +631,10 @@ fn on_lane(total: Duration, f: impl FnOnce() -> std::result::Result<Option<Strin
 // another PC of the shop, it goes back to be printed there.
 pub fn send_sheets(sink: &PrintSink, s: &Settings, doc: &str, sheets: &[crate::invoice::Sheet]) -> Result<Option<String>> {
     if let Some(c) = crate::state::caller() {
-        c.jobs.borrow_mut().push((doc.to_string(), Job { sheets: sheets.to_vec(), ..Job::default() }));
+        c.jobs.borrow_mut().push((doc.to_string(), Job { sheets: sheets.to_vec(), one_off: s.one_off.clone(), ..Job::default() }));
         return Ok(None);
     }
-    let name = s.invoice_printer.trim().to_string();
+    let name = s.one_off.as_ref().map(|o| o.name.trim()).filter(|n| !n.is_empty()).unwrap_or(s.invoice_printer.trim()).to_string();
     if name.is_empty() {
         return fail("E_NO_A4_PRINTER");
     }
@@ -648,6 +657,15 @@ pub fn send_sheets(sink: &PrintSink, s: &Settings, doc: &str, sheets: &[crate::i
 // wait for it, and if the printer is off the job is cancelled, never left to
 // open the drawer later on its own.
 pub fn send_detached(sink: &PrintSink, s: &Settings, doc: &str, data: &[u8]) {
+    // the drawer hangs on the receipt printer, whatever printer was picked
+    // for the print that goes with it
+    let usual;
+    let s = if s.one_off.is_some() {
+        usual = Settings { one_off: None, ..s.clone() };
+        &usual
+    } else {
+        s
+    };
     if let Some(c) = crate::state::caller() {
         c.jobs.borrow_mut().push((doc.to_string(), Job::raw(data.to_vec())));
         return;
@@ -1400,6 +1418,20 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::net::TcpListener;
+
+    #[test]
+    fn a_printer_chosen_for_one_print_wins_that_once() {
+        let s = Settings { printer_kind: "network".into(), printer_host: "10.0.0.9".into(), ..Settings::default() };
+        assert_eq!(target(&s), Some(Target::Net("10.0.0.9".into(), 9100)));
+        let pick = |kind: &str| Settings { one_off: Some(crate::settings::OneOff { name: "HP Oficina".into(), kind: kind.into() }), ..s.clone() };
+        // a receipt printer gets raw tickets, any other printer a drawn page
+        assert_eq!(target(&pick("windows")), Some(Target::Queue("HP Oficina".into())));
+        assert_eq!(target(&pick("document")), Some(Target::Doc("HP Oficina".into())));
+        // and it is never kept
+        let saved: Settings = serde_json::from_str(&serde_json::to_string(&pick("windows")).unwrap()).unwrap();
+        assert_eq!(target(&saved), Some(Target::Net("10.0.0.9".into(), 9100)));
+        assert!(saved.one_off.is_none());
+    }
 
     // a page through a real Windows driver, the PDF writer every Windows has:
     // cargo test --lib -- --ignored

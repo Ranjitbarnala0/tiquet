@@ -23,6 +23,7 @@ import { Cash } from './Cash';
 import { addDays, dateTime, eur, isoDate, shortDate } from './format';
 import { errorText, getLang, isPrinterSetup, isTransient, printText, tr, warningText } from './i18n';
 import { Paper } from './Paper';
+import { PrinterPick, type OneOff } from './PrinterPick';
 import { machineName, payOptions, payValue, type PayOption } from './machines';
 import { ExpenseModal, RechargeModal, type EntryDraft } from './Quick';
 import { RefundModal } from './Refund';
@@ -189,6 +190,8 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   const [refunding, setRefunding] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [busy, setBusy] = useState(false);
+  // a printer picked for the next print only
+  const [printTo, setPrintTo] = useState<OneOff | null>(null);
   const gone = filter === 'gone';
 
   const load = useCallback(() => {
@@ -239,6 +242,8 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
   }, [rows, filter, q, onMachine]);
 
   const row = shown.find((r) => rowKey(r) === sel) ?? null;
+  // a printer picked for one print is for that line only
+  useEffect(() => setPrintTo(null), [sel]);
   const groups = useMemo(() => (order === 'kind' && !gone ? stacks(shown, settings) : null), [order, gone, shown, settings]);
 
   useEffect(() => {
@@ -328,7 +333,9 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
     const id = detail.ticket.id;
     setBusy(true);
     try {
-      const r = await call<{ warning: string | null }>('tickets.print', { id });
+      // another printer picked for this print; an invoice goes on A4 there
+      const invoice = !!detail.ticket.customer || detail.ticket.bill;
+      const r = await call<{ warning: string | null }>('tickets.print', { id, printer: printTo ?? undefined, format: printTo ? (invoice ? 'a4' : 'ticket') : undefined });
       if (r.warning) toast.info(warningText(r.warning));
       else toast.ok(tr('Impreso', 'Printed'));
       const d = await call<Detail>('tickets.get', { id });
@@ -858,6 +865,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                       {tr('Editar', 'Edit')}
                     </button>
                   )}
+                  <PrinterPick format={detail.ticket.customer || detail.ticket.bill ? 'a4' : 'ticket'} value={printTo} onChange={setPrintTo} />
                   <button className="btn" onClick={reprint} disabled={busy}>
                     <Printer size={16} />
                     {onPaper ? tr('Copia', 'Copy') : tr('Imprimir', 'Print')}

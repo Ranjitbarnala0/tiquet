@@ -215,7 +215,17 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
     notes: d.notes,
     estimateCents: badEstimate ? null : estimate,
   };
-  const complete = !!d.customerName.trim() && !!d.customerPhone.trim() && !!(d.brand.trim() || d.model.trim()) && !!d.fault.trim();
+  // only what Ajustes › Reparaciones asks for; the rest may stay blank
+  // (a main till still on 1.11 sends no such setting: nothing is required)
+  const required = (settings.repairRequired ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+  const need = (k: string) => required.includes(k);
+  const opt = (k: string) => (need(k) ? '' : tr(' (opcional)', ' (optional)'));
+  const missing: string[] = [];
+  if (need('name') && !d.customerName.trim()) missing.push(tr('el nombre del cliente', "the customer's name"));
+  if (need('phone') && !d.customerPhone.trim()) missing.push(tr('el teléfono', 'the phone'));
+  if (need('device') && !(d.brand.trim() || d.model.trim())) missing.push(tr('la marca o el modelo', 'the make or model'));
+  if (need('fault') && !d.fault.trim()) missing.push(tr('la avería', 'the fault'));
+  const complete = missing.length === 0;
   const valid = complete && !badEstimate && !badDeposit && !depositHigh && !depositOver && !badGiven && !short;
   const dirty = JSON.stringify(d) !== opened;
 
@@ -296,6 +306,11 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
   const invalid = tr('Importe no válido', 'Invalid amount');
   const footer = repair ? (
     <>
+      {!complete && (
+        <span className="bill-missing">
+          {tr('Falta', 'Missing')}: {missing.join(', ')}
+        </span>
+      )}
       <button className="btn btn-ghost" onClick={onClose}>
         {tr('Cancelar', 'Cancel')}
       </button>
@@ -305,6 +320,11 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
     </>
   ) : (
     <>
+      {!complete && (
+        <span className="bill-missing">
+          {tr('Falta', 'Missing')}: {missing.join(', ')}
+        </span>
+      )}
       <span className="muted small form-note">
         {noPrinter
           ? tr('Sin impresora: el resguardo se imprime después desde aquí.', 'No printer: the receipt can be printed later from here.')
@@ -331,10 +351,10 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
       <div className="repair-form">
         <div className="stack">
           <div className="grid2">
-            <Field label={tr('Cliente', 'Customer')}>
+            <Field label={tr('Cliente', 'Customer') + opt('name')}>
               <input autoFocus value={d.customerName} onChange={(e) => set('customerName', e.target.value)} maxLength={120} />
             </Field>
-            <Field label={tr('Teléfono', 'Phone')}>
+            <Field label={tr('Teléfono', 'Phone') + opt('phone')}>
               <input value={d.customerPhone} onChange={(e) => set('customerPhone', e.target.value)} inputMode="tel" maxLength={30} />
             </Field>
           </div>
@@ -351,7 +371,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
             ))}
           </div>
           <div className="grid3">
-            <Field label={tr('Marca', 'Make')}>
+            <Field label={tr('Marca', 'Make') + opt('device')}>
               <input value={d.brand} onChange={(e) => set('brand', e.target.value)} maxLength={40} placeholder="Samsung" />
             </Field>
             <Field label={tr('Modelo', 'Model')} hint={DEVICES[d.brand] ? tr('Elige de la lista o escríbelo', 'Pick from the list or type it') : undefined}>
@@ -375,7 +395,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
           </Field>
           {/* a div, not a label: a label would pass any click on it to the first button */}
           <div className="field">
-            <span className="field-label">{tr('Avería', 'Fault')}</span>
+            <span className="field-label">{tr('Avería', 'Fault') + opt('fault')}</span>
             <div className="picks" role="group" aria-label={tr('Averías habituales', 'Usual faults')}>
               {FAULTS.map((f) => {
                 const has = d.fault.split('\n').some((l) => l.trim() === f);
@@ -563,7 +583,7 @@ function DeliverModal({ repair, settings, onClose, onCharge, onDone }: {
       }
     >
       <p className="muted">
-        {repair.customerName} · {device(repair)}
+        {[repair.customerName, device(repair)].filter((x) => x.trim()).join(' · ') || tr('Sin datos del cliente', 'No customer details')}
       </p>
       <Field label={tr('Precio final', 'Final price')} hint={tr('El presupuesto, o lo que se haya acordado. 0 si no se cobra nada.', 'The estimate, or whatever was agreed. 0 if nothing is charged.')} error={bad ? tr('Importe no válido', 'Invalid amount') : undefined}>
         <div className="money-input big">
@@ -767,7 +787,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
               <div className="ticket-row-main">
                 <b className="mono">{s.number}</b>
                 <span>
-                  {s.customerName} · {s.device}
+                  {[s.customerName, s.device].filter((x) => x.trim()).join(' · ') || tr('Sin datos del cliente', 'No customer details')}
                 </span>
                 <span>{dateTime(s.createdAt)}</span>
               </div>
@@ -797,7 +817,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                   <StatusBadge s={r.status} />
                 </h2>
                 <p className="ref-note">
-                  <b>{r.customerName}</b> · {r.customerPhone}
+                  <b>{r.customerName || tr('Sin nombre', 'No name')}</b>{r.customerPhone && <> · {r.customerPhone}</>}
                 </p>
                 <p className="muted">
                   {device(r)}
@@ -852,7 +872,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                     {tr('Entregar y cobrar', 'Hand back and charge')}
                   </button>
                 )}
-                {open && <RepairWhatsApp repair={r} shop={settings.shopName} disabled={busy} />}
+                {open && r.customerPhone.trim() && <RepairWhatsApp repair={r} shop={settings.shopName} disabled={busy} />}
                 <button className="btn" onClick={() => print('resguardo')} disabled={busy}>
                   <Printer size={16} />
                   {tr('Resguardo', 'Receipt')}
@@ -894,7 +914,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                 )}
                 <div className="info-block">
                   <span className="field-label">{tr('Avería', 'Fault')}</span>
-                  <p className="pre">{r.fault}</p>
+                  {r.fault.trim() ? <p className="pre">{r.fault}</p> : <p className="muted">{tr('Sin anotar', 'Not noted')}</p>}
                 </div>
                 {r.notes && (
                   <div className="info-block">

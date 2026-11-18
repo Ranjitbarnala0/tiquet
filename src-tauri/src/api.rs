@@ -12,7 +12,7 @@ use crate::error::{fail, Error, Result};
 use crate::escpos::{self, Opts};
 use crate::layout::{self, TicketView};
 use crate::printer::Job;
-use crate::settings::{self, Logo, Settings};
+use crate::settings::{self, Logo, OneOff, Settings};
 use crate::state::{self, AppState, SessionUser};
 use crate::tickets::{self, PaymentIn, RefundIn, SaleLine, SaleOpts, ShopInfo, TicketRecord};
 use crate::verifactu::{self, Env};
@@ -317,6 +317,7 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
                 let logo = tickets::logo_for(&conn, &rec)?;
                 (rec, settings::load(&conn)?, logo)
             };
+            let s = Settings { one_off: one_off(&a), ..s };
             let warning = match a.get("format").and_then(Value::as_str) {
                 Some("a4") => print_as(st, &rec, &s, logo.as_ref(), false, true)?,
                 Some("ticket") => print_as(st, &rec, &s, logo.as_ref(), false, false)?,
@@ -328,7 +329,26 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         // NIF or amount
         "invoices.list" => {
             st.user()?;
-            to(tickets::invoices(&st.conn(), &parse(a)?)?)
+            let conn = st.conn();
+            let q = tickets::InvoiceQuery { training: settings::load(&conn)?.training, ..parse(a)? };
+            to(tickets::invoices(&conn, &q)?)
+        }
+        // customers of earlier invoices, to fill in the next one
+        "invoices.customers" => {
+            st.user()?;
+            to(tickets::customers(&st.conn(), a.get("q").and_then(Value::as_str).unwrap_or_default())?)
+        }
+        // the A4 page of a bill being made, exactly as it will print
+        "invoices.preview" => invoice_preview(st, parse(a)?),
+        // the A4 page of one already made
+        "invoices.sheets" => {
+            st.user()?;
+            let conn = st.conn();
+            let rec = tickets::load(&conn, id(&a)?)?;
+            let logo = tickets::logo_for(&conn, &rec)?;
+            let s = settings::load(&conn)?;
+            // as the customer got it; a reprint adds COPIA, which the screen says
+            Ok(json!({ "sheets": crate::invoice::invoice(&rec, logo.as_ref(), &crate::invoice::InvoiceOpts::of(&s, false)) }))
         }
         // the ticket for the customer's phone or inbox, as text and as PDF
         "tickets.text" => {
@@ -478,7 +498,8 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         "repairs.update" => {
             let me = st.user()?;
             let r: repairs::RepairIn = parse(a.clone())?;
-            repairs::update(&mut st.conn(), id(&a)?, &me.name, &r)?;
+            let required = settings::load(&st.conn())?.repair_required;
+            repairs::update(&mut st.conn(), id(&a)?, &me.name, &r, &required)?;
             repair_get(st, id(&a)?)
         }
         "repairs.status" => {
@@ -814,6 +835,13 @@ fn here(st: &AppState, cmd: &str, a: Value) -> Result<Value> {
         "printers.list" => {
             st.admin()?;
             Ok(json!({ "printers": printer::list(), "ports": printer::ports() }))
+        }
+        // the printers of this PC to choose from when printing, for anyone,
+        // with the ones set up in Ajustes
+        "printers.choices" => {
+            st.user()?;
+            let s = settings::load(&st.conn())?;
+            Ok(json!({ "printers": printer::list(), "receipt": printer::label(&s), "a4": s.invoice_printer }))
         }
         "printers.detect" => {
             st.admin()?;
@@ -1177,6 +1205,9 @@ struct PreviewIn {
     sample: bool,
     #[serde(default)]
     customer: Option<tickets::Customer>,
+    // the sale this one corrects, whose day and time it keeps
+    #[serde(default)]
+    replaces: Option<i64>,
 }
 
 fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
@@ -1199,7 +1230,7 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
         Some(Err(e)) => (None, Some(e.0)),
         None => (None, None),
     };
-    let issued_at = tickets::now();
+    let issued_at = tickets::correction_time(&conn, &s, a.replaces)?.unwrap_or_else(tickets::now);
     let customer = a.customer.filter(|c| !c.name.trim().is_empty());
     let tag = tickets::series_tag("sale", customer.is_some(), s.training);
     let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
@@ -1234,6 +1265,78 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct DraftIn {
+    #[serde(default)]
+    lines: Vec<SaleLine>,
+    #[serde(default)]
+    customer: Option<tickets::Customer>,
+    #[serde(default)]
+    payment: Option<PaymentIn>,
+    // Ajustes: the sample page, with the settings not saved yet
+    #[serde(default)]
+    sample: bool,
+    #[serde(default)]
+    settings: Option<Settings>,
+    // the bill this one corrects, whose day and time it keeps
+    #[serde(default)]
+    replaces: Option<i64>,
+}
+
+// What a bill being made looks like on A4: the next number, today, the
+// shop, the customer if there is one, and what is on it.
+fn invoice_preview(st: &AppState, a: DraftIn) -> Result<Value> {
+    let me = st.user()?;
+    if a.settings.is_some() {
+        st.admin()?;
+    }
+    let conn = st.conn();
+    let s = match a.settings {
+        Some(s) => s.clean(),
+        None => settings::load(&conn)?,
+    };
+    let logo = settings::logo(&conn)?;
+    let lines = if a.sample { crate::invoice::sample(&s).lines } else { tickets::clamp(a.lines) };
+    let totals = tickets::compute(&lines);
+    let customer = a.customer.filter(|c| !c.name.trim().is_empty() || !c.nif.trim().is_empty());
+    let issued_at = tickets::correction_time(&conn, &s, a.replaces)?.unwrap_or_else(tickets::now);
+    let tag = tickets::series_tag("sale", customer.is_some(), s.training);
+    let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
+    let method = a.payment.map(|p| p.method).filter(|m| !m.is_empty()).unwrap_or_else(|| "cash".into());
+    let qr = verifactu::preview_qr(&s, &number, &issued_at, totals.total_cents);
+    let rec = TicketRecord {
+        id: 0,
+        kind: "sale".into(),
+        number: number.clone(),
+        issued_at,
+        user_name: me.name,
+        total_cents: totals.total_cents,
+        item_count: totals.item_count,
+        payment: tickets::Payment { method, tendered_cents: totals.total_cents, change_cents: 0, machine: None },
+        voided_at: None,
+        voided_by: None,
+        void_reason: None,
+        refund_of: None,
+        refund_reason: None,
+        refunds: Vec::new(),
+        lines,
+        vat: totals.vat.clone(),
+        prints: Vec::new(),
+        payment_changes: Vec::new(),
+        shop: ShopInfo::from_settings(&s),
+        customer,
+        training: s.training,
+        qr,
+        aeat: None,
+        bill: true,
+        replaces: None,
+        replaced_by: None,
+    };
+    let sheets = crate::invoice::invoice(&rec, logo.as_ref(), &crate::invoice::InvoiceOpts::of(&s, false));
+    Ok(json!({ "sheets": sheets, "number": number, "totals": totals }))
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct FinalizeIn {
     lines: Vec<SaleLine>,
     payment: PaymentIn,
@@ -1241,6 +1344,17 @@ struct FinalizeIn {
     print: bool,
     #[serde(flatten)]
     opts: SaleOpts,
+    // a bill made in Facturas: "a4" or "ticket"; left out, the usual rule
+    #[serde(default)]
+    format: Option<String>,
+    // a printer for this print only
+    #[serde(default)]
+    printer: Option<OneOff>,
+}
+
+// the printer a request chose for this print only, if it named one
+fn one_off(a: &Value) -> Option<OneOff> {
+    a.get("printer").cloned().and_then(|v| serde_json::from_value::<OneOff>(v).ok()).filter(|o| !o.name.trim().is_empty())
 }
 
 fn yes() -> bool {
@@ -1271,13 +1385,17 @@ fn may_fix(conn: &rusqlite::Connection, me: &SessionUser, s: &Settings, ticket: 
 
 fn finalize(st: &AppState, a: FinalizeIn) -> Result<Value> {
     let me = st.user()?;
+    let FinalizeIn { lines, payment, print, mut opts, format, printer } = a;
     let (rec, dup, s, logo) = {
         let mut conn = st.conn();
         let s = settings::load(&conn)?;
-        if let Some(old) = a.opts.replaces {
+        if let Some(old) = opts.replaces {
             may_fix(&conn, &me, &s, old)?;
+            // a mistake found days later is put right too: by the owner, while
+            // VERI*FACTU is off, as a void can be
+            opts.any_day = me.role == "admin" && verifactu::Env::of(&s).is_none();
         }
-        let (rec, dup) = tickets::sell(&mut conn, &me, &s, a.lines, &a.payment, &a.opts)?;
+        let (rec, dup) = tickets::sell(&mut conn, &me, &s, lines, &payment, &opts)?;
         let logo = tickets::logo_for(&conn, &rec)?;
         (rec, dup, s, logo)
     };
@@ -1296,7 +1414,8 @@ fn finalize(st: &AppState, a: FinalizeIn) -> Result<Value> {
         rec.payment.method,
         me.name
     ));
-    let out = issue(st, rec, &s, logo.as_ref(), a.print);
+    let s = Settings { one_off: printer.filter(|o| !o.name.trim().is_empty()), ..s };
+    let out = issue_as(st, rec, &s, logo.as_ref(), print, format.as_deref());
     // the day's copy for a till left open overnight runs beside the till:
     // the first sale of the day never waits for it
     if backup::due(&st.conn()) {
@@ -1308,8 +1427,18 @@ fn finalize(st: &AppState, a: FinalizeIn) -> Result<Value> {
 // the ticket is committed before anything is sent to the printer: a jammed
 // or unplugged printer never loses a ticket, it only reports printError
 fn issue(st: &AppState, rec: TicketRecord, s: &Settings, logo: Option<&Logo>, print: bool) -> Value {
+    issue_as(st, rec, s, logo, print, None)
+}
+
+// `format` "a4" or "ticket" for a bill made in Facturas
+fn issue_as(st: &AppState, rec: TicketRecord, s: &Settings, logo: Option<&Logo>, print: bool, format: Option<&str>) -> Value {
     let (print_error, print_warning) = if print {
-        match print_ticket(st, &rec, s, logo, true) {
+        let out = match format {
+            Some("a4") => print_as(st, &rec, s, logo, true, true),
+            Some("ticket") => print_as(st, &rec, s, logo, true, false),
+            _ => print_ticket(st, &rec, s, logo, true),
+        };
+        match out {
             Ok(w) => (None, w),
             Err(e) => (Some(e.0), None),
         }
@@ -1367,17 +1496,21 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
 // The drawer opens only with the original printed at the sale itself. A full
 // invoice comes out on A4 when this PC has a printer for them.
 fn print_ticket(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>, at_sale: bool) -> Result<Option<String>> {
-    let a4 = rec.customer.is_some() && !s.invoice_printer.trim().is_empty();
+    let a4 = (rec.customer.is_some() || rec.bill) && !s.invoice_printer.trim().is_empty();
     print_as(st, rec, s, logo, at_sale, a4)
 }
 
 fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>, at_sale: bool, a4: bool) -> Result<Option<String>> {
     if a4 {
-        if s.invoice_printer.trim().is_empty() {
-            return fail("E_NO_A4_PRINTER");
+        let picked = s.one_off.as_ref().is_some_and(|o| !o.name.trim().is_empty());
+        if !picked && s.invoice_printer.trim().is_empty() {
+            // no A4 printer on this PC: the bill still comes out, as a ticket
+            // on the receipt printer, and the screen says why
+            // (a ticket saved as a PDF says where it went instead)
+            return print_as(st, rec, s, logo, at_sale, false).map(|w| Some(w.filter(|w| w.starts_with("W_SAVED:")).unwrap_or_else(|| "W_A4_AS_TICKET".into())));
         }
         let (attempt, copy) = tickets::begin_print(&st.conn(), rec.id, false)?;
-        let sheets = crate::invoice::invoice(rec, logo, &crate::invoice::InvoiceOpts { terms: s.invoice_terms.clone(), copy });
+        let sheets = crate::invoice::invoice(rec, logo, &crate::invoice::InvoiceOpts::of(s, copy));
         let out = printer::send_sheets(&st.sink, s, &rec.number, &sheets);
         // the drawer hangs on the receipt printer
         if at_sale && !copy && drawer_opens(s, &rec.payment.method) {
@@ -1393,7 +1526,10 @@ fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>
     }
     let (attempt, copy) = tickets::begin_print(&st.conn(), rec.id, false)?;
     let kick = at_sale && !copy && drawer_opens(s, &rec.payment.method);
-    let mut job = Job::doc(&layout::record(rec, s, logo.is_some(), copy), logo, &Opts::new(s, kick));
+    // on a printer picked for this print, the drawer still opens on the
+    // receipt printer it hangs from
+    let elsewhere = s.one_off.is_some();
+    let mut job = Job::doc(&layout::record(rec, s, logo.is_some(), copy), logo, &Opts::new(s, kick && !elsewhere));
     if !copy {
         let extra = layout::record(rec, s, logo.is_some(), true);
         for _ in 1..s.copies {
@@ -1401,6 +1537,9 @@ fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>
         }
     }
     let out = printer::send_job(&st.sink, s, &rec.number, &job);
+    if kick && elsewhere {
+        printer::send_detached(&st.sink, s, "cajon", &escpos::kick(s));
+    }
     let (status, detail) = match &out {
         Ok(None) => ("printed", None),
         Ok(Some(w)) => ("sent", Some(w.as_str())),
@@ -1484,14 +1623,38 @@ struct RepairPreviewIn {
     // a repair being corrected keeps its own number, date and deposit
     #[serde(default)]
     id: Option<i64>,
+    // Ajustes: a made-up repair, with the settings not saved yet
+    #[serde(default)]
+    sample: bool,
+    #[serde(default)]
+    settings: Option<Settings>,
 }
 
 fn repair_preview(st: &AppState, me: &SessionUser, a: RepairPreviewIn) -> Result<Value> {
+    if a.settings.is_some() {
+        st.admin()?;
+    }
     let conn = st.conn();
-    let s = settings::load(&conn)?;
-    let r = match a.id {
-        Some(id) => repairs::revised(&conn, id, &a.repair)?,
-        None => repairs::draft(&conn, me, &s, &a.repair, a.deposit_cents)?,
+    let s = match a.settings {
+        Some(s) => s.clean(),
+        None => settings::load(&conn)?,
+    };
+    let r = if a.sample {
+        let demo = repairs::RepairIn {
+            customer_name: "Cliente de ejemplo".into(),
+            customer_phone: "600 000 000".into(),
+            brand: "Teléfono".into(),
+            model: "de ejemplo".into(),
+            fault: "Pantalla rota".into(),
+            estimate_cents: Some(8_900),
+            ..repairs::RepairIn::default()
+        };
+        repairs::draft(&conn, me, &s, &demo, 2_000)?
+    } else {
+        match a.id {
+            Some(id) => repairs::revised(&conn, id, &a.repair)?,
+            None => repairs::draft(&conn, me, &s, &a.repair, a.deposit_cents)?,
+        }
     };
     let logo = tickets::shop_logo(&conn, &r.shop)?.is_some();
     Ok(json!({ "number": r.number, "resguardo": layout::resguardo(&r, &s, logo), "slip": layout::repair_slip(&r, &s) }))
@@ -1577,7 +1740,7 @@ fn printer_test(st: &AppState, t: TestIn) -> Result<Value> {
     let logo = settings::logo(&st.conn())?;
     // the A4 printer for invoices, with a page that says it is a test
     if t.kind == "a4" {
-        let sheets = crate::invoice::invoice(&crate::invoice::sample(&s), logo.as_ref(), &crate::invoice::InvoiceOpts { terms: s.invoice_terms.clone(), copy: false });
+        let sheets = crate::invoice::invoice(&crate::invoice::sample(&s), logo.as_ref(), &crate::invoice::InvoiceOpts::of(&s, false));
         let warning = printer::send_sheets(&st.sink, &s, "prueba A4", &sheets)?;
         return Ok(json!({ "warning": warning }));
     }
@@ -1655,7 +1818,9 @@ mod tests {
             assert_eq!(dispatch(&st, cmd, json!({})).unwrap_err(), "E_FORBIDDEN", "{cmd}");
         }
         let preview = json!({ "sample": true, "settings": { "shopName": "X" } });
-        assert_eq!(dispatch(&st, "sale.preview", preview).unwrap_err(), "E_FORBIDDEN");
+        assert_eq!(dispatch(&st, "sale.preview", preview.clone()).unwrap_err(), "E_FORBIDDEN");
+        assert_eq!(dispatch(&st, "invoices.preview", preview.clone()).unwrap_err(), "E_FORBIDDEN");
+        assert_eq!(dispatch(&st, "repairs.preview", preview).unwrap_err(), "E_FORBIDDEN");
 
         let t = dispatch(&st, "sale.finalize", sale()).unwrap();
         assert_eq!(t["ticket"]["userName"], "Jordi");
@@ -2283,6 +2448,24 @@ mod tests {
         dispatch(&st, "settings.save", json!({ "invoicePrinter": "" })).unwrap();
         let draft = dispatch(&st, "settings.get", json!({})).unwrap();
         assert_eq!(dispatch(&st, "printers.test", json!({ "settings": draft, "kind": "a4" })).unwrap_err(), "E_NO_A4_PRINTER");
+        // a bill asked for on A4 on a PC with no A4 printer still comes out,
+        // as a ticket, and the screen says why
+        let bill = |id: &str, printer: Value| {
+            json!({ "lines": [{ "name": "Funda", "qty": 1, "unitCents": 900, "vatBp": 2100 }], "payment": { "method": "card" },
+                    "bill": true, "format": "a4", "printer": printer, "saleId": id })
+        };
+        let before = prints(".bin");
+        let r = dispatch(&st, "sale.finalize", bill("c", Value::Null)).unwrap();
+        assert_eq!((r["printed"].as_bool(), r["printWarning"].as_str(), prints(".bin")), (Some(true), Some("W_A4_AS_TICKET"), before + 1));
+        // a printer picked for this one print is enough for the page
+        let r = dispatch(&st, "sale.finalize", bill("d", json!({ "name": "Otra A4", "kind": "document" }))).unwrap();
+        assert_eq!((r["printWarning"].as_str(), prints("-A4.pdf")), (None, 4));
+        // Ajustes shows the A4 bill and the repair receipt with the settings being edited
+        let draft = dispatch(&st, "settings.get", json!({})).unwrap();
+        let sheets = dispatch(&st, "invoices.preview", json!({ "sample": true, "settings": draft })).unwrap();
+        assert!(sheets["sheets"].as_array().is_some_and(|s| !s.is_empty()));
+        let slip = dispatch(&st, "repairs.preview", json!({ "sample": true, "settings": draft })).unwrap();
+        assert!(slip["resguardo"].as_array().is_some_and(|s| !s.is_empty()));
     }
 
     #[test]

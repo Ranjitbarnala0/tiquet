@@ -821,6 +821,11 @@ fn print_here(
             printer::send_detached(&st.sink, &s, &doc, &job.raw);
             continue;
         }
+        // the printer chosen there for this print, on this PC
+        let s = settings::Settings {
+            one_off: job.one_off.clone(),
+            ..s.clone()
+        };
         let out = if job.sheets.is_empty() {
             printer::send_job(&st.sink, &s, &doc, &job)
         } else {

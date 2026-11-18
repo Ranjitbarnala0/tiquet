@@ -48,6 +48,31 @@ pub struct InvoiceOpts {
     pub terms: String,
     // a reprint: COPIA next to the title
     pub copy: bool,
+    // a simplified invoice with the table of VAT per rate too; without it
+    // the total says "IVA incluido". A full invoice always has the table.
+    pub vat_table: bool,
+}
+
+impl InvoiceOpts {
+    // as Ajustes has them
+    pub fn of(s: &Settings, copy: bool) -> InvoiceOpts {
+        InvoiceOpts { terms: s.invoice_terms.clone(), copy, vat_table: s.invoice_vat_table }
+    }
+}
+
+// What the page is called, as the receipt calls it: a full invoice has a
+// customer; without one it is a simplified invoice, or a plain ticket for a
+// shop with no NIF.
+fn title(rec: &TicketRecord) -> &'static str {
+    let fiscal = !rec.shop.nif.trim().is_empty();
+    match (rec.customer.is_some(), rec.kind == "refund", fiscal) {
+        (true, false, _) => "FACTURA",
+        (true, true, _) => "FACTURA RECTIFICATIVA",
+        (false, false, true) => "FACTURA SIMPLIFICADA",
+        (false, true, true) => "FACTURA SIMPLIFICADA RECTIFICATIVA",
+        (false, false, false) => "TICKET",
+        (false, true, false) => "TICKET DE DEVOLUCIÓN",
+    }
 }
 
 const PAGE_W: f32 = 210.0;
@@ -409,7 +434,7 @@ fn head(d: &mut Doc, y: f32, rec: &TicketRecord, logo: Option<&Logo>, copy: bool
 
     // the title as big as fits beside COPIA, its capitals level with the shop's
     let refund = rec.kind == "refund";
-    let title = if refund { "FACTURA RECTIFICATIVA" } else { "FACTURA" };
+    let title = title(rec);
     let width = 80.0;
     let stamp = font(10.0, true);
     let stamp_w = stamp.width("COPIA") + 4.0;
@@ -453,31 +478,29 @@ fn customer(d: &mut Doc, y: f32, rec: &TicketRecord) -> f32 {
     let (w, pad, band) = (100.0, 3.0, 6.0);
     let inner = w - 2.0 * pad;
     let (name, body, head) = (font(10.5, true), font(9.5, false), font(8.0, true));
-    let mut lines: Vec<(Font, String)> = Vec::new();
-    let mut add = |f: Font, s: &str| lines.extend(wrap(s, f, inner).into_iter().map(|l| (f, l)));
-    match &rec.customer {
-        Some(c) => {
-            add(name, &c.name);
-            if !c.nif.trim().is_empty() {
-                add(body, &format!("NIF: {}", c.nif.trim()));
-            }
-            for a in c.address.lines().map(str::trim).filter(|a| !a.is_empty()) {
-                add(body, a);
-            }
+    // a simplified invoice is made out to nobody: no box at all
+    let mut bottom = y;
+    if let Some(c) = &rec.customer {
+        let mut lines: Vec<(Font, String)> = Vec::new();
+        let mut add = |f: Font, s: &str| lines.extend(wrap(s, f, inner).into_iter().map(|l| (f, l)));
+        add(name, &c.name);
+        if !c.nif.trim().is_empty() {
+            add(body, &format!("NIF: {}", c.nif.trim()));
         }
-        // the app makes these out to someone; without anyone it still prints
-        None => add(body, "Cliente: —"),
+        for a in c.address.lines().map(str::trim).filter(|a| !a.is_empty()) {
+            add(body, a);
+        }
+        let h = band + 2.0 + lines.iter().map(|(f, _)| f.lead()).sum::<f32>() + 1.5;
+        d.rect(LEFT, y, w, band, Some(SHADE), false);
+        d.text(LEFT + pad, y + band / 2.0 + head.cap() / 2.0, head, Align::Left, "Cliente");
+        d.rect(LEFT, y, w, h, None, true);
+        let mut t = y + band + 2.0;
+        for (f, l) in &lines {
+            d.text(LEFT + pad, t + f.ascent(), *f, Align::Left, l);
+            t += f.lead();
+        }
+        bottom = y + h;
     }
-    let h = band + 2.0 + lines.iter().map(|(f, _)| f.lead()).sum::<f32>() + 1.5;
-    d.rect(LEFT, y, w, band, Some(SHADE), false);
-    d.text(LEFT + pad, y + band / 2.0 + head.cap() / 2.0, head, Align::Left, "Cliente");
-    d.rect(LEFT, y, w, h, None, true);
-    let mut t = y + band + 2.0;
-    for (f, l) in &lines {
-        d.text(LEFT + pad, t + f.ascent(), *f, Align::Left, l);
-        t += f.lead();
-    }
-    let mut bottom = y + h;
     if let Some(rows) = rec.qr.as_deref().and_then(verifactu::qr_rows) {
         let x = RIGHT - QR;
         d.text(x + QR / 2.0, y + head.cap(), head, Align::Center, "QR tributario:");
@@ -568,31 +591,40 @@ fn draw_row(d: &mut Doc, y: f32, r: &Row) -> f32 {
     bottom
 }
 
-// under the table on the right: VAT per rate, the total, how it was paid
-fn totals(d: &mut Doc, y: f32, rec: &TicketRecord, vat: &[VatRow]) -> f32 {
+// under the table on the right: VAT per rate, the total, how it was paid. A
+// simplified invoice may leave the VAT table out: the rate of each line is in
+// the table above, and the total says the VAT is in it.
+fn totals(d: &mut Doc, y: f32, rec: &TicketRecord, vat: &[VatRow], table: bool) -> f32 {
     let x0 = 100.0;
     let edges = [133.0, 149.0, 171.0, RIGHT - 2.0];
     let (head, f, big) = (font(8.0, true), font(BODY, false), font(14.0, true));
-    d.rect(x0, y, RIGHT - x0, 6.5, Some(SHADE), false);
-    for (e, l) in edges.iter().zip(["Base imponible", "Tipo IVA", "Cuota IVA", "Total"]) {
-        d.text(*e, y + 3.25 + head.cap() / 2.0, head, Align::Right, l);
-    }
-    let mut y = y + 6.5;
-    for v in vat {
-        for (e, s) in edges.iter().zip([fmt(v.base_cents), fmt_rate(v.vat_bp), fmt(v.vat_cents), fmt(v.total_cents)]) {
-            d.text(*e, y + 2.5 + f.cap() / 2.0, f, Align::Right, &s);
+    let mut y = y;
+    if table {
+        d.rect(x0, y, RIGHT - x0, 6.5, Some(SHADE), false);
+        for (e, l) in edges.iter().zip(["Base imponible", "Tipo IVA", "Cuota IVA", "Total"]) {
+            d.text(*e, y + 3.25 + head.cap() / 2.0, head, Align::Right, l);
         }
-        y += 5.0;
-        d.line(x0, y, RIGHT, y, 0.1);
+        y += 6.5;
+        for v in vat {
+            for (e, s) in edges.iter().zip([fmt(v.base_cents), fmt_rate(v.vat_bp), fmt(v.vat_cents), fmt(v.total_cents)]) {
+                d.text(*e, y + 2.5 + f.cap() / 2.0, f, Align::Right, &s);
+            }
+            y += 5.0;
+            d.line(x0, y, RIGHT, y, 0.1);
+        }
+        y += 2.5;
     }
-    y += 2.5;
     d.rect(x0, y, RIGHT - x0, 10.0, Some(SHADE), false);
     let base = y + 5.0 + big.cap() / 2.0;
     d.text(x0 + 3.0, base, big, Align::Left, "TOTAL");
     d.text(RIGHT - 2.0, base, big, Align::Right, &format!("{} €", fmt(rec.total_cents)));
     y += 10.0;
-    let label = if rec.kind == "refund" { "Forma de devolución" } else { "Forma de pago" };
     let pay = font(9.5, false);
+    if !table {
+        d.text(RIGHT - 2.0, y + 5.0, pay, Align::Right, "IVA incluido");
+        y += 5.0;
+    }
+    let label = if rec.kind == "refund" { "Forma de devolución" } else { "Forma de pago" };
     d.text(RIGHT - 2.0, y + 5.0, pay, Align::Right, &format!("{label}: {}", method_label(&rec.payment.method)));
     y + 6.5
 }
@@ -662,6 +694,9 @@ pub fn sample(s: &Settings) -> TicketRecord {
         training: true,
         qr: None,
         aeat: None,
+        bill: true,
+        replaces: None,
+        replaced_by: None,
     }
 }
 
@@ -671,7 +706,9 @@ pub fn print(_printer: &str, _sheets: &[Sheet], _copies: u32) -> crate::error::R
 }
 
 pub fn invoice(rec: &TicketRecord, logo: Option<&Logo>, opts: &InvoiceOpts) -> Vec<Sheet> {
-    let title = if rec.kind == "refund" { "FACTURA RECTIFICATIVA" } else { "FACTURA" };
+    let title = title(rec);
+    // a full invoice always states the VAT of each rate
+    let table = opts.vat_table || rec.customer.is_some();
     let mut banner = Vec::new();
     if rec.training {
         banner.push("PRUEBA · SIN VALIDEZ");
@@ -693,7 +730,7 @@ pub fn invoice(rec: &TicketRecord, logo: Option<&Logo>, opts: &InvoiceOpts) -> V
 
     // a reprint shows the VAT stored when the ticket was issued
     let vat = if rec.vat.is_empty() { compute(&rec.lines).vat } else { rec.vat.clone() };
-    let tail = totals(&mut Doc::scratch(), 0.0, rec, &vat);
+    let tail = totals(&mut Doc::scratch(), 0.0, rec, &vat, table);
     let mut rows: Vec<Row> = rec.lines.iter().map(Row::of).collect();
     if rows.is_empty() {
         rows.push(Row { desc: vec!["(sin artículos)".into()], cells: Default::default() });
@@ -711,7 +748,7 @@ pub fn invoice(rec: &TicketRecord, logo: Option<&Logo>, opts: &InvoiceOpts) -> V
     if y + GAP + tail > BOTTOM {
         y = d.sheet();
     }
-    let y = totals(&mut d, y + GAP, rec, &vat);
+    let y = totals(&mut d, y + GAP, rec, &vat, table);
     terms(&mut d, y, &opts.terms);
 
     let n = d.sheets.len();
@@ -1341,6 +1378,9 @@ mod tests {
             training: false,
             qr: None,
             aeat: None,
+            bill: true,
+            replaces: None,
+            replaced_by: None,
         }
     }
 
@@ -1404,6 +1444,30 @@ mod tests {
     }
 
     #[test]
+    fn a_bill_without_customer_data_is_a_simplified_invoice_on_a4() {
+        let rec = TicketRecord { customer: None, number: "T2026-000045".into(), ..phone_sale() };
+        let all = texts(&invoice(&rec, None, &InvoiceOpts::default()));
+        // titled as what it is, made out to nobody, the VAT inside the total
+        for s in ["FACTURA SIMPLIFICADA", "IVA incluido", "Forma de pago: Tarjeta", "TOTAL", "840,00 €"] {
+            assert!(all.iter().any(|t| t == s), "missing {s}: {all:?}");
+        }
+        for s in ["Cliente", "Base imponible", "FACTURA"] {
+            assert!(!all.iter().any(|t| t == s), "{s} should not be there");
+        }
+        // each line still says its rate
+        assert!(all.iter().any(|t| t == "21%") && all.iter().any(|t| t == "10%"));
+        // the table of VAT when the shop wants it
+        let with = texts(&invoice(&rec, None, &InvoiceOpts { vat_table: true, ..InvoiceOpts::default() }));
+        assert!(with.iter().any(|t| t == "Base imponible") && !with.iter().any(|t| t == "IVA incluido"));
+        // a full invoice always has it, whatever Ajustes says
+        let full = texts(&invoice(&phone_sale(), None, &InvoiceOpts::default()));
+        assert!(full.iter().any(|t| t == "Base imponible") && full.iter().any(|t| t == "FACTURA"));
+        // a shop with no NIF gives a ticket
+        let plain = TicketRecord { shop: ShopInfo { nif: String::new(), ..shop() }, ..rec.clone() };
+        assert!(texts(&invoice(&plain, None, &InvoiceOpts::default())).iter().any(|t| t == "TICKET"));
+    }
+
+    #[test]
     fn a_short_invoice_is_one_page_with_everything_a_factura_needs() {
         let rec = phone_sale();
         let sheets = invoice(&rec, None, &InvoiceOpts::default());
@@ -1431,7 +1495,7 @@ mod tests {
     #[test]
     fn a_long_invoice_goes_on_with_the_heading_again_and_the_totals_last() {
         let rec = many(70);
-        let sheets = invoice(&rec, None, &InvoiceOpts { terms: "Garantía de 3 años.\nDevoluciones en 15 días.".into(), copy: false });
+        let sheets = invoice(&rec, None, &InvoiceOpts { terms: "Garantía de 3 años.\nDevoluciones en 15 días.".into(), copy: false, vat_table: false });
         let pdf = to_pdf(&sheets, &rec.number);
         assert!(has(&pdf, b"/Count 2"), "{} pages", sheets.len());
         for (i, s) in sheets.iter().enumerate() {
@@ -1515,14 +1579,15 @@ mod tests {
         let mut rec = many(70);
         rec.training = true;
         rec.customer = None;
-        let sheets = invoice(&rec, None, &InvoiceOpts { terms: String::new(), copy: true });
+        let sheets = invoice(&rec, None, &InvoiceOpts { terms: String::new(), copy: true, vat_table: false });
         assert!(sheets.len() > 1);
         for s in &sheets {
             assert!(texts(std::slice::from_ref(s)).iter().any(|t| t == "PRUEBA · SIN VALIDEZ"));
         }
         let all = texts(&sheets);
         assert!(all.iter().any(|t| t == "COPIA"));
-        assert!(all.iter().any(|t| t == "Cliente: —"));
+        // made out to nobody: a simplified invoice, with no empty box
+        assert!(all.iter().any(|t| t == "FACTURA SIMPLIFICADA") && !all.iter().any(|t| t.starts_with("Cliente")));
         assert!(all.iter().any(|t| t.ends_with(" · COPIA")));
         let mut voided = phone_sale();
         voided.voided_at = Some("2026-11-10T18:00:00".into());
@@ -1565,7 +1630,7 @@ mod tests {
         let terms = "Garantía: ".repeat(60);
         for rec in [phone_sale(), many(70), long] {
             for copy in [false, true] {
-                let sheets = invoice(&rec, Some(&logo()), &InvoiceOpts { terms: terms.clone(), copy });
+                let sheets = invoice(&rec, Some(&logo()), &InvoiceOpts { terms: terms.clone(), copy, vat_table: false });
                 for s in &sheets {
                     for m in &s.items {
                         let (l, r, top, bottom) = match m {
@@ -1631,7 +1696,7 @@ mod tests {
     #[test]
     fn the_pdf_is_well_formed() {
         let rec = phone_sale();
-        let sheets = invoice(&rec, Some(&logo()), &InvoiceOpts { terms: "Funda (silicona) \\ 2".into(), copy: true });
+        let sheets = invoice(&rec, Some(&logo()), &InvoiceOpts { terms: "Funda (silicona) \\ 2".into(), copy: true, vat_table: false });
         let pdf = to_pdf(&sheets, "TF2026-000123");
         assert!(has(&pdf, br"(Funda \(silicona\) \\ 2)"));
         assert!(has(&pdf, b"/XObject << /Im1 7 0 R >>") && has(&pdf, b"/Subtype /Image /Width 300 /Height 120"));
@@ -1660,7 +1725,7 @@ mod tests {
                      solo se cambian por avería.";
         let mut rec = phone_sale();
         rec.qr = Some("https://www2.agenciatributaria.gob.es/wlpl/TIKE-CONT/ValidarQR?nif=12345678Z&numserie=TF2026-000123&fecha=10-11-2026&importe=840.00".into());
-        let opts = InvoiceOpts { terms: terms.into(), copy: false };
+        let opts = InvoiceOpts { terms: terms.into(), copy: false, vat_table: false };
         let sheets = invoice(&rec, Some(&logo()), &opts);
         std::fs::write(dir.join("invoice-sample.pdf"), to_pdf(&sheets, &rec.number)).unwrap();
 
@@ -1668,7 +1733,7 @@ mod tests {
         long.lines.insert(0, line("Samsung Galaxy S24 Ultra 256 GB Titanio Negro · IMEI 356789012345678", 1, 129_900, 2100));
         let t = compute(&long.lines);
         (long.total_cents, long.vat) = (t.total_cents, t.vat);
-        let sheets = invoice(&long, Some(&logo()), &InvoiceOpts { terms: terms.into(), copy: true });
+        let sheets = invoice(&long, Some(&logo()), &InvoiceOpts { terms: terms.into(), copy: true, vat_table: false });
         assert_eq!(sheets.len(), 2);
         std::fs::write(dir.join("invoice-sample-long.pdf"), to_pdf(&sheets, &long.number)).unwrap();
 
@@ -1691,7 +1756,7 @@ mod tests {
         let _ = std::fs::remove_file(&out);
         let mut rec = phone_sale();
         rec.qr = Some("https://www2.agenciatributaria.gob.es/wlpl/TIKE-CONT/ValidarQR?nif=12345678Z&numserie=TF2026-000123&fecha=10-11-2026&importe=840.00".into());
-        let sheets = invoice(&rec, Some(&logo()), &InvoiceOpts { terms: "Garantía de 3 años. Devoluciones en 15 días.".into(), copy: true });
+        let sheets = invoice(&rec, Some(&logo()), &InvoiceOpts { terms: "Garantía de 3 años. Devoluciones en 15 días.".into(), copy: true, vat_table: false });
         win::draw("Microsoft Print to PDF", "Factura prueba", &sheets, 1, Some(&out)).unwrap();
         // the same sheets written directly, to lay one over the other
         std::fs::write(out.with_extension("direct.pdf"), to_pdf(&sheets, &rec.number)).unwrap();
