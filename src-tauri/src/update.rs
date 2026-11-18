@@ -100,6 +100,10 @@ pub async fn install(app: &AppHandle) -> Result<Value, String> {
         }
     };
     log::info(format!("installing Tiquet {}", u.version));
+    // The installer is in hand and Tiquet is about to end: the requests of
+    // the shop's other PCs that are on their way are answered first, and new
+    // ones refused, which a PC retries safely.
+    let _ = tauri::async_runtime::spawn_blocking(|| crate::lan::pause(Duration::from_secs(8))).await;
     u.install(bytes).map_err(|e| {
         log::error(format!("update {} not installed: {e}", u.version));
         fail(e)

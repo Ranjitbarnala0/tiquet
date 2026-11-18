@@ -182,7 +182,7 @@ pub fn is_virtual(name: &str, port: &str, driver: &str) -> bool {
     // programs install: nothing comes out of any of them in the shop
     const NOT_PAPER: &[&str] = &[
         "portprompt:", "file:", "nul:", "xpsport", "pdf", "xps", "onenote", "fax", "anydesk", "teamviewer", "rustdesk", "splashtop",
-        "supremo", "easy print", "document writer", "image writer", "snagit", "evernote", "webex",
+        "supremo", "document writer", "image writer", "snagit", "evernote", "webex",
     ];
     NOT_PAPER.iter().any(|k| all.contains(k))
 }
@@ -452,10 +452,10 @@ fn text_only(e: &Entry) -> bool {
 // A page is 210 mm wide (A4) or 216 (Letter); labels and rolls are narrower.
 const PAGE_MM: u32 = 180;
 
-// what its Windows driver says of its paper; a driver that says nothing is
-// taken for a page printer
+// what its Windows driver says of its paper; a driver that does not answer
+// is not taken for anything
 pub fn page_wide(name: &str) -> bool {
-    win::paper(name).map_or(true, |(mm, _)| mm >= PAGE_MM)
+    win::paper(name).is_some_and(|(mm, _)| mm >= PAGE_MM)
 }
 
 // The printer bills on A4 go to when nobody chose one: Windows' default

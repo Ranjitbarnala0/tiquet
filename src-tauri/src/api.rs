@@ -1244,6 +1244,8 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
     };
     let issued_at = tickets::correction_time(&conn, &s, a.replaces)?.unwrap_or_else(tickets::now);
     let customer = a.customer.filter(|c| !c.name.trim().is_empty());
+    // as it will be kept: six lines at most
+    let note = tickets::note_of(a.note.as_deref());
     let tag = tickets::series_tag("sale", customer.is_some(), s.training);
     let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
     let shop = ShopInfo::from_settings(&s);
@@ -1260,7 +1262,7 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
         refund_of: None,
         reason: None,
         vat: a.show_vat.map(VatView::bill).unwrap_or(if customer.is_some() { VatView::Full } else { VatView::of(&s) }),
-        note: a.note.as_deref(),
+        note: note.as_deref(),
         copy: false,
         voided: false,
         customer: customer.as_ref(),
@@ -1348,7 +1350,7 @@ fn invoice_preview(st: &AppState, a: DraftIn) -> Result<Value> {
         bill: true,
         replaces: None,
         replaced_by: None,
-        note: a.note.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()),
+        note: tickets::note_of(a.note.as_deref()),
     };
     let sheets = crate::invoice::invoice(&rec, logo.as_ref(), &crate::invoice::InvoiceOpts::of(&s, false));
     Ok(json!({ "sheets": sheets, "number": number, "totals": totals }))
@@ -1541,8 +1543,10 @@ fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>
             tickets::end_print(&st.conn(), attempt, "failed", out.as_ref().err().map(|e| e.0.as_str()))?;
             return print_as(st, rec, s, logo, at_sale, false).map(|w| Some(w.filter(|w| w.starts_with("W_SAVED:")).unwrap_or_else(|| "W_A4_GONE".into())));
         }
-        // the drawer hangs on the receipt printer
-        if at_sale && !copy && drawer_opens(s, &rec.payment.method) {
+        // The drawer hangs on the receipt printer and opens whether the page
+        // came out or not, so change can be given: once, at the sale, and
+        // not again on each retry of the page.
+        if at_sale && !copy && rec.prints.is_empty() && drawer_opens(s, &rec.payment.method) {
             printer::send_detached(&st.sink, s, "cajon", &escpos::kick(s));
         }
         let (status, detail) = match &out {
@@ -1566,7 +1570,7 @@ fn print_as(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>
         }
     }
     let out = printer::send_job(&st.sink, s, &rec.number, &job);
-    if kick && elsewhere {
+    if kick && elsewhere && rec.prints.is_empty() {
         printer::send_detached(&st.sink, s, "cajon", &escpos::kick(s));
     }
     let (status, detail) = match &out {
@@ -1639,7 +1643,9 @@ fn a4_auto(st: &AppState, who: &str) -> Result<Option<Settings>> {
     if !name.is_empty() && entries.iter().any(|e| e.name == name) {
         return Ok(None);
     }
-    let Some(best) = printer::detect_a4(&entries, &printer::page_wide).filter(|b| *b != name) else {
+    // only one that is there and switched on right now: a queue left behind
+    // by a printer unplugged long ago would swallow every bill
+    let Some(best) = printer::detect_a4(&entries, &printer::page_wide).filter(|b| *b != name && printer::queue_state(b) == Some("ready")) else {
         return Ok(None);
     };
     let saved = settings::save(&st.conn(), Settings { invoice_printer: best.clone(), ..s })?;

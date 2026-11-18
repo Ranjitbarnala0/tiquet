@@ -73,15 +73,47 @@ pub struct Running {
 
 impl Running {
     pub fn stop(self) {
-        self.shared.stopping.store(true, Ordering::SeqCst);
-        for _ in &self.threads {
-            self.server.unblock();
+        let Running {
+            server,
+            threads,
+            addr,
+            shared,
+        } = self;
+        shared.stopping.store(true, Ordering::SeqCst);
+        for _ in &threads {
+            server.unblock();
         }
-        for t in self.threads {
+        for t in threads {
             let _ = t.join();
         }
-        save_tokens(&self.shared);
+        save_tokens(&shared);
+        // The server is let go of first. Its listener then gives the port
+        // back only when one more connection comes in, and the one tiny_http
+        // makes for that goes to 0.0.0.0, which Windows refuses: one to this
+        // PC itself frees the port, so sharing can start again without
+        // restarting Tiquet.
+        drop(server);
+        let mut me = addr;
+        if me.ip().is_unspecified() {
+            me.set_ip(std::net::Ipv4Addr::LOCALHOST.into());
+        }
+        let _ = std::net::TcpStream::connect_timeout(&me, Duration::from_millis(300));
+        // and it takes the listener a moment: wait, a second at most, until
+        // the port can really be taken again
+        for _ in 0..20 {
+            if std::net::TcpListener::bind(addr).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
+}
+
+// asked to wait for an update that has not happened (yet)
+static PAUSED: AtomicBool = AtomicBool::new(false);
+
+pub fn paused() -> bool {
+    PAUSED.load(Ordering::SeqCst) && lock(&RUNNING).is_none()
 }
 
 static HOST: OnceLock<Arc<dyn Host>> = OnceLock::new();
@@ -133,6 +165,7 @@ pub fn pause(wait: Duration) {
     let Some(old) = lock(&RUNNING).take() else {
         return;
     };
+    PAUSED.store(true, Ordering::SeqCst);
     let (done, ended) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         old.stop();
@@ -1099,6 +1132,19 @@ mod tests {
 
     fn run(bytes: &[u8], c: u8, n: usize) -> bool {
         bytes.windows(n).any(|w| w.iter().all(|b| *b == c))
+    }
+
+    #[test]
+    fn a_stopped_till_gives_its_port_back_at_once() {
+        // an update that was not installed, or sharing switched off and on:
+        // the same port answers again without restarting Tiquet
+        let (main, _) = till("port");
+        let first = serve(Arc::new(TestHost(main.clone())), "127.0.0.1:0").unwrap();
+        let addr = first.addr.to_string();
+        first.stop();
+        let again = serve(Arc::new(TestHost(main.clone())), &addr).unwrap();
+        assert_eq!(again.addr.to_string(), addr);
+        again.stop();
     }
 
     #[test]

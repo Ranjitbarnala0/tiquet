@@ -49,6 +49,8 @@ interface LineDraft {
   price: string;
   vatBp: number;
   productId?: number;
+  // a discount: what is typed is taken off, whatever its sign
+  discount?: boolean;
   // the exact price with VAT the line came with (the catalogue, the bill
   // being corrected, or typed with VAT before switching), used while its box
   // still shows `exactFor`: going to prices without VAT and back, or opening
@@ -76,7 +78,10 @@ const METHOD: Record<Method, () => string> = {
 // the price with VAT a line is sold at, from what was typed
 const gross = (cents: number, vatBp: number, net: boolean) => (net ? Math.round((cents * (10_000 + vatBp)) / 10_000) : cents);
 const netOf = (cents: number, vatBp: number) => Math.round((cents * 10_000) / (10_000 + vatBp));
-const unitOf = (l: LineDraft, cents: number, net: boolean) => (l.exact !== undefined && l.price === l.exactFor ? l.exact : gross(cents, l.vatBp, net));
+const unitOf = (l: LineDraft, cents: number, net: boolean) => {
+  const unit = l.exact !== undefined && l.price === l.exactFor ? l.exact : gross(cents, l.vatBp, net);
+  return l.discount ? -Math.abs(unit) : unit;
+};
 const nameOf = (l: LineDraft) => (l.imei.trim() ? `${l.name.trim()}${IMEI}${l.imei.trim()}` : l.name.trim());
 
 // the format a bill starts in: the one chosen in Ajustes, or by itself A4
@@ -91,6 +96,9 @@ function startFormat(s: Settings): Format {
 // nobody's bill any more.
 interface Draft {
   at: number;
+  // the bill's own id: sent again after a restart, a bill already saved is
+  // answered with itself instead of being issued twice
+  saleId?: string;
   full: boolean;
   customer: { name: string; nif: string; address: string };
   lines: LineDraft[];
@@ -279,7 +287,9 @@ function linesOf(t: TicketRecord, net: boolean): LineDraft[] {
     .filter((l) => l.qty > 0)
     .map((l) => {
       const at = l.name.indexOf(IMEI);
-      const price = fmt(net ? netOf(l.unitCents, l.vatBp) : l.unitCents);
+      // a line that takes off shows its amount without the sign
+      const shown = Math.abs(l.unitCents);
+      const price = fmt(net ? netOf(shown, l.vatBp) : shown);
       return {
         key: ++keys,
         name: at < 0 ? l.name : l.name.slice(0, at),
@@ -288,7 +298,8 @@ function linesOf(t: TicketRecord, net: boolean): LineDraft[] {
         price,
         vatBp: l.vatBp,
         productId: l.productId ?? undefined,
-        exact: l.unitCents,
+        discount: l.unitCents < 0 || undefined,
+        exact: shown,
         exactFor: price,
       };
     });
@@ -307,6 +318,8 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
     return { shown, net: shown && !!settings.invoiceNetPrices };
   });
   const [showVat, setShowVat] = useState(start.shown);
+  // once someone has ticked or unticked the box, it is theirs
+  const vatChosen = useRef(!!draft || !!from);
   const [net, setNet] = useState(start.net);
   const [note, setNote] = useState(draft?.note ?? from?.note ?? '');
   const [full, setFull] = useState(draft ? !!draft.full : !!from?.customer);
@@ -328,7 +341,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   const [print, setPrint] = useState(true);
   const [busy, setBusy] = useState(false);
   // one id per bill, so a retry after a lost answer never issues it twice
-  const saleId = useRef(newId());
+  const saleId = useRef(draft?.saleId ?? newId());
   const [sheets, setSheets] = useState<Sheet[]>([]);
   const [ticket, setTicket] = useState<PLine[]>([]);
   const [number, setNumber] = useState('');
@@ -378,7 +391,9 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
       cur.map((l) => {
         const c = parseMoney(l.price);
         if (c === null || !l.price.trim()) return l;
-        const exact = unitOf(l, c, net);
+        // (a discount keeps showing its amount without the sign)
+        const unit = unitOf(l, c, net);
+        const exact = l.discount ? Math.abs(unit) : unit;
         const price = fmt(on ? netOf(exact, l.vatBp) : exact);
         return { ...l, price, exact, exactFor: price };
       }),
@@ -388,6 +403,13 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   const toggleVat = (on: boolean) => {
     if (!on && net) switchNet(false);
     setShowVat(on);
+  };
+  // An invoice made out to someone (a business, a self-employed customer)
+  // starts with its VAT shown, which they need; a bill with no details
+  // starts as Ajustes says. Only until the box is touched.
+  const setKind = (withCustomer: boolean) => {
+    setFull(withCustomer);
+    if (!vatChosen.current) toggleVat(withCustomer || !!settings.invoiceShowVat);
   };
 
   // a line can be a discount (a negative price), never zero
@@ -412,7 +434,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   useEffect(() => {
     if (!draftKey || from) return;
     try {
-      if (typed) localStorage.setItem(draftKey, JSON.stringify({ at: Date.now(), full, customer, lines, method, showVat, net, note } satisfies Draft));
+      if (typed) localStorage.setItem(draftKey, JSON.stringify({ at: Date.now(), saleId: saleId.current, full, customer, lines, method, showVat, net, note } satisfies Draft));
       else localStorage.removeItem(draftKey);
     } catch {
       // a full disk loses only the draft
@@ -502,13 +524,27 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
           showVat,
           note: note.trim() || undefined,
         });
-      // changed after an answer that never came back: it is another bill
+      // changed after an answer that never came back: it is another bill,
+      // and the one saved before is named so it can be voided if it is one
+      // too many
       const r = await send().catch((e) => {
-        if (toError(e).code !== 'E_SALE_REUSED') throw e;
+        const err = toError(e);
+        if (err.code !== 'E_SALE_REUSED') throw e;
         saleId.current = newId();
+        toast.info(
+          tr(
+            `Antes se guardó ${err.detail || 'otra factura'} desde esta misma pantalla y su aviso no llegó. Mírala en Emitidas: si sobra, anúlala.`,
+            `${err.detail || 'Another invoice'} was saved from this same screen earlier and its answer never arrived. Check it under Issued: void it if it is one too many.`,
+          ),
+          { sticky: true },
+        );
         return send();
       });
-      const what = from ? tr(`Guardada como ${r.ticket.number}. ${from.number} queda anotada en Tiquet como corregida.`, `Saved as ${r.ticket.number}. ${from.number} is noted in Tiquet as corrected.`) : `${tr('Factura', 'Invoice')} ${r.ticket.number}`;
+      const what = from
+        ? tr(`Guardada como ${r.ticket.number}. ${from.number} queda anotada en Tiquet como corregida.`, `Saved as ${r.ticket.number}. ${from.number} is noted in Tiquet as corrected.`)
+        : r.duplicate
+          ? tr(`Esta factura ya estaba guardada: ${r.ticket.number}`, `This invoice had already been saved: ${r.ticket.number}`)
+          : `${tr('Factura', 'Invoice')} ${r.ticket.number}`;
       if (r.printError) {
         const e = toError(r.printError);
         const fix = isPrinterSetup(e) || e.code === 'E_NO_A4_PRINTER';
@@ -549,7 +585,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
         <section className="bill-card">
           <h3>{tr('¿Con datos del cliente?', "With the customer's details?")}</h3>
           <div className="bill-types">
-            <button type="button" className={!full ? 'on' : ''} onClick={() => setFull(false)}>
+            <button type="button" className={!full ? 'on' : ''} onClick={() => setKind(false)}>
               <ReceiptText size={20} />
               <span>
                 <b>{tr('Sin datos', 'No details')}</b>
@@ -557,7 +593,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
               </span>
               {!full && <Check size={18} className="bill-tick" />}
             </button>
-            <button type="button" className={full ? 'on' : ''} onClick={() => setFull(true)}>
+            <button type="button" className={full ? 'on' : ''} onClick={() => setKind(true)}>
               <Building2 size={20} />
               <span>
                 <b>{tr('Con nombre y NIF', 'With name and NIF')}</b>
@@ -628,7 +664,15 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
               className="bill-check"
               title={tr('Marcada, la factura lleva la base, el tipo y la cuota de IVA. Sin marcar, solo artículos, precios y total.', 'Ticked, the invoice carries the net amount, the rate and the VAT. Unticked, only items, prices and the total.')}
             >
-              <input data-id="bill-vat" type="checkbox" checked={showVat} onChange={(e) => toggleVat(e.target.checked)} />
+              <input
+                data-id="bill-vat"
+                type="checkbox"
+                checked={showVat}
+                onChange={(e) => {
+                  vatChosen.current = true;
+                  toggleVat(e.target.checked);
+                }}
+              />
               {tr('Mostrar el IVA en la factura', 'Show VAT on the invoice')}
             </label>
           </div>
@@ -692,7 +736,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
                       ))}
                     </select>
                   )}
-                  <b className="num bl-amount">{amount === null ? '' : fmt(amount)}</b>
+                  <b className="num bl-amount">{amount === null ? (l.discount ? '−' : '') : fmt(amount)}</b>
                   {only ? (
                     <span className="bl-del" />
                   ) : (
@@ -709,7 +753,12 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
               <Plus size={16} />
               {tr('Añadir artículo', 'Add item')}
             </button>
-            <button type="button" className="btn btn-ghost" onClick={() => add({ name: tr('Descuento', 'Discount'), price: '-' }, 'price')} title={tr('Una línea que resta: escribe cuánto', 'A line that takes off: type how much')}>
+            <button
+              type="button"
+              className="btn btn-ghost"
+              onClick={() => add({ name: tr('Descuento', 'Discount'), discount: true, vatBp: lines[lines.length - 1]?.vatBp ?? vat }, 'price')}
+              title={tr('Una línea que resta: escribe cuánto', 'A line that takes off: type how much')}
+            >
               <Tag size={15} />
               {tr('Descuento', 'Discount')}
             </button>

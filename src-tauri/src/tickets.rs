@@ -773,7 +773,7 @@ pub struct Checked {
 
 // free text keeps its line breaks, not its runs of blank space: at most 6
 // lines and 400 letters
-fn note_of(s: Option<&str>) -> Option<String> {
+pub fn note_of(s: Option<&str>) -> Option<String> {
     let lines: Vec<String> = s.unwrap_or_default().lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).filter(|l| !l.is_empty()).take(6).collect();
     let text: String = lines.join("\n").chars().take(400).collect();
     Some(text.trim().to_string()).filter(|t| !t.is_empty())
@@ -872,12 +872,15 @@ pub fn sell(
         drop(tx);
         let was = load(conn, done)?;
         // The same cart sent twice (a retry after a lost answer) gets its
-        // ticket back. Another cart under that id is another sale, whose
-        // screen kept the id of one it never heard was saved: it is told so,
-        // takes a new id and is charged, instead of vanishing as "already
-        // charged".
-        if was.total_cents != c.totals.total_cents || was.lines.len() != c.lines.len() {
-            return fail("E_SALE_REUSED");
+        // ticket back. Another cart under that id, or the same one after its
+        // ticket was deleted, is another sale whose screen kept the id of
+        // one it never heard was saved: it is told which, takes a new id and
+        // is charged, instead of vanishing as "already charged".
+        let same = was.voided_at.is_none()
+            && was.lines.len() == c.lines.len()
+            && was.lines.iter().zip(&c.lines).all(|(a, b)| a.name == b.name && a.qty == b.qty && a.unit_cents == b.unit_cents && a.vat_bp == b.vat_bp);
+        if !same {
+            return fail(format!("E_SALE_REUSED:{}", was.number));
         }
         return Ok((was, true));
     }
@@ -1032,7 +1035,9 @@ pub fn refund(conn: &mut Connection, user: &SessionUser, s: &Settings, a: &Refun
         bill: plan.original.bill,
         replaces: None,
         at: None,
-        vat: plan.original.shop.vat,
+        // as the sale it returns shows it, also one from before 1.13 (the
+        // preview says the same)
+        vat: Some(plan.original.shop.vat_view(plan.original.customer.is_some(), s.show_vat)),
         note: None,
     };
     let id = insert(&tx, user, s, &t)?;
@@ -1523,7 +1528,12 @@ mod tests {
         assert!(!dup);
         let (again, dup) = sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &first).unwrap();
         assert!(dup && again.id == a.id);
-        assert_eq!(sell(&mut conn, &user, &s, vec![line("Funda", 1, 2500)], &cash(None), &first).unwrap_err().0, "E_SALE_REUSED");
+        assert_eq!(sell(&mut conn, &user, &s, vec![line("Funda", 1, 2500)], &cash(None), &first).unwrap_err().0, format!("E_SALE_REUSED:{}", a.number));
+        // another item at the same price is another sale too
+        assert!(sell(&mut conn, &user, &s, vec![line("Funda", 1, 690)], &cash(None), &first).unwrap_err().0.starts_with("E_SALE_REUSED"));
+        // and so is the same cart once its ticket was deleted
+        void(&mut conn, a.id, &user.name, "error").unwrap();
+        assert!(sell(&mut conn, &user, &s, vec![line("Cable", 1, 690)], &cash(None), &first).unwrap_err().0.starts_with("E_SALE_REUSED"));
 
         // a return never leaves the discount behind: with it, or not at all
         let cart = vec![line("Funda", 1, 2000), line("Descuento 10%", 1, -200)];

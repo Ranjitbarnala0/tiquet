@@ -47,16 +47,17 @@ export function useEntrySave(onChanged: () => void) {
   const busy = useRef(false);
   // one id for each thing saved, sent again when its answer never came back:
   // the core then returns what it already has instead of saving it twice
-  const pending = useRef({ key: '', id: '' });
+  const pending = useRef({ key: '', id: '', at: 0 });
   return useCallback(
     async (entry: EntryDraft): Promise<boolean> => {
       const key = JSON.stringify(entry);
       if (busy.current || (last.current.key === key && Date.now() - last.current.at < 1500)) return false;
       busy.current = true;
       try {
-        if (pending.current.key !== key) pending.current = { key, id: newId() };
+        // for two minutes: the same recharge an hour later is another one
+        if (pending.current.key !== key || Date.now() - pending.current.at > 120_000) pending.current = { key, id: newId(), at: Date.now() };
         const r = await call<{ entry: { id: number; concept: string; cents: number }; printError: string | null }>('book.add', { ...entry, clientId: pending.current.id });
-        pending.current = { key: '', id: '' };
+        pending.current = { key: '', id: '', at: 0 };
         last.current = { key, at: Date.now() };
         const id = r.entry.id;
         if (r.printError) toast.error(`${tr('Guardado, pero el justificante no se imprimió', 'Saved, but the receipt did not print')}: ${errorText(toError(r.printError))}`);

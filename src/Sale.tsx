@@ -262,10 +262,6 @@ function QtyInput({ qty, onChange, onExit, onElse, disabled }: { qty: number; on
           onElse(t);
         } else {
           setV(t);
-          // on the ticket as it is typed: a charge pressed right after,
-          // without leaving this box, is for what it says
-          const n = Number(t);
-          if (n >= 1 && n !== qty) onChange(n);
         }
       }}
       onBlur={() => {
@@ -826,6 +822,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     const cleared = lines;
     commit([]);
     setSel(null);
+    // an emptied ticket is another sale: it never passes for a retry of the
+    // one before
+    saleId.current = newSaleId();
     // brings back exactly what was cleared, ahead of anything added since
     const back = () => setLines((cur) => [...cleared, ...cur.filter((l) => !cleared.some((c) => c.key === l.key))]);
     toast.info(tr('Ticket vaciado', 'Ticket cleared'), { action: { label: tr('Deshacer', 'Undo'), run: back } });
@@ -862,9 +861,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
 
   const ready = () => {
     if (!lines.length || busy) return false;
-    // A price still being typed in a line is not on the ticket yet (it goes
-    // in when its box is left). It goes in now, and the next press charges
-    // the ticket as it then shows: never the old amount.
+    // A quantity or a price still being typed in a line is not on the
+    // ticket yet (it goes in when its box is left). It goes in now, and the
+    // next press charges the ticket as it then shows: never the old amount.
     const typing = document.activeElement;
     if (typing instanceof HTMLInputElement && typing.dataset.pending && typing.closest('.till-lines')) {
       typing.blur();
@@ -1003,6 +1002,13 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       const r = await send().catch((e) => {
         if (!(e instanceof ApiError && e.code === 'E_SALE_REUSED')) throw e;
         saleId.current = newSaleId();
+        toast.info(
+          tr(
+            `Antes se guardó ${e.detail || 'otra venta'} desde este mismo ticket y su aviso no llegó. Mírala en Hoy: si sobra, bórrala.`,
+            `${e.detail || 'Another sale'} was saved from this same ticket earlier and its answer never arrived. Check it in Today: delete it if it is one too many.`,
+          ),
+          { sticky: true },
+        );
         return send();
       });
       history.current = [];
