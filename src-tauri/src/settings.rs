@@ -60,12 +60,18 @@ impl Machine {
 #[serde(default, rename_all = "camelCase")]
 pub struct Settings {
     pub shop_name: String,
+    // optional subtitle / activity line shown under the shop name
+    pub shop_tagline: String,
     // the owner's full name or company name, when the shop trades under another
     pub legal_name: String,
     pub shop_address: String,
     pub shop_phone: String,
     pub shop_email: String,
+    pub shop_website: String,
     pub shop_nif: String,
+    // how billing company details behave on bills/invoices:
+    // "separate" (use bill* fields on bills), "both" (show bill* + storefront shop), "shop" (always use shop*)
+    pub bill_identity_mode: String,
     // separate company details used only on bills/invoices when configured
     pub bill_company_name: String,
     pub bill_legal_name: String,
@@ -73,6 +79,7 @@ pub struct Settings {
     pub bill_address: String,
     pub bill_phone: String,
     pub bill_email: String,
+    pub bill_website: String,
     pub footer: String,
     pub ticket_prefix: String,
     pub default_vat_bp: i64,
@@ -87,6 +94,14 @@ pub struct Settings {
     pub ticket_address: bool,
     pub ticket_phone: bool,
     pub ticket_cashier: bool,
+    pub ticket_legal_name: bool,
+    pub ticket_tagline: bool,
+    pub ticket_email: bool,
+    pub ticket_website: bool,
+    // put legal company + NIF at the bottom of the header block instead of right below shop name
+    pub ticket_legal_bottom: bool,
+    // optional custom notice printed at the end of the header block
+    pub ticket_header_note: String,
     pub printer_name: String,
     // "windows": raw ESC/POS to the queue above; "document": the same queue
     // printing a page through its own driver (an office printer, a PDF);
@@ -193,6 +208,8 @@ pub struct Settings {
     pub repair_required: String,
     // print the device passcode on the customer's repair receipt too (always on the workshop tag)
     pub repair_passcode_on_receipt: bool,
+    // show legal name & NIF on repair receipts even when hidden on counter tickets
+    pub repair_show_legal: bool,
     // show each card machine separately on the main Venta dashboard
     pub split_card_machines: bool,
     // "modern" (smooth thermal graphics) or "classic" (raw printer text)
@@ -232,17 +249,21 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             shop_name: String::new(),
+            shop_tagline: String::new(),
             legal_name: String::new(),
             shop_address: String::new(),
             shop_phone: String::new(),
             shop_email: String::new(),
+            shop_website: String::new(),
             shop_nif: String::new(),
+            bill_identity_mode: "separate".into(),
             bill_company_name: String::new(),
             bill_legal_name: String::new(),
             bill_nif: String::new(),
             bill_address: String::new(),
             bill_phone: String::new(),
             bill_email: String::new(),
+            bill_website: String::new(),
             footer: "¡Gracias por su visita!".into(),
             ticket_prefix: "T".into(),
             default_vat_bp: 2100,
@@ -252,6 +273,12 @@ impl Default for Settings {
             ticket_address: true,
             ticket_phone: true,
             ticket_cashier: true,
+            ticket_legal_name: true,
+            ticket_tagline: true,
+            ticket_email: true,
+            ticket_website: true,
+            ticket_legal_bottom: false,
+            ticket_header_note: String::new(),
             printer_name: String::new(),
             printer_kind: "windows".into(),
             printer_host: String::new(),
@@ -308,6 +335,7 @@ impl Default for Settings {
             invoice_net_prices: false,
             repair_required: String::new(),
             repair_passcode_on_receipt: false,
+            repair_show_legal: true,
             split_card_machines: true,
             ticket_style: "modern".into(),
             one_off: None,
@@ -391,13 +419,20 @@ impl Settings {
         }
         self.cert = self.cert.chars().filter(char::is_ascii_hexdigit).take(40).collect::<String>().to_uppercase();
         self.repair_terms = self.repair_terms.trim().chars().take(600).collect();
+        self.shop_tagline = self.shop_tagline.trim().chars().take(120).collect();
         self.shop_email = self.shop_email.trim().chars().take(120).collect();
+        self.shop_website = self.shop_website.trim().chars().take(120).collect();
+        if !["separate", "both", "shop"].contains(&self.bill_identity_mode.as_str()) {
+            self.bill_identity_mode = "separate".into();
+        }
         self.bill_company_name = self.bill_company_name.trim().chars().take(80).collect();
         self.bill_legal_name = self.bill_legal_name.trim().chars().take(80).collect();
         self.bill_nif = self.bill_nif.trim().chars().take(20).collect();
         self.bill_address = self.bill_address.trim().chars().take(300).collect();
         self.bill_phone = self.bill_phone.trim().chars().take(40).collect();
         self.bill_email = self.bill_email.trim().chars().take(120).collect();
+        self.bill_website = self.bill_website.trim().chars().take(120).collect();
+        self.ticket_header_note = self.ticket_header_note.trim().chars().take(200).collect();
         if !["modern", "classic"].contains(&self.ticket_style.as_str()) {
             self.ticket_style = "modern".into();
         }

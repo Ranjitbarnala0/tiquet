@@ -468,6 +468,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   // customer / invoice details (all optional unless legally required or NIF filled)
   const [invoice, setInvoice] = useState(false);
   const [billA4, setBillA4] = useState(false);
+  const [wantBill, setWantBill] = useState(false);
   const [customer, setCustomer] = useState<Customer>({ name: '', nif: '', address: '', phone: '', email: '' });
   const [known, setKnown] = useState<KnownCustomer[]>([]);
   const [suggest, setSuggest] = useState(false);
@@ -640,11 +641,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const nifBad = nifTrim.length > 0 && !customerNif(nifTrim);
   const floatCents = parseMoney(float || '0', 999_999_999);
   const sendCustomer = hasCustomer && !nifBad && (!nifTrim || customer.name.trim().length > 0);
+  const isBillSale = billA4 || wantBill || nifTrim.length > 0;
   const previewArgs = JSON.stringify({
     lines: payload,
     payment: paying ? { method, tenderedCents: tendered ?? undefined } : undefined,
     customer: (paying && invoice) || hasCustomer ? (sendCustomer ? customer : undefined) : undefined,
-    bill: (paying && invoice) || hasCustomer || billA4 || undefined,
+    bill: isBillSale || undefined,
     replaces: fixing?.id,
   });
 
@@ -1079,7 +1081,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         clockOk,
         expectedCents: total,
         customer: attachCust ? customer : undefined,
-        bill: c.invoice || hasCustomer || billA4 || undefined,
+        bill: isBillSale || overLimit || undefined,
         format: billA4 ? 'a4' : undefined,
         replaces: fixing?.id,
       });
@@ -1114,6 +1116,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       setGiven('');
       setInvoice(false);
       setBillA4(false);
+      setWantBill(false);
       setCustomer({ name: '', nif: '', address: '', phone: '', email: '' });
       setLast({ ticket: r.ticket, printed: r.printed });
       if (fixing) toast.ok(`${fixing.number} ${tr('corregida', 'corrected')}: ${r.ticket.number}`);
@@ -1665,6 +1668,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                   onClick={() => {
                     setCustomer({ name: '', nif: '', address: '', phone: '', email: '' });
                     setBillA4(false);
+                    setWantBill(false);
                     setInvoice(false);
                   }}
                   title={tr('Quitar datos del cliente', 'Clear customer details')}
@@ -1838,6 +1842,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                         onClick={() => {
                           setInvoice(false);
                           setBillA4(false);
+                          setWantBill(false);
                           setCustomer({ name: '', nif: '', address: '', phone: '', email: '' });
                         }}
                       >
@@ -1888,7 +1893,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                               >
                                 <UserRound size={15} />
                                 <span>
-                                  <b>{k.name}</b>
+                                  <b>{k.name || k.phone || k.nif}</b>
                                   <small>
                                     {[k.nif, k.phone].filter(Boolean).join(' · ') || tr('sin NIF', 'no NIF')} · {tr('última', 'last')} {dateTime(k.last)}
                                   </small>
@@ -1914,6 +1919,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                   <Field label={tr('Dirección (opcional)', 'Address (optional)')}>
                     <input value={customer.address} onChange={(e) => setCustomer({ ...customer, address: e.target.value })} maxLength={200} />
                   </Field>
+                  {!overLimit && !nifTrim && !billA4 && !!(settings.billCompanyName?.trim() || settings.billLegalName?.trim() || settings.billNif?.trim()) && (
+                    <label className="bill-check">
+                      <input type="checkbox" checked={wantBill} onChange={(e) => setWantBill(e.target.checked)} />
+                      {tr('Emitir como factura (con datos de empresa de facturación)', 'Issue as invoice (use billing company details)')}
+                    </label>
+                  )}
                   {settings.invoicePrinter && (
                     <label className="bill-check">
                       <input type="checkbox" checked={billA4} onChange={(e) => setBillA4(e.target.checked)} />

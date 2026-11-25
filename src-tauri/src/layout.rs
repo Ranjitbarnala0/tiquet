@@ -433,9 +433,15 @@ fn header(d: &mut Doc, shop: &ShopInfo, invoice: bool) {
         let size = if len(name) <= d.cols / 2 { Size::Big } else { Size::Tall };
         d.center(name, true, size);
     }
-    // the trade name is not enough on an invoice: the owner's name goes too
+    let tag = shop.tagline.trim();
+    if !tag.is_empty() && (invoice || shop.show_tagline.unwrap_or(true)) {
+        d.center(tag, false, Size::Normal);
+    }
     let legal = shop.legal_name.trim();
-    if !legal.is_empty() && !legal.eq_ignore_ascii_case(name) {
+    let show_legal = !legal.is_empty() && !legal.eq_ignore_ascii_case(name) && (invoice || shop.show_legal.unwrap_or(true));
+    let legal_bottom = shop.legal_bottom.unwrap_or(false);
+    // by default, legal company sits directly under trade name; bottom mode places it after contact info
+    if show_legal && !legal_bottom {
         d.center(legal, false, Size::Normal);
     }
     if invoice || shop.show_address.unwrap_or(true) {
@@ -446,11 +452,24 @@ fn header(d: &mut Doc, shop: &ShopInfo, invoice: bool) {
     if shop.show_phone.unwrap_or(true) && !shop.phone.trim().is_empty() {
         d.center(&format!("Tel. {}", shop.phone.trim()), false, Size::Normal);
     }
-    if !shop.email.trim().is_empty() {
+    if (invoice || shop.show_email.unwrap_or(true)) && !shop.email.trim().is_empty() {
         d.center(&format!("Email: {}", shop.email.trim()), false, Size::Normal);
     }
-    if (invoice || shop.show_nif.unwrap_or(true)) && !shop.nif.trim().is_empty() {
+    if (invoice || shop.show_website.unwrap_or(true)) && !shop.website.trim().is_empty() {
+        d.center(shop.website.trim(), false, Size::Normal);
+    }
+    if show_legal && legal_bottom {
+        let line = if (invoice || shop.show_nif.unwrap_or(true)) && !shop.nif.trim().is_empty() {
+            format!("{legal} · NIF: {}", shop.nif.trim())
+        } else {
+            legal.to_string()
+        };
+        d.center(&line, false, Size::Normal);
+    } else if (invoice || shop.show_nif.unwrap_or(true)) && !shop.nif.trim().is_empty() {
         d.center(&format!("NIF: {}", shop.nif.trim()), false, Size::Normal);
+    }
+    for l in shop.header_note.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        d.center(l, false, Size::Normal);
     }
 }
 
@@ -743,7 +762,7 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
     if logo {
         d.logo();
     }
-    header(&mut d, &r.shop, false);
+    header(&mut d, &r.shop, s.repair_show_legal);
     d.blank();
     d.center("RESGUARDO DE REPARACIÓN", true, Size::Normal);
     d.pair(&format!("Nº {}", r.number), &datetime(&r.created_at), false, Size::Normal);
@@ -826,7 +845,7 @@ pub fn repair_delivery(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
     if logo {
         d.logo();
     }
-    header(&mut d, &r.shop, false);
+    header(&mut d, &r.shop, s.repair_show_legal);
     d.blank();
     d.center("JUSTIFICANTE DE ENTREGA", true, Size::Normal);
     let at = r.closed_at.clone().filter(|_| r.status == "delivered").unwrap_or_else(now);

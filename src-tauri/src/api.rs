@@ -2937,5 +2937,32 @@ mod tests {
         let got_r2 = dispatch(&st, "repairs.get", json!({ "id": rid })).unwrap();
         let show_txt: String = got_r2["resguardo"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect::<Vec<_>>().join("\n");
         assert!(show_txt.contains("9876"));
+
+        // Bill identity "both" shows billing company AND shop name + tagline + header note + legalBottom
+        dispatch(
+            &st,
+            "settings.save",
+            json!({
+                "shopTagline": "Telefonía e informática",
+                "ticketHeaderNote": "Horario L-S 10 a 20h",
+                "ticketLegalBottom": true,
+                "billIdentityMode": "both"
+            }),
+        )
+        .unwrap();
+        let both_prev = dispatch(
+            &st,
+            "sale.preview",
+            json!({
+                "lines": [{ "name": "Funda", "qty": 1, "unitCents": 1200, "vatBp": 2100 }],
+                "bill": true
+            }),
+        )
+        .unwrap();
+        let both_txt: String = both_prev["lines"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect::<Vec<_>>().join("\n");
+        assert!(both_txt.contains("Facturacion Central"));
+        assert!(both_txt.contains("Tienda Frontal"));
+        assert!(both_txt.contains("Telefonía e informática"));
+        assert!(both_txt.contains("Horario L-S 10 a 20h"));
     }
 }

@@ -48,17 +48,21 @@ export interface Machine {
 
 export interface Settings {
   shopName: string;
+  shopTagline?: string;
   legalName: string;
   shopAddress: string;
   shopPhone: string;
   shopEmail?: string;
+  shopWebsite?: string;
   shopNif: string;
+  billIdentityMode?: 'separate' | 'both' | 'shop';
   billCompanyName?: string;
   billLegalName?: string;
   billNif?: string;
   billAddress?: string;
   billPhone?: string;
   billEmail?: string;
+  billWebsite?: string;
   footer: string;
   ticketPrefix: string;
   defaultVatBp: number;
@@ -69,6 +73,12 @@ export interface Settings {
   ticketAddress: boolean;
   ticketPhone: boolean;
   ticketCashier: boolean;
+  ticketLegalName?: boolean;
+  ticketTagline?: boolean;
+  ticketEmail?: boolean;
+  ticketWebsite?: boolean;
+  ticketLegalBottom?: boolean;
+  ticketHeaderNote?: string;
   printerName: string;
   printerKind: PrinterKind;
   printerHost: string;
@@ -134,6 +144,7 @@ export interface Settings {
   // what a repair cannot be taken in without: name, phone, dni, device, fault
   repairRequired: string;
   repairPasscodeOnReceipt?: boolean;
+  repairShowLegal?: boolean;
   splitCardMachines?: boolean;
   ticketStyle?: 'modern' | 'classic';
 }

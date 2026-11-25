@@ -770,7 +770,7 @@ pub fn check_settings(conn: &Connection, s: &Settings) -> Result<()> {
     if issuer_name(&s.legal_name, &s.shop_name).is_empty() {
         return fail("E_INVALID:legalName");
     }
-    if !s.bill_nif.trim().is_empty() && nif::normalize(&s.bill_nif) != nif::normalize(&s.shop_nif) {
+    if s.bill_identity_mode != "shop" && !s.bill_nif.trim().is_empty() && nif::normalize(&s.bill_nif) != nif::normalize(&s.shop_nif) {
         return fail("E_BILL_NIF_VERIFACTU");
     }
     Ok(())

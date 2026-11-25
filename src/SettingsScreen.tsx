@@ -107,6 +107,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
 
   // on the Reparaciones tab, the receipt a customer gets for a repair
   const [resguardo, setResguardo] = useState<PLine[] | null>(null);
+  const [shopPreview, setShopPreview] = useState<'ticket' | 'a4'>('ticket');
   useEffect(() => {
     if (tab !== 'repairs') return;
     const t = setTimeout(() => {
@@ -117,17 +118,17 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
     return () => clearTimeout(t);
   }, [tab, d, logo]);
 
-  // on the Facturas tab the sample is an A4 bill, with these settings
+  // on the Facturas tab (or Comercio when viewing A4) the sample is an A4 bill
   const [sheets, setSheets] = useState<Sheet[]>([]);
   useEffect(() => {
-    if (tab !== 'bills') return;
+    if (tab !== 'bills' && !(tab === 'shop' && shopPreview === 'a4')) return;
     const t = setTimeout(() => {
       call<{ sheets: Sheet[] }>('invoices.preview', { sample: true, settings: d, payment: { method: 'card' } })
         .then((p) => setSheets(p.sheets))
         .catch(() => {});
     }, 150);
     return () => clearTimeout(t);
-  }, [tab, d, logo]);
+  }, [tab, shopPreview, d, logo]);
 
   // looks for the receipt printer among those installed; the choice still
   // has to be saved
@@ -476,24 +477,32 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
 
           {tab === 'shop' && (
             <div className="stack">
-              <Field label={tr('Nombre del comercio', 'Shop name')} hint={tr('En grande, arriba del ticket', 'Large, at the top of the ticket')}>
-                <input value={d.shopName} onChange={(e) => set('shopName', e.target.value)} maxLength={60} />
-              </Field>
+              <div className="grid2">
+                <Field label={tr('Nombre del comercio (tienda)', 'Shop name')} hint={tr('En grande, arriba de los tickets y resguardos', 'Large, at the top of tickets and repair receipts')}>
+                  <input value={d.shopName} onChange={(e) => set('shopName', e.target.value)} maxLength={60} />
+                </Field>
+                <Field label={tr('Subtítulo / lema (opcional)', 'Tagline / subtitle (optional)')} hint={tr('Ej. telefonía, accesorios, informática…', 'e.g. phones, accessories, repairs…')}>
+                  <input value={d.shopTagline ?? ''} onChange={(e) => set('shopTagline', e.target.value)} maxLength={120} />
+                </Field>
+              </div>
               <Field
-                label={tr('Titular o razón social', 'Owner or company name')}
-                hint={tr('Debajo del nombre, si el comercio usa un nombre comercial', 'Under the name, when the shop trades under another name')}
+                label={tr('Titular o razón social en tickets y reparaciones', 'Owner or company name on tickets and repairs')}
+                hint={tr('Debajo del nombre comercial (o al pie de la cabecera, configurable en Ticket)', 'Shown under the trade name (or at the bottom of the header, set in Ticket)')}
               >
                 <input value={d.legalName} onChange={(e) => set('legalName', e.target.value)} maxLength={80} />
               </Field>
-              <Field label={tr('Dirección', 'Address')} hint={tr('Cada renglón es una línea del ticket', 'Each line here is one ticket line')}>
+              <Field label={tr('Dirección del local', 'Shop address')} hint={tr('Cada renglón es una línea del ticket', 'Each line here is one ticket line')}>
                 <textarea rows={3} value={d.shopAddress} onChange={(e) => set('shopAddress', e.target.value)} />
               </Field>
-              <div className="grid2">
+              <div className="grid3">
                 <Field label={tr('Teléfono', 'Phone')}>
                   <input value={d.shopPhone} onChange={(e) => set('shopPhone', e.target.value)} />
                 </Field>
                 <Field label={tr('Correo electrónico (opcional)', 'Email (optional)')}>
                   <input value={d.shopEmail ?? ''} onChange={(e) => set('shopEmail', e.target.value)} maxLength={120} />
+                </Field>
+                <Field label={tr('Web / red social (opcional)', 'Website / social (optional)')}>
+                  <input value={d.shopWebsite ?? ''} onChange={(e) => set('shopWebsite', e.target.value)} maxLength={120} />
                 </Field>
               </div>
               <Field
@@ -504,38 +513,58 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 <input value={d.shopNif} onChange={(e) => set('shopNif', e.target.value.toUpperCase())} />
               </Field>
               <section className="form-section">
-                <h2>{tr('Datos distintos solo para facturas (opcional)', 'Different company only for bills (optional)')}</h2>
+                <h2>{tr('Empresa fiscal para facturas (cuando es distinta de la tienda)', 'Billing company for invoices (when different from the shop)')}</h2>
                 <p className="muted small">
                   {tr(
-                    'Útil si tu tienda tiene un nombre comercial y las facturas legales van a nombre de otra empresa o sociedad. Si se deja vacío, las facturas usan los mismos datos de arriba.',
-                    'Useful when the storefront uses one name and legal invoices are issued by another company. Left blank, invoices use the shop details above.',
+                    'Si tu tienda usa un nombre comercial en mostrador y las facturas legales van con otra sociedad o datos del sello, configúralos aquí. Puedes elegir si la factura muestra solo la sociedad o ambos nombres.',
+                    'If your storefront uses one trade name and legal invoices are issued under another company or stamp, configure them here. Choose whether invoices show only the company or both.',
                   )}
                 </p>
-                <div className="grid2">
-                  <Field label={tr('Nombre en facturas', 'Company name on bills')}>
-                    <input value={d.billCompanyName ?? ''} onChange={(e) => set('billCompanyName', e.target.value)} maxLength={60} />
-                  </Field>
-                  <Field label={tr('Razón social en facturas', 'Legal name on bills')}>
-                    <input value={d.billLegalName ?? ''} onChange={(e) => set('billLegalName', e.target.value)} maxLength={80} />
-                  </Field>
-                </div>
-                <div className="grid3">
-                  <Field
-                    label={tr('NIF / CIF de facturación', 'Billing NIF / CIF')}
-                    error={(d.billNif ?? '').trim() && !spanishNif(d.billNif ?? '') ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}
-                  >
-                    <input value={d.billNif ?? ''} onChange={(e) => set('billNif', e.target.value.toUpperCase())} maxLength={20} />
-                  </Field>
-                  <Field label={tr('Teléfono en facturas', 'Billing phone')}>
-                    <input value={d.billPhone ?? ''} onChange={(e) => set('billPhone', e.target.value)} maxLength={40} />
-                  </Field>
-                  <Field label={tr('Email en facturas', 'Billing email')}>
-                    <input value={d.billEmail ?? ''} onChange={(e) => set('billEmail', e.target.value)} maxLength={120} />
-                  </Field>
-                </div>
-                <Field label={tr('Dirección en facturas', 'Billing address')}>
-                  <textarea rows={2} value={d.billAddress ?? ''} onChange={(e) => set('billAddress', e.target.value)} maxLength={240} />
+                <Field label={tr('Qué empresa aparece en facturas y A4', 'Identity shown on bills and A4')}>
+                  <Segmented
+                    value={d.billIdentityMode ?? 'separate'}
+                    onChange={(v) => set('billIdentityMode', v)}
+                    options={[
+                      { value: 'separate', label: tr('Empresa de facturación', 'Billing company') },
+                      { value: 'both', label: tr('Empresa + nombre tienda', 'Company + shop name') },
+                      { value: 'shop', label: tr('Siempre datos de tienda', 'Always shop details') },
+                    ]}
+                  />
                 </Field>
+                {d.billIdentityMode !== 'shop' && (
+                  <>
+                    <div className="grid2">
+                      <Field label={tr('Nombre principal en facturas', 'Main company name on bills')}>
+                        <input value={d.billCompanyName ?? ''} onChange={(e) => set('billCompanyName', e.target.value)} maxLength={80} />
+                      </Field>
+                      <Field label={tr('Razón social / subtítulo en facturas', 'Legal subtitle on bills')}>
+                        <input value={d.billLegalName ?? ''} onChange={(e) => set('billLegalName', e.target.value)} maxLength={80} />
+                      </Field>
+                    </div>
+                    <div className="grid2">
+                      <Field
+                        label={tr('NIF / CIF de facturación', 'Billing NIF / CIF')}
+                        error={(d.billNif ?? '').trim() && !spanishNif(d.billNif ?? '') ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}
+                      >
+                        <input value={d.billNif ?? ''} onChange={(e) => set('billNif', e.target.value.toUpperCase())} maxLength={20} />
+                      </Field>
+                      <Field label={tr('Teléfono en facturas', 'Billing phone')}>
+                        <input value={d.billPhone ?? ''} onChange={(e) => set('billPhone', e.target.value)} maxLength={40} />
+                      </Field>
+                    </div>
+                    <div className="grid2">
+                      <Field label={tr('Email en facturas', 'Billing email')}>
+                        <input value={d.billEmail ?? ''} onChange={(e) => set('billEmail', e.target.value)} maxLength={120} />
+                      </Field>
+                      <Field label={tr('Web en facturas (opcional)', 'Billing website (optional)')}>
+                        <input value={d.billWebsite ?? ''} onChange={(e) => set('billWebsite', e.target.value)} maxLength={120} />
+                      </Field>
+                    </div>
+                    <Field label={tr('Dirección fiscal en facturas', 'Billing fiscal address')}>
+                      <textarea rows={2} value={d.billAddress ?? ''} onChange={(e) => set('billAddress', e.target.value)} maxLength={240} />
+                    </Field>
+                  </>
+                )}
               </section>
             </div>
           )}
@@ -688,13 +717,26 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   ]}
                 />
               </Field>
+              <Field label={tr('Texto extra en cabecera (opcional)', 'Extra header text (optional)')} hint={tr('Debajo de los datos de la tienda (horario, aviso…)', 'Under the shop details (hours, notice…)')}>
+                <textarea rows={2} value={d.ticketHeaderNote ?? ''} onChange={(e) => set('ticketHeaderNote', e.target.value)} maxLength={200} />
+              </Field>
               <Field label={tr('Datos del comercio en el ticket', 'Shop details on the ticket')} hint={tr('Quita lo que no quieras imprimir. Sin NIF, el ticket sale como «TICKET» en vez de factura simplificada. Las facturas con datos del cliente siempre llevan NIF y dirección.', 'Leave out what you do not want printed. Without the NIF the ticket says "TICKET" instead of simplified invoice. Invoices with customer details always carry the NIF and address.')}>
                 <div className="grid2">
                   <Toggle checked={d.ticketNif || d.verifactu !== 'off'} onChange={(v) => set('ticketNif', v)} label={tr('NIF', 'NIF')} hint={d.verifactu !== 'off' ? tr('Obligatorio con VERI*FACTU', 'Required with VERI*FACTU') : undefined} />
+                  <Toggle checked={d.ticketLegalName ?? true} onChange={(v) => set('ticketLegalName', v)} label={tr('Razón social / empresa', 'Legal company name')} />
+                  <Toggle checked={d.ticketTagline ?? true} onChange={(v) => set('ticketTagline', v)} label={tr('Subtítulo / lema', 'Tagline / subtitle')} />
                   <Toggle checked={d.ticketAddress} onChange={(v) => set('ticketAddress', v)} label={tr('Dirección', 'Address')} />
                   <Toggle checked={d.ticketPhone} onChange={(v) => set('ticketPhone', v)} label={tr('Teléfono', 'Phone')} />
+                  <Toggle checked={d.ticketEmail ?? true} onChange={(v) => set('ticketEmail', v)} label={tr('Correo electrónico', 'Email')} />
+                  <Toggle checked={d.ticketWebsite ?? true} onChange={(v) => set('ticketWebsite', v)} label={tr('Web / red social', 'Website / social')} />
                   <Toggle checked={d.ticketCashier} onChange={(v) => set('ticketCashier', v)} label={tr('«Le atendió» (cajero)', '"Served by" (cashier)')} />
                 </div>
+                <Toggle
+                  checked={!!d.ticketLegalBottom}
+                  onChange={(v) => set('ticketLegalBottom', v)}
+                  label={tr('Poner empresa + NIF al final de la cabecera', 'Place legal name + NIF at the bottom of the header')}
+                  hint={tr('Encendido: nombre arriba, dirección y teléfono en medio, y razón social + NIF debajo.', 'On: shop name first, address and phone in the middle, legal name + NIF underneath.')}
+                />
               </Field>
             </div>
           )}
@@ -1063,6 +1105,12 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   label={tr('Imprimir contraseña/PIN de desbloqueo en el resguardo del cliente', 'Print device passcode on customer receipt')}
                   hint={tr('Siempre sale en la etiqueta interna de taller.', 'Always printed on the internal workshop tag.')}
                 />
+                <Toggle
+                  checked={d.repairShowLegal ?? true}
+                  onChange={(v) => set('repairShowLegal', v)}
+                  label={tr('Mostrar razón social, dirección y NIF en el resguardo', 'Show legal company name, address and NIF on receipt')}
+                  hint={tr('Encendido: siempre aparecen en reparaciones aunque estén ocultos en tickets rápidos.', 'On: always shown on repair receipts even if hidden on counter tickets.')}
+                />
               </section>
               <section className="form-section">
                 <h2>{tr('Condiciones del resguardo', 'Receipt conditions')}</h2>
@@ -1354,14 +1402,24 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
       <aside className="side settings-side">
         <div className="side-head">
           <span>
-            {tab === 'bills'
-              ? tr('Factura simplificada de ejemplo', 'Sample simplified invoice')
+            {tab === 'bills' || (tab === 'shop' && shopPreview === 'a4')
+              ? tr('Factura de ejemplo (A4)', 'Sample invoice (A4)')
               : tab === 'repairs'
                 ? tr('Resguardo de ejemplo', 'Sample repair receipt')
                 : tr('Ticket de ejemplo', 'Sample ticket')}
           </span>
+          {tab === 'shop' && (
+            <Segmented
+              value={shopPreview}
+              onChange={setShopPreview}
+              options={[
+                { value: 'ticket', label: tr('Ticket', 'Receipt') },
+                { value: 'a4', label: tr('Factura A4', 'A4 bill') },
+              ]}
+            />
+          )}
         </div>
-        {tab === 'bills' ? (
+        {tab === 'bills' || (tab === 'shop' && shopPreview === 'a4') ? (
           <div className="paper-scroll">
             <SheetView sheets={sheets} />
           </div>

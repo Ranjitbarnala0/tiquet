@@ -653,7 +653,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
                           >
                             <UserRound size={15} />
                             <span>
-                              <b>{k.name}</b>
+                              <b>{k.name || k.phone || k.nif}</b>
                               <small>
                                 {[k.nif, k.phone].filter(Boolean).join(' · ') || tr('sin NIF', 'no NIF')} · {tr('última', 'last')} {dateTime(k.last)}
                               </small>

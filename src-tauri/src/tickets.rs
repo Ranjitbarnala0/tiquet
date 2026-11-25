@@ -174,12 +174,15 @@ impl VatView {
 #[serde(default, rename_all = "camelCase")]
 pub struct ShopInfo {
     pub name: String,
+    pub tagline: String,
     pub address: String,
     pub phone: String,
     pub email: String,
+    pub website: String,
     pub nif: String,
     pub footer: String,
     pub legal_name: String,
+    pub header_note: String,
     // id in `logos`, 0 for no logo, -1 for tickets from before logos were kept
     pub logo: i64,
     // None for tickets from before this was kept
@@ -192,18 +195,26 @@ pub struct ShopInfo {
     pub show_address: Option<bool>,
     pub show_phone: Option<bool>,
     pub show_cashier: Option<bool>,
+    pub show_legal: Option<bool>,
+    pub show_tagline: Option<bool>,
+    pub show_email: Option<bool>,
+    pub show_website: Option<bool>,
+    pub legal_bottom: Option<bool>,
 }
 
 impl Default for ShopInfo {
     fn default() -> Self {
         ShopInfo {
             name: String::new(),
+            tagline: String::new(),
             address: String::new(),
             phone: String::new(),
             email: String::new(),
+            website: String::new(),
             nif: String::new(),
             footer: String::new(),
             legal_name: String::new(),
+            header_note: String::new(),
             logo: -1,
             show_vat: None,
             vat: None,
@@ -211,6 +222,11 @@ impl Default for ShopInfo {
             show_address: None,
             show_phone: None,
             show_cashier: None,
+            show_legal: None,
+            show_tagline: None,
+            show_email: None,
+            show_website: None,
+            legal_bottom: None,
         }
     }
 }
@@ -221,28 +237,57 @@ impl ShopInfo {
     }
 
     // Legal bills can carry a separate billing company identity when configured,
-    // while counter tickets and repairs keep the storefront shop details.
+    // show both legal entity + storefront trade name, or stick to the shop's own details.
     pub fn from_settings_for(s: &Settings, for_bill: bool) -> ShopInfo {
         let has_bill = for_bill
-            && [&s.bill_company_name, &s.bill_legal_name, &s.bill_nif, &s.bill_address, &s.bill_phone, &s.bill_email]
+            && s.bill_identity_mode != "shop"
+            && [&s.bill_company_name, &s.bill_legal_name, &s.bill_nif, &s.bill_address, &s.bill_phone, &s.bill_email, &s.bill_website]
                 .iter()
                 .any(|x| !x.trim().is_empty());
         let pick = |bill: &str, shop: &str| if has_bill && !bill.trim().is_empty() { bill.trim().to_string() } else { shop.to_string() };
-        let legal_name = if has_bill && !s.bill_legal_name.trim().is_empty() {
+        let name = if has_bill && !s.bill_company_name.trim().is_empty() {
+            s.bill_company_name.trim().to_string()
+        } else if has_bill && s.bill_identity_mode == "separate" && !s.bill_legal_name.trim().is_empty() {
             s.bill_legal_name.trim().to_string()
-        } else if has_bill && !s.bill_company_name.trim().is_empty() {
+        } else {
+            s.shop_name.clone()
+        };
+        let legal_name = if !has_bill {
+            s.legal_name.clone()
+        } else if s.bill_identity_mode == "both" {
+            let bill_legal = if !s.bill_legal_name.trim().is_empty() {
+                s.bill_legal_name.trim()
+            } else {
+                s.bill_company_name.trim()
+            };
+            let shop = s.shop_name.trim();
+            match (
+                bill_legal.is_empty() || bill_legal.eq_ignore_ascii_case(&name),
+                shop.is_empty() || shop.eq_ignore_ascii_case(&name),
+            ) {
+                (true, true) => s.legal_name.clone(),
+                (false, true) => bill_legal.to_string(),
+                (true, false) => format!("Establecimiento: {shop}"),
+                (false, false) => format!("{bill_legal} · {shop}"),
+            }
+        } else if !s.bill_legal_name.trim().is_empty() && !s.bill_legal_name.trim().eq_ignore_ascii_case(&name) {
+            s.bill_legal_name.trim().to_string()
+        } else if !s.bill_company_name.trim().is_empty() {
             String::new()
         } else {
             s.legal_name.clone()
         };
         ShopInfo {
-            name: pick(&s.bill_company_name, &s.shop_name),
+            name,
+            tagline: s.shop_tagline.clone(),
             address: pick(&s.bill_address, &s.shop_address),
             phone: pick(&s.bill_phone, &s.shop_phone),
             email: pick(&s.bill_email, &s.shop_email),
+            website: pick(&s.bill_website, &s.shop_website),
             nif: pick(&s.bill_nif, &s.shop_nif),
             footer: s.footer.clone(),
             legal_name,
+            header_note: s.ticket_header_note.clone(),
             logo: -1,
             show_vat: Some(s.show_vat),
             vat: Some(VatView::of(s)),
@@ -250,6 +295,11 @@ impl ShopInfo {
             show_address: Some(s.ticket_address),
             show_phone: Some(s.ticket_phone),
             show_cashier: Some(s.ticket_cashier),
+            show_legal: Some(s.ticket_legal_name),
+            show_tagline: Some(s.ticket_tagline),
+            show_email: Some(s.ticket_email),
+            show_website: Some(s.ticket_website),
+            legal_bottom: Some(s.ticket_legal_bottom),
         }
     }
 }

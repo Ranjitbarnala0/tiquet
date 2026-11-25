@@ -429,8 +429,12 @@ fn head(d: &mut Doc, y: f32, rec: &TicketRecord, logo: Option<&Logo>, copy: bool
     }
     let shop = &rec.shop;
     let (name, legal) = names(shop);
+    let full = rec.customer.as_ref().is_some_and(Customer::is_fiscal);
     l = d.para(LEFT, l, col, big, Align::Left, name) + 0.5;
-    if !legal.is_empty() {
+    if (full || shop.show_tagline.unwrap_or(true)) && !shop.tagline.trim().is_empty() {
+        l = d.para(LEFT, l, col, font(9.5, true), Align::Left, shop.tagline.trim());
+    }
+    if (full || shop.show_legal.unwrap_or(true)) && !legal.is_empty() {
         l = d.para(LEFT, l, col, small, Align::Left, legal);
     }
     // a full invoice always names the shop's NIF and address, whatever the
@@ -444,8 +448,11 @@ fn head(d: &mut Doc, y: f32, rec: &TicketRecord, logo: Option<&Logo>, copy: bool
     if shop.show_phone.unwrap_or(true) && !shop.phone.trim().is_empty() {
         l = d.para(LEFT, l, col, small, Align::Left, &format!("Tel. {}", shop.phone.trim()));
     }
-    if !shop.email.trim().is_empty() {
+    if (full || shop.show_email.unwrap_or(true)) && !shop.email.trim().is_empty() {
         l = d.para(LEFT, l, col, small, Align::Left, &format!("Email: {}", shop.email.trim()));
+    }
+    if (full || shop.show_website.unwrap_or(true)) && !shop.website.trim().is_empty() {
+        l = d.para(LEFT, l, col, small, Align::Left, shop.website.trim());
     }
 
     // the title as big as fits beside COPIA, its capitals level with the shop's
