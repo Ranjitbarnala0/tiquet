@@ -238,6 +238,7 @@ export function useUpdate(ticket: boolean, { on = true, auto: autoSet = false, q
       });
     return () => {
       alive = false;
+      fetching.current = false;
       if (retryTimer !== undefined) clearTimeout(retryTimer);
       off?.();
     };
@@ -268,7 +269,9 @@ export function UpdateBar({ u }: { u: Updates }) {
         <span>
           {u.progress !== null
             ? `${tr('Descargando la versión', 'Downloading version')} ${u.found} · ${Math.round(u.progress * 100)} %. `
-            : `${tr('Instalando la versión', 'Installing version')} ${u.found}. `}
+            : u.installing
+              ? `${tr('Instalando la versión', 'Installing version')} ${u.found}. `
+              : `${tr('Descargando la versión', 'Downloading version')} ${u.found}… `}
           {u.installing
             ? tr('Tiquet se cerrará y volverá a abrirse solo.', 'Tiquet will close and open again by itself.')
             : tr('Se instalará sola en cuanto la caja esté libre.', 'It will install itself as soon as the till is free.')}

@@ -116,7 +116,7 @@ function readDraft(key?: string): Draft | null {
 // Whether a bill already issued shows its VAT. Since 1.13 it says so itself;
 // before, an invoice with a customer did and a simple one followed Ajustes.
 function shownVat(t: TicketRecord, s: Settings) {
-  return t.shop.vat ? t.shop.vat === 'full' : !!t.customer || !!s.invoiceVatTable;
+  return t.shop.vat ? t.shop.vat === 'full' : (!!t.customer?.name.trim() && !!t.customer?.nif.trim()) || !!s.invoiceVatTable;
 }
 
 // A printer picked for an A4 bill on a PC that has none set up becomes that
@@ -457,13 +457,14 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   }, [draftKey, from, typed, full, customer, lines, method, showVat, net, note, idTaken]);
 
   // what is still needed, said in words next to the button
+  const issuerNif = ((settings.billIdentityMode !== 'shop' ? settings.billNif : '') ?? '').trim() || settings.shopNif.trim();
   const missing: { text: string; focus: string }[] = [];
   const needFiscal = total > SIMPLIFIED_LIMIT || !!custClean.nif;
   if (full) {
     if (needFiscal && !custClean.name) missing.push({ text: tr('el nombre del cliente', "the customer's name"), focus: 'bill-name' });
     if (custClean.nif && !customerNif(custClean.nif)) missing.push({ text: tr('un NIF válido del cliente', 'a valid customer NIF'), focus: 'bill-nif' });
     if (total > SIMPLIFIED_LIMIT && !custClean.nif) missing.push({ text: tr('el NIF del cliente (pasa de 3.000 €)', "the customer's NIF (over 3,000 EUR)"), focus: 'bill-nif' });
-    if (needFiscal && !settings.shopNif.trim()) missing.push({ text: tr('el NIF de la tienda (Ajustes › Comercio)', "the shop's NIF (Settings › Shop)"), focus: '' });
+    if (needFiscal && !issuerNif) missing.push({ text: tr('el NIF de la tienda (Ajustes › Comercio)', "the shop's NIF (Settings › Shop)"), focus: '' });
   }
   if (filled.length === 0) missing.push({ text: tr('lo que se vende', 'what is sold'), focus: `line-${lines[0]?.key}-name` });
   filled.forEach((p, i) => {
@@ -487,7 +488,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
               setSheets(r.sheets);
               setNumber(r.number);
             })
-          : call<{ lines: PLine[]; number: string }>('sale.preview', { lines: args.out, customer: args.who, payment: { method: args.method }, replaces: args.replaces, showVat: args.showVat, note: args.note }).then((r) => {
+          : call<{ lines: PLine[]; number: string }>('sale.preview', { lines: args.out, customer: args.who, payment: { method: args.method }, replaces: args.replaces, showVat: args.showVat, note: args.note, bill: true }).then((r) => {
               if (n !== seq.current) return;
               setTicket(r.lines);
               setNumber(r.number);
@@ -641,7 +642,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
                       <div className="bill-known" role="listbox">
                         {known.map((k) => (
                           <button
-                            key={`${k.nif}-${k.name}`}
+                            key={`${k.nif}-${k.name}-${k.phone ?? ''}`}
                             type="button"
                             role="option"
                             aria-selected={false}
@@ -1066,7 +1067,15 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
                 </p>
                 {rec.customer ? (
                   <p className="ref-note">
-                    <b>{rec.customer.name}</b> · <span className="mono">{rec.customer.nif}</span>
+                    {rec.customer.name && <b>{rec.customer.name}</b>}
+                    {rec.customer.name && rec.customer.nif && ' · '}
+                    {rec.customer.nif && <span className="mono">{rec.customer.nif}</span>}
+                    {(rec.customer.phone || rec.customer.email) && (
+                      <>
+                        {(rec.customer.name || rec.customer.nif) && ' · '}
+                        {[rec.customer.phone, rec.customer.email].filter(Boolean).join(' · ')}
+                      </>
+                    )}
                   </p>
                 ) : (
                   <p className="ref-note">{tr('Factura simplificada, sin datos del cliente', 'Simplified invoice, no customer details')}</p>

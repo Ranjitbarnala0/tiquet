@@ -20,7 +20,7 @@ fn cell(cols: usize) -> (f64, f64) {
 }
 
 fn wrap_modern(text: &str, max_w: f64, fs: f64) -> Vec<String> {
-    let approx_chars = (max_w / (fs * 0.52)).floor().max(8.0) as usize;
+    let approx_chars = (max_w / (fs * 0.54)).floor().max(8.0) as usize;
     let mut out = Vec::new();
     for para in text.split('\n') {
         let mut cur = String::new();
@@ -63,7 +63,7 @@ fn modern_height(p: &Page) -> f64 {
             Visual::TableHead(_) => cw * 2.1 + 3.0,
             Visual::TableRow { .. } => cw * 2.05,
             Visual::Pair { left, right, .. } => {
-                let lw = (width - (right.chars().count() as f64 * 8.2 * 0.56) - 6.0).max(width * 0.35);
+                let lw = (width - (right.chars().count() as f64 * 8.2 * 0.54) - 6.0).max(width * 0.35);
                 wrap_modern(left, lw, 8.2).len() as f64 * 10.2 + 1.5
             }
             Visual::Center { text, .. } | Visual::Text { text, .. } => wrap_modern(text, width, 8.2).len() as f64 * 10.2 + 1.5,
@@ -127,7 +127,7 @@ fn draw_modern_content(p: &Page, page_h: f64) -> Vec<u8> {
     let x0 = (PAPER - width) / 2.0;
     let mut y = page_h - MARGIN - 2.0;
     let mut out = Vec::new();
-    let est_w = |s: &str, fs: f64| s.chars().count() as f64 * fs * 0.52;
+    let est_w = |s: &str, fs: f64| s.chars().count() as f64 * fs * 0.54;
 
     for item in classify(&p.lines, cols) {
         match item {
@@ -177,18 +177,24 @@ fn draw_modern_content(p: &Page, page_h: f64) -> Vec<u8> {
                 y -= 2.0;
             }
             Visual::Badge(text) => {
-                let fs = 8.0;
-                let bw = (est_w(text, fs) + 14.0).min(width);
+                let fs = 8.2;
                 let bh = 12.0;
-                let bx = x0 + (width - bw) / 2.0;
-                out.extend_from_slice(format!("0.08 g {bx:.2} {:.2} {bw:.2} {bh:.2} re f\n1 g\n", y - bh).as_bytes());
-                let tx = bx + ((bw - est_w(text, fs)) / 2.0).max(3.0);
+                out.extend_from_slice(
+                    format!(
+                        "q 0.15 G 0.6 w [2 2] 0 d {x0:.2} {y:.2} m {:.2} {y:.2} l {x0:.2} {:.2} m {:.2} {:.2} l S Q\n0 g\n",
+                        x0 + width,
+                        y - bh,
+                        x0 + width,
+                        y - bh
+                    )
+                    .as_bytes(),
+                );
+                let tx = x0 + ((width - est_w(text, fs)) / 2.0).max(2.0);
                 draw_pdf_text(&mut out, "F4", fs, tx, y - bh + 3.4, text, 100);
-                out.extend_from_slice(b"0 g\n");
                 y -= 15.0;
             }
             Visual::Pill(text) => {
-                let fs = 7.8;
+                let fs = 8.0;
                 let lines = wrap_modern(text, width - 16.0, fs);
                 let bh = lines.len() as f64 * 10.0 + 4.0;
                 out.extend_from_slice(format!("q 0.15 G 0.7 w {x0:.2} {:.2} {width:.2} {bh:.2} re S Q\n0 g\n", y - bh).as_bytes());

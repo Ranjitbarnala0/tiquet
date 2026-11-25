@@ -328,13 +328,15 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
     }
   };
 
+  const isBill = (rec: TicketRecord) => rec.bill || (!!rec.customer?.name.trim() && !!rec.customer?.nif.trim());
+
   const reprint = async () => {
     if (!detail || busy) return;
     const id = detail.ticket.id;
     setBusy(true);
     try {
       // another printer picked for this print; an invoice goes on A4 there
-      const invoice = !!detail.ticket.customer || detail.ticket.bill;
+      const invoice = isBill(detail.ticket);
       const r = await call<{ warning: string | null }>('tickets.print', { id, printer: printTo ?? undefined, format: printTo ? (invoice ? 'a4' : 'ticket') : undefined });
       if (r.warning) toast.info(warningText(r.warning));
       else toast.ok(tr('Impreso', 'Printed'));
@@ -792,13 +794,13 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                 <div>
                   <h2 className="mono">
                     {t.number}
-                    {t.customer && <span className="badge blue">{tr('Factura', 'Invoice')}</span>}
+                    {isBill(t) && <span className="badge blue">{tr('Factura', 'Invoice')}</span>}
                     {t.kind === 'refund' && <span className="badge amber">{tr('Devolución', 'Return')}</span>}
                     {t.training && <span className="badge">{tr('Prueba', 'Practice')}</span>}
                   </h2>
                   {t.customer && (
                     <p className="ref-note">
-                      {t.customer.name} · {t.customer.nif}
+                      {[t.customer.name, t.customer.nif, t.customer.phone, t.customer.email].filter((v) => v?.trim()).join(' · ')}
                     </p>
                   )}
                   <p className="muted">
@@ -865,7 +867,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                       {tr('Editar', 'Edit')}
                     </button>
                   )}
-                  <PrinterPick format={detail.ticket.customer || detail.ticket.bill ? 'a4' : 'ticket'} value={printTo} onChange={setPrintTo} />
+                  <PrinterPick format={isBill(detail.ticket) ? 'a4' : 'ticket'} value={printTo} onChange={setPrintTo} />
                   <button className="btn" onClick={reprint} disabled={busy}>
                     <Printer size={16} />
                     {onPaper ? tr('Copia', 'Copy') : tr('Imprimir', 'Print')}

@@ -137,6 +137,12 @@ pub fn classify(lines: &[Line], cols: usize) -> Vec<Visual<'_>> {
                     }
                     continue;
                 }
+                if *bold && ((trimmed.starts_with("*** ") && trimmed.ends_with(" ***")) || trimmed.starts_with("PENDIENTE:") || trimmed.starts_with("COBRAR ")) {
+                    in_table = false;
+                    let inner = trimmed.strip_prefix("*** ").and_then(|s| s.strip_suffix(" ***")).unwrap_or(trimmed);
+                    out.push(Visual::Pill(inner));
+                    continue;
+                }
                 if *size != Size::Normal {
                     in_table = false;
                     out.push(Visual::Heading { text: trimmed, big: *size == Size::Big });
@@ -147,10 +153,9 @@ pub fn classify(lines: &[Line], cols: usize) -> Vec<Visual<'_>> {
                     out.push(Visual::Badge(trimmed));
                     continue;
                 }
-                if *bold && ((trimmed.starts_with("*** ") && trimmed.ends_with(" ***")) || trimmed.starts_with("PENDIENTE:") || trimmed.starts_with("COBRAR ")) {
+                if trimmed.len() >= 24 && trimmed.starts_with("1234567890") && trimmed.chars().all(|c| c.is_ascii_digit()) {
                     in_table = false;
-                    let inner = trimmed.strip_prefix("*** ").and_then(|s| s.strip_suffix(" ***")).unwrap_or(trimmed);
-                    out.push(Visual::Pill(inner));
+                    out.push(Visual::TableRow { text: trimmed, bold: false });
                     continue;
                 }
                 if (trimmed.starts_with("UDS ") && trimmed.contains("DESCRIPCI")) || (trimmed.starts_with("IVA ") && trimmed.contains("BASE")) {
@@ -168,7 +173,8 @@ pub fn classify(lines: &[Line], cols: usize) -> Vec<Visual<'_>> {
                 }
                 let lead = text.chars().take_while(|c| *c == ' ').count();
                 let center_pad = cols.saturating_sub(len(trimmed)) / 2;
-                if lead >= 2 && lead == center_pad {
+                let indented = lead == 2 && (trimmed.starts_with("P.U. ") || trimmed.starts_with("IMEI "));
+                if lead >= 1 && lead == center_pad && !indented {
                     out.push(Visual::Center { text: trimmed, bold: *bold });
                 } else {
                     out.push(Visual::Text { text: trimmed, bold: *bold });
@@ -728,7 +734,7 @@ pub fn record(r: &TicketRecord, s: &Settings, logo: bool, copy: bool) -> Vec<Lin
         payment: Some(&r.payment),
         refund_of: r.refund_of.as_ref().map(|t| (t.number.as_str(), t.issued_at.as_str())),
         reason: r.refund_reason.as_deref(),
-        vat: r.shop.vat_view(r.customer.is_some(), s.show_vat),
+        vat: r.shop.vat_view(r.customer.as_ref().is_some_and(Customer::is_fiscal), s.show_vat),
         note: r.note.as_deref(),
         copy,
         voided: r.voided_at.is_some(),
@@ -1518,5 +1524,23 @@ mod tests {
         assert_eq!(wrap("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
         assert_eq!(wrap("a\n\nb", 10), vec!["a", "", "b"]);
         assert_eq!(wrap("", 10), vec![""]);
+    }
+
+    #[test]
+    fn classify_handles_repair_pills_test_ruler_and_narrow_centering() {
+        let s32 = Settings { columns: 32, ..Settings::default() };
+        let rep = repair(&s32, &phone(), 2000);
+        let rl = resguardo(&rep, &s32, false);
+        let rv = classify(&rl, 32);
+        assert!(rv.iter().any(|v| matches!(v, Visual::Pill(t) if t.starts_with("PENDIENTE:"))));
+        let sl = repair_slip(&rep, &s32);
+        let sv = classify(&sl, 32);
+        assert!(sv.iter().any(|v| matches!(v, Visual::Pill(t) if t.starts_with("COBRAR "))));
+        let tl = test_page(&s32, "Ana", false);
+        let tp = classify(&tl, 32);
+        assert!(tp.iter().any(|v| matches!(v, Visual::TableRow { text, .. } if text.starts_with("1234567890"))));
+        // 29-char centered line on 32 cols has 1 leading space and must stay centered
+        let narrow = vec![Line::Text { text: " C/Ejemplo 37, Local 3, 176000".into(), bold: false, size: Size::Normal }];
+        assert!(matches!(classify(&narrow, 32).first(), Some(Visual::Center { .. })));
     }
 }

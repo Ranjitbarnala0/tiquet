@@ -493,6 +493,13 @@ pub struct TicketRecord {
     pub note: Option<String>,
 }
 
+impl TicketRecord {
+    // A legal bill / full invoice (not a counter ticket with optional contact info).
+    pub fn is_bill(&self) -> bool {
+        self.bill || self.customer.as_ref().is_some_and(Customer::is_fiscal)
+    }
+}
+
 // how a ticket's payment was put right
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -1347,7 +1354,7 @@ pub fn invoices(conn: &Connection, q: &InvoiceQuery) -> Result<Vec<InvoiceRow>> 
         "SELECT id, kind, number, issued_at, user_name, total_cents, payment_method, voided_at IS NOT NULL,
                 COALESCE(customer_name, ''), COALESCE(customer_nif, ''), void_reason,
                 (SELECT o.number FROM tickets o WHERE o.id = tickets.replaces)
-         FROM tickets WHERE (customer_name IS NOT NULL OR bill = 1) AND training = ?1 ORDER BY id DESC",
+         FROM tickets WHERE ((COALESCE(customer_name, '') <> '' AND COALESCE(customer_nif, '') <> '') OR bill = 1) AND training = ?1 ORDER BY id DESC",
     )?;
     let rows = stmt.query_map([q.training], |r| {
         Ok(InvoiceRow {
@@ -1393,7 +1400,7 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<TicketSummary>> {
                        WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id AND p.status = 'unknown') THEN 'unknown'
                        WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id) THEN 'failed'
                        ELSE 'none' END AS printed,
-                  t.customer_name IS NOT NULL
+                  (COALESCE(t.customer_name, '') <> '' AND COALESCE(t.customer_nif, '') <> '') OR t.bill = 1
            FROM tickets t
            WHERE t.issued_at >= ?1 AND t.issued_at <= ?2 AND t.training = ?7
              AND (?3 = '' OR t.number LIKE '%' || ?3 || '%' OR printf('%.2f', abs(t.total_cents) / 100.0) LIKE '%' || ?4 || '%'))

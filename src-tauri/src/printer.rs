@@ -1358,8 +1358,8 @@ mod win {
         fn draw_modern(&mut self, lines: &[Line], cols: usize, logo: Option<&Logo>) -> bool {
             use crate::layout::{classify, Visual};
             use windows_sys::Win32::Graphics::Gdi::{
-                CreatePen, DeleteObject, ExtTextOutW, GetStockObject, LineTo, MoveToEx, RoundRect, SelectObject, SetTextColor, BLACK_BRUSH, DT_CENTER,
-                DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_WORDBREAK, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, NULL_PEN, PS_SOLID, WHITE_BRUSH,
+                CreatePen, DeleteObject, ExtTextOutW, GetStockObject, LineTo, MoveToEx, RoundRect, SelectObject, SetTextColor, DT_CENTER,
+                DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_WORDBREAK, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, PS_SOLID, WHITE_BRUSH,
             };
 
             let dpi = self.dpi;
@@ -1426,21 +1426,23 @@ mod win {
                         self.y += adv;
                     }
                     Visual::Badge(text) => {
-                        let (tw, th) = self.measure_dt(f_badge, text, self.width - sc(20.0), DT_CENTER | DT_SINGLELINE);
-                        let bw = (tw + sc(26.0)).min(self.width);
-                        let bh = th + sc(12.0);
-                        let bx = self.x0 + (self.width - bw) / 2;
+                        let (_, th) = self.measure_dt(f_badge, text, self.width - sc(8.0), DT_CENTER | DT_WORDBREAK);
+                        let pad_v = sc(6.0);
+                        let bh = th + pad_v * 2 + sc(4.0);
                         if !self.room(bh + sc(8.0)) {
                             return false;
                         }
                         unsafe {
-                            let ob = SelectObject(self.hdc, GetStockObject(BLACK_BRUSH));
-                            let op = SelectObject(self.hdc, GetStockObject(NULL_PEN));
-                            RoundRect(self.hdc, bx, self.y, bx + bw, self.y + bh, sc(12.0), sc(12.0));
-                            SelectObject(self.hdc, ob);
+                            let pen = CreatePen(PS_SOLID, sc(2.0), 0x0000_0000);
+                            let op = SelectObject(self.hdc, pen);
+                            MoveToEx(self.hdc, self.x0, self.y + sc(1.0), null_mut());
+                            LineTo(self.hdc, self.x0 + self.width, self.y + sc(1.0));
+                            MoveToEx(self.hdc, self.x0, self.y + bh - sc(1.0), null_mut());
+                            LineTo(self.hdc, self.x0 + self.width, self.y + bh - sc(1.0));
                             SelectObject(self.hdc, op);
+                            DeleteObject(pen);
                         }
-                        self.draw_dt(f_badge, text, [bx, self.y + (bh - th) / 2, bw, th], DT_CENTER | DT_SINGLELINE, 0x00FF_FFFF);
+                        self.draw_dt(f_badge, text, [self.x0 + sc(4.0), self.y + pad_v + sc(2.0), self.width - sc(8.0), th], DT_CENTER | DT_WORDBREAK, 0x0000_0000);
                         self.y += bh + sc(8.0);
                     }
                     Visual::Pill(text) => {

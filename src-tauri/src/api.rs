@@ -1524,7 +1524,7 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
 // A bill goes to this PC's A4 printer by itself when it has one, unless
 // Ajustes says bills are tickets here.
 fn print_ticket(st: &AppState, rec: &TicketRecord, s: &Settings, logo: Option<&Logo>, at_sale: bool) -> Result<Option<String>> {
-    let a4 = (rec.customer.is_some() || rec.bill) && s.invoice_format != "ticket" && !s.invoice_printer.trim().is_empty();
+    let a4 = rec.is_bill() && s.invoice_format != "ticket" && !s.invoice_printer.trim().is_empty();
     print_as(st, rec, s, logo, at_sale, a4)
 }
 
@@ -2964,5 +2964,28 @@ mod tests {
         assert!(both_txt.contains("Tienda Frontal"));
         assert!(both_txt.contains("Telefonía e informática"));
         assert!(both_txt.contains("Horario L-S 10 a 20h"));
+
+        // Optional customer info without NIF must stay a counter ticket: not in invoices.list,
+        // not marked invoice in day.list, and not routed to A4 printer when printing!
+        dispatch(&st, "settings.save", json!({ "invoicePrinter": "HP Oficina", "invoiceFormat": "a4" })).unwrap();
+        let inv_list = dispatch(&st, "invoices.list", json!({})).unwrap();
+        assert!(!inv_list.as_array().unwrap().iter().any(|r| r["id"] == tid));
+        let today = tickets::now()[..10].to_string();
+        let day_list = dispatch(&st, "day.list", json!({ "from": today, "to": today })).unwrap();
+        let opt_row = day_list["rows"].as_array().unwrap().iter().find(|r| r["id"] == tid).unwrap();
+        assert_eq!(opt_row["invoice"], false);
+        // Printing the optional-customer counter ticket writes a thermal .bin, NOT an A4 .pdf
+        dispatch(&st, "tickets.print", json!({ "id": tid })).unwrap();
+        let prints_dir = match &st.sink {
+            PrintSink::Dir(d) => d.clone(),
+            PrintSink::Spooler => unreachable!(),
+        };
+        let files: Vec<String> = std::fs::read_dir(&prints_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(files.iter().any(|f| f.ends_with(".bin")) && !files.iter().any(|f| f.ends_with("-A4.pdf")), "{files:?}");
+
+        // A4 invoice preview includes headerNote and respects ticketLegalBottom
+        let a4_prev = dispatch(&st, "invoices.preview", json!({ "sample": true })).unwrap();
+        let a4_json = a4_prev["sheets"].to_string();
+        assert!(a4_json.contains("Horario L-S 10 a 20h"));
     }
 }

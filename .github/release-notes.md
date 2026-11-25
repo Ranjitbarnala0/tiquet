@@ -1,10 +1,21 @@
-Download `Tiquet_1.14.2_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.14.3_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.14.2: **full shop & company customization, live ticket/A4 preview in Settings, and faster automatic updates.**
+New in 1.14.3: **fixed reprint/copy gibberish on 58 mm thermal printers, dark crisp ink with thermal-safe dividers, and full codebase audit fixes.**
+
+- **Fixed Copy / Reprint gibberish on 58 mm thermal printers.** Pure raster receipts now use a minimal clean ESC/POS raster header (`ESC @` + `ESC a 0` + `ESC J 0`, removing text-mode `ESC 2` / codepage commands before `GS v 0`) and safe 24-dot-row raster bands (`1,152` bytes/band on 58 mm) so reprinting copies, card receipts, repair receipts, and Z-reports never dump raw bytes as text.
+- **Crisp dark ink and complete borders on 58 mm & 80 mm rolls.** Switched 203-dpi thermal typography to hinted 1-bit rendering (`NONANTIALIASED_QUALITY`) with heavier weights so small text and decimal figures print solid and sharp without broken strokes. Replaced solid full-width black fills and lines with thermal-safe geometric dashed rules, framed titles, and a symmetric **TOTAL** card staying under 46% black dots per row—eliminating faded badges and vanished horizontal rules on 58 mm print heads.
+- **Full codebase audit fixes:**
+  - Counter tickets with optional customer phone/name (no NIF) stay on the receipt printer, stay out of the **Facturas** list, and export as roll ticket PDFs rather than triggering A4 invoice routing.
+  - **Facturas** ticket preview now applies the billing company identity (`bill: true`), recognizes a configured billing NIF when the shop NIF is empty, and formats optional customer details without dangling separators.
+  - **Hoy** formats optional customer contact fields cleanly and routes **PrinterPick** by actual fiscal/bill status.
+  - **Venta** keeps the **Cliente / Factura** chip active when "Emitir como factura" is toggled without customer fields.
+  - Repair status badges (`PENDIENTE:`, `COBRAR`), the 58 mm width test ruler, narrow 58 mm header centering, A4 `headerNote`/`legalBottom` options, roll PDF height matching, and updater download banner/cleanup edge cases are all fixed.
+
+Also in 1.14.2: **full shop & company customization, live ticket/A4 preview in Settings, and faster automatic updates.**
 
 - **Complete Shop vs. Company configuration (`Ajustes › Comercio`).** Set a shop trade name, tagline/subtitle, legal company name on tickets/repairs, address, phone, email, website/social, and NIF/CIF—and separately configure the billing company for official invoices with three clear modes (`Empresa de facturación`, `Empresa + nombre tienda`, or `Siempre datos de tienda`). Includes a live **Ticket / Factura A4** preview switcher right next to the form.
 - **Full ticket & repair header customization (`Ajustes › Ticket`, `Ajustes › Reparaciones`).** Control visibility of NIF, legal company name, tagline, address, phone, email, website, cashier, extra header banner text, and whether legal company + NIF sit below the shop name or at the bottom of the header block—plus whether repair receipts always display full company/NIF details.

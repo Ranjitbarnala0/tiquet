@@ -94,6 +94,12 @@ function classify(lines: PLine[], cols: number): Visual[] {
       else out.push({ k: 'total', label: 'TOTAL', amount: trimmed.replace(/^TOTAL\s*/, '') });
       continue;
     }
+    if (line.bold && ((trimmed.startsWith('*** ') && trimmed.endsWith(' ***')) || trimmed.startsWith('PENDIENTE:') || trimmed.startsWith('COBRAR '))) {
+      inTable = false;
+      const inner = trimmed.startsWith('*** ') && trimmed.endsWith(' ***') ? trimmed.slice(4, -4) : trimmed;
+      out.push({ k: 'pill', text: inner });
+      continue;
+    }
     if (line.size !== 'normal') {
       inTable = false;
       out.push({ k: 'heading', text: trimmed, big: line.size === 'big' });
@@ -104,10 +110,9 @@ function classify(lines: PLine[], cols: number): Visual[] {
       out.push({ k: 'badge', text: trimmed });
       continue;
     }
-    if (line.bold && ((trimmed.startsWith('*** ') && trimmed.endsWith(' ***')) || trimmed.startsWith('PENDIENTE:') || trimmed.startsWith('COBRAR '))) {
+    if (trimmed.length >= 24 && trimmed.startsWith('1234567890') && /^\d+$/.test(trimmed)) {
       inTable = false;
-      const inner = trimmed.startsWith('*** ') && trimmed.endsWith(' ***') ? trimmed.slice(4, -4) : trimmed;
-      out.push({ k: 'pill', text: inner });
+      out.push({ k: 'tableRow', text: trimmed, bold: false });
       continue;
     }
     if ((trimmed.startsWith('UDS ') && trimmed.includes('DESCRIPCI')) || (trimmed.startsWith('IVA ') && trimmed.includes('BASE'))) {
@@ -126,7 +131,8 @@ function classify(lines: PLine[], cols: number): Visual[] {
     }
     const lead = line.text.length - line.text.trimStart().length;
     const centerPad = Math.floor(Math.max(0, cols - [...trimmed].length) / 2);
-    if (lead >= 2 && lead === centerPad) {
+    const indented = lead === 2 && (trimmed.startsWith('P.U. ') || trimmed.startsWith('IMEI '));
+    if (lead >= 1 && lead === centerPad && !indented) {
       out.push({ k: 'center', text: trimmed, bold: line.bold });
     } else {
       out.push({ k: 'text', text: trimmed, bold: line.bold });

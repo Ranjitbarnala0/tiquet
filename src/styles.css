@@ -780,12 +780,12 @@ code {
 
 .pl-m-rule {
   border: 0;
-  border-top: 1px solid #d0d5df;
+  border-top: 1.5px dashed #7f8798;
   margin: 0.48em 0;
 }
 
 .pl-m-rule.heavy {
-  border-top: 2px solid #14171f;
+  border-top: 2px dashed #14171f;
 }
 
 .pl-m-head {
@@ -804,18 +804,18 @@ code {
 
 .pl-m-badge {
   text-align: center;
-  margin: 0.4em 0;
+  margin: 0.44em 0;
+  padding: 0.28em 0;
+  border-top: 1.5px dashed #14171f;
+  border-bottom: 1.5px dashed #14171f;
 }
 
 .pl-m-badge span {
   display: inline-block;
-  padding: 0.24em 0.9em;
-  border-radius: 999px;
-  background: #14171f;
-  color: #fff;
+  color: #14171f;
   font-family: var(--display);
-  font-weight: 760;
-  font-size: 0.84em;
+  font-weight: 780;
+  font-size: 0.9em;
   letter-spacing: 0.05em;
 }
 
@@ -826,14 +826,14 @@ code {
 
 .pl-m-pill span {
   display: inline-block;
-  padding: 0.26em 0.85em;
-  border-radius: 999px;
-  border: 1.5px solid #14171f;
-  background: #f2f4f8;
+  padding: 0.24em 0.85em;
+  border-radius: 6px;
+  border: 1.5px dashed #14171f;
+  background: #f5f7fb;
   color: #14171f;
   font-family: var(--display);
-  font-weight: 720;
-  font-size: 0.86em;
+  font-weight: 740;
+  font-size: 0.88em;
 }
 
 .pl-m-total {
@@ -842,10 +842,13 @@ code {
   justify-content: space-between;
   gap: 0.6em;
   margin: 0.48em 0;
-  padding: 0.52em 0.78em;
-  border: 2px solid #14171f;
-  border-radius: 0.65em;
-  background: #f4f6fa;
+  padding: 0.5em 0.72em;
+  border-top: 2px dashed #14171f;
+  border-bottom: 2px dashed #14171f;
+  border-left: 2.5px solid #14171f;
+  border-right: 2.5px solid #14171f;
+  border-radius: 4px;
+  background: #f6f8fb;
   font-family: var(--display);
 }
 

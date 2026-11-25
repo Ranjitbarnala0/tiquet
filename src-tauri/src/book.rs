@@ -411,7 +411,7 @@ pub fn rows(conn: &Connection, r: &Range, training: bool, deleted: bool) -> Resu
         "SELECT t.id, t.issued_at, t.number, t.kind, t.total_cents, t.payment_method, t.user_name, t.voided_at, t.voided_by, t.void_reason,
                 COALESCE((SELECT name FROM ticket_lines WHERE ticket_id = t.id ORDER BY pos LIMIT 1), ''),
                 (SELECT COUNT(*) FROM ticket_lines WHERE ticket_id = t.id),
-                t.customer_name IS NOT NULL,
+                (COALESCE(t.customer_name, '') <> '' AND COALESCE(t.customer_nif, '') <> '') OR t.bill = 1,
                 CASE WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id AND p.status IN ('printed', 'sent')) THEN 'printed'
                      WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id AND p.status = 'unknown') THEN 'unknown'
                      WHEN EXISTS(SELECT 1 FROM ticket_prints p WHERE p.ticket_id = t.id) THEN 'failed'

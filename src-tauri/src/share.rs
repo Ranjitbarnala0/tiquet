@@ -30,7 +30,7 @@ pub fn text(rec: &TicketRecord, s: &Settings) -> String {
 
 // a full invoice is an A4 page, like any invoice; a ticket keeps its own shape
 pub fn pdf(rec: &TicketRecord, s: &Settings, logo: Option<&Logo>) -> Vec<u8> {
-    if rec.customer.is_some() || rec.bill {
+    if rec.is_bill() {
         let opts = crate::invoice::InvoiceOpts::of(s, copy(rec));
         return crate::invoice::to_pdf(&crate::invoice::invoice(rec, logo, &opts), &rec.number);
     }
@@ -47,7 +47,7 @@ pub fn file_name(number: &str) -> String {
 // Factura-TF2026-000001.pdf for a full invoice
 pub fn file_name_of(rec: &TicketRecord) -> String {
     let name = file_name(&rec.number);
-    if rec.customer.is_some() || rec.bill {
+    if rec.is_bill() {
         name.replacen("Ticket-", "Factura-", 1)
     } else {
         name
@@ -57,7 +57,7 @@ pub fn file_name_of(rec: &TicketRecord) -> String {
 // Documents\Tiquet\Tickets\Ticket-T2026-000001.pdf, and the invoices in
 // Documents\Tiquet\Facturas
 pub fn save_pdf(rec: &TicketRecord, s: &Settings, logo: Option<&Logo>) -> crate::error::Result<PathBuf> {
-    let dir = crate::backup::documents().join(if rec.customer.is_some() || rec.bill { "Facturas" } else { "Tickets" });
+    let dir = crate::backup::documents().join(if rec.is_bill() { "Facturas" } else { "Tickets" });
     std::fs::create_dir_all(&dir)?;
     Ok(write_free(&dir.join(file_name_of(rec)), &pdf(rec, s, logo))?)
 }
@@ -83,7 +83,7 @@ pub fn write_free(path: &std::path::Path, data: &[u8]) -> std::io::Result<PathBu
 }
 
 pub fn subject(rec: &TicketRecord) -> String {
-    let what = if rec.customer.is_some() || rec.bill { "Factura" } else { "Ticket" };
+    let what = if rec.is_bill() { "Factura" } else { "Ticket" };
     let shop = rec.shop.name.trim();
     if shop.is_empty() {
         format!("{what} {}", rec.number)
@@ -94,7 +94,7 @@ pub fn subject(rec: &TicketRecord) -> String {
 
 pub fn email_body(rec: &TicketRecord) -> String {
     let shop = rec.shop.name.trim();
-    let mut b = format!("Hola:\n\nLe enviamos el {} {} por {} €.", if rec.customer.is_some() { "documento" } else { "ticket" }, rec.number, money::fmt(rec.total_cents));
+    let mut b = format!("Hola:\n\nLe enviamos el {} {} por {} €.", if rec.is_bill() { "documento" } else { "ticket" }, rec.number, money::fmt(rec.total_cents));
     b.push_str("\nLo encontrará adjunto en PDF.\n\nGracias por su visita.");
     if !shop.is_empty() {
         b.push_str(&format!("\n{shop}"));

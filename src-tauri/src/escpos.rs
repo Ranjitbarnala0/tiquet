@@ -53,16 +53,25 @@ fn finish(b: &mut Vec<u8>, o: &Opts) {
 
 pub fn document(lines: &[Line], logo: Option<&Logo>, o: &Opts) -> Vec<u8> {
     let mut b = Vec::with_capacity(4096);
-    init(&mut b, o, o.cp);
-    if o.kick {
-        b.extend_from_slice(&KICK);
-    }
     if o.modern {
         if let Some((bits, row, h)) = render_modern(lines, logo, o.cols) {
+            // Pure raster job: send only reset, optional drawer kick, left-align,
+            // and a 0-dot buffer flush (ESC J 0). Text-mode setup commands such
+            // as ESC 2 directly before GS v 0 cause some 58 mm clones to reject
+            // GS v 0 and print the raw bitmap bytes as gibberish text.
+            b.extend_from_slice(&[ESC, b'@']);
+            if o.kick {
+                b.extend_from_slice(&KICK);
+            }
+            b.extend_from_slice(&[ESC, b'a', 0, ESC, b'J', 0]);
             bands(&mut b, &bits, row, h);
             finish(&mut b, o);
             return b;
         }
+    }
+    init(&mut b, o, o.cp);
+    if o.kick {
+        b.extend_from_slice(&KICK);
     }
     for line in lines {
         match line {
@@ -147,11 +156,14 @@ fn raster(b: &mut Vec<u8>, logo: &Logo, cols: usize) {
     bands(b, &out, out_row, h);
 }
 
-// GS v 0, at most 128 dot rows at a time
+// GS v 0, at most 24 dot rows at a time (1,152 bytes on 58 mm, 1,728 on 80 mm):
+// stays safely below cheap POS-58 receive buffers and avoids yL >= 0x80 signed-byte bugs.
+const MAX_BAND: usize = 24;
+
 fn bands(b: &mut Vec<u8>, bits: &[u8], row: usize, h: usize) {
     let mut y = 0;
     while y < h {
-        let band = (h - y).min(128);
+        let band = (h - y).min(MAX_BAND);
         b.extend_from_slice(&[GS, b'v', b'0', 0, row as u8, (row >> 8) as u8, band as u8, (band >> 8) as u8]);
         b.extend_from_slice(&bits[y * row..(y + band) * row]);
         y += band;
@@ -218,27 +230,28 @@ fn render_modern(_lines: &[Line], _logo: Option<&Logo>, _cols: usize) -> Option<
     None
 }
 
-// Smooth 203-dpi monochrome thermal rendering using Windows GDI TrueType fonts
-// (Segoe UI + Consolas), crisp vector rules, pill badges and a framed TOTAL card.
+// Crisp 203-dpi monochrome thermal rendering using Windows GDI hinted 1-bit
+// TrueType fonts (Segoe UI + Consolas) and thermal-safe geometric dividers and
+// frames that never exceed ~45% black dots per row (preventing voltage-droop
+// dropout and smudging on 58 mm USB thermal print heads).
 #[cfg(windows)]
 fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Vec<u8>, usize, usize)> {
     use std::ffi::c_void;
     use std::ptr::{null, null_mut};
     use windows_sys::Win32::Foundation::RECT;
     use windows_sys::Win32::Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, DeleteDC, DeleteObject,
-        DrawTextW, ExtTextOutW, GetStockObject, LineTo, MoveToEx, RoundRect, SelectObject, SetBkMode,
-        SetTextColor, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLACK_BRUSH, CLIP_DEFAULT_PRECIS,
-        DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER, DT_LEFT, DT_NOPREFIX, DT_RIGHT,
-        DT_SINGLELINE, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, HBITMAP,
-        HFONT, NULL_PEN, OUT_TT_PRECIS, PS_SOLID, TRANSPARENT, WHITE_BRUSH,
+        CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, ExtTextOutW,
+        GdiFlush, SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, DT_CALCRECT, DT_CENTER,
+        DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_WORDBREAK, FF_MODERN, FF_SWISS, FIXED_PITCH,
+        FW_BOLD, FW_SEMIBOLD, HBITMAP, HFONT, NONANTIALIASED_QUALITY, OUT_TT_PRECIS, TRANSPARENT,
     };
 
     let paper = (cols * 12).min(576);
     if paper == 0 || lines.is_empty() {
         return None;
     }
-    let scale = (paper as f32 / 576.0).max(0.84);
+    let scale = if cols <= 32 { 0.86 } else if cols <= 42 { 0.94 } else { 1.0 };
     let sc = |v: f32| (v * scale).round() as i32;
     let wide = |s: &str| -> Vec<u16> { s.encode_utf16().chain(std::iter::once(0)).collect() };
     let wide_raw = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
@@ -258,7 +271,7 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
                 DEFAULT_CHARSET as u32,
                 OUT_TT_PRECIS as u32,
                 CLIP_DEFAULT_PRECIS as u32,
-                ANTIALIASED_QUALITY as u32,
+                NONANTIALIASED_QUALITY as u32,
                 pitch as u32,
                 f.as_ptr(),
             )
@@ -270,22 +283,23 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
         return None;
     }
 
-    let f_big = make_font("Segoe UI", sc(34.0), 0, FW_BOLD, false);
-    let f_tall = make_font("Segoe UI", sc(27.0), 0, FW_BOLD, false);
-    let f_badge = make_font("Segoe UI", sc(20.0), 0, FW_BOLD, false);
-    let f_body = make_font("Segoe UI", sc(21.0), 0, FW_NORMAL, false);
-    let f_semi = make_font("Segoe UI", sc(21.0), 0, FW_SEMIBOLD, false);
-    let f_bold = make_font("Segoe UI", sc(21.0), 0, FW_BOLD, false);
-    let f_tot_lbl = make_font("Segoe UI", sc(26.0), 0, FW_BOLD, false);
-    let f_tot_amt = make_font("Segoe UI", sc(34.0), 0, FW_BOLD, false);
-    let cw = (paper / cols.max(16)).max(8) as i32;
+    let pad_x = if cols <= 32 { 6 } else { 10 };
+    let inner_w = paper as i32 - 2 * pad_x;
+
+    let f_big = make_font("Segoe UI", sc(36.0), 0, FW_BOLD, false);
+    let f_tall = make_font("Segoe UI", sc(28.0), 0, FW_BOLD, false);
+    let f_badge = make_font("Segoe UI", sc(22.0), 0, FW_BOLD, false);
+    let f_body = make_font("Segoe UI", sc(22.0), 0, FW_SEMIBOLD, false);
+    let f_semi = make_font("Segoe UI", sc(22.0), 0, FW_BOLD, false);
+    let f_bold = make_font("Segoe UI", sc(23.0), 0, FW_BOLD, false);
+    let f_tot_lbl = make_font("Segoe UI", sc(27.0), 0, FW_BOLD, false);
+    let f_tot_amt = make_font("Segoe UI", sc(36.0), 0, FW_BOLD, false);
+    let cw = ((inner_w as usize) / cols.max(16)).max(8) as i32;
     let table_x0 = (paper as i32 - cw * cols as i32) / 2;
-    let f_table = make_font("Consolas", cw * 2, cw, FW_NORMAL, true);
-    let f_table_b = make_font("Consolas", cw * 2, cw, FW_BOLD, true);
+    let f_table = make_font("Consolas", (cw * 2 + 1).max(20), cw, FW_BOLD, true);
+    let f_table_b = make_font("Consolas", (cw * 2 + 2).max(21), cw, FW_BOLD, true);
 
     let items = classify(lines, cols);
-    let pad_x = sc(10.0).max(6);
-    let inner_w = paper as i32 - 2 * pad_x;
 
     let measure_text = |font: HFONT, text: &str, width: i32, flags: u32| -> (i32, i32) {
         let mut r = RECT { left: 0, top: 0, right: width.max(1), bottom: 0 };
@@ -311,6 +325,48 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
             SetTextColor(hdc, color);
             DrawTextW(hdc, w.as_ptr(), w.len() as i32, &mut r, flags | DT_NOPREFIX);
         }
+    };
+
+    // Direct 1-bit pixel helpers for thermal-safe dashed dividers & framed cards
+    // (peak black dots per row stays <= 45% so cheap 58 mm print heads burn pitch black).
+    let set_px = |pixels: &mut [u32], x: i32, y: i32| {
+        if x >= 0 && y >= 0 && (x as usize) < paper {
+            if let Some(p) = pixels.get_mut(y as usize * paper + x as usize) {
+                *p = 0x0000_0000;
+            }
+        }
+    };
+    let hline_dash = |pixels: &mut [u32], x0: i32, x1: i32, y: i32, thick: i32, on: i32, off: i32, phase: i32| {
+        let period = (on + off).max(1);
+        for dy in 0..thick {
+            for x in x0..x1 {
+                if ((x - x0 + phase).rem_euclid(period)) < on {
+                    set_px(pixels, x, y + dy);
+                }
+            }
+        }
+    };
+    let vline = |pixels: &mut [u32], x: i32, y0: i32, y1: i32, thick: i32| {
+        for py in y0..y1 {
+            for dx in 0..thick {
+                set_px(pixels, x + dx, py);
+            }
+        }
+    };
+    let dashed_frame = |pixels: &mut [u32], x0: i32, y0: i32, x1: i32, y1: i32, thick: i32, on: i32, off: i32| {
+        // Symmetric chamfered corners with solid side bars and thermal-safe dashed top/bottom rules
+        hline_dash(pixels, x0 + 2, x1 - 2, y0, thick, on, off, 0);
+        hline_dash(pixels, x0 + 2, x1 - 2, y1 - thick, thick, on, off, 0);
+        // Clean 4px right-corner caps so both ends meet the vertical bars neatly
+        let cap_x = (x1 - 2 - on).max(x0 + 2);
+        for dy in 0..thick {
+            for x in cap_x..(x1 - 2) {
+                set_px(pixels, x, y0 + dy);
+                set_px(pixels, x, y1 - thick + dy);
+            }
+        }
+        vline(pixels, x0, y0 + 2, y1 - 2, thick);
+        vline(pixels, x1 - thick, y0 + 2, y1 - 2, thick);
     };
 
     let logo_fit = logo.and_then(|l| l.raster().map(|b| fit(&b, l.w as usize, l.h as usize, paper)));
@@ -365,20 +421,21 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
                     }
                 }
                 Visual::Rule { heavy } => {
-                    let thick = if *heavy { 3 } else { 1 };
                     let pad = sc(7.0);
+                    let h_rule = if *heavy { 5 } else { 2 };
                     if draw {
+                        unsafe { GdiFlush(); }
                         let ry = y + pad;
-                        unsafe {
-                            let pen = CreatePen(PS_SOLID, thick, 0x0000_0000);
-                            let old = SelectObject(hdc, pen);
-                            MoveToEx(hdc, pad_x, ry, null_mut());
-                            LineTo(hdc, paper as i32 - pad_x, ry);
-                            SelectObject(hdc, old);
-                            DeleteObject(pen);
+                        if *heavy {
+                            // Crisp double staggered rule (~40% dot density per row)
+                            hline_dash(pixels, pad_x, paper as i32 - pad_x, ry, 2, 4, 6, 0);
+                            hline_dash(pixels, pad_x, paper as i32 - pad_x, ry + 3, 2, 4, 6, 5);
+                        } else {
+                            // Crisp geometric dotted rule (~37.5% dot density per row)
+                            hline_dash(pixels, pad_x, paper as i32 - pad_x, ry, 2, 3, 5, 0);
                         }
                     }
-                    y += pad * 2 + thick;
+                    y += pad * 2 + h_rule;
                 }
                 Visual::Heading { text, big } => {
                     let f = if *big { f_big } else { f_tall };
@@ -389,38 +446,29 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
                     y += h + sc(4.0);
                 }
                 Visual::Badge(text) => {
-                    let (tw, th) = measure_text(f_badge, text, inner_w - sc(24.0), DT_CENTER | DT_SINGLELINE);
-                    let bw = (tw + sc(28.0)).min(inner_w);
-                    let bh = th + sc(12.0);
-                    let bx = (paper as i32 - bw) / 2;
+                    // Clean bold uppercase banner framed by thermal-safe top/bottom
+                    // accent rules (never a solid black filled box that starves 58 mm heads).
+                    let (_, th) = measure_text(f_badge, text, inner_w - sc(8.0), DT_CENTER | DT_WORDBREAK);
+                    let pad_v = sc(7.0);
+                    let bh = th + pad_v * 2 + 4;
                     if draw {
-                        unsafe {
-                            let old_b = SelectObject(hdc, GetStockObject(BLACK_BRUSH));
-                            let old_p = SelectObject(hdc, GetStockObject(NULL_PEN));
-                            RoundRect(hdc, bx, y, bx + bw, y + bh, sc(14.0), sc(14.0));
-                            SelectObject(hdc, old_b);
-                            SelectObject(hdc, old_p);
-                        }
-                        draw_text(f_badge, text, bx, y + (bh - th) / 2, bw, th, DT_CENTER | DT_SINGLELINE, 0x00FF_FFFF);
+                        unsafe { GdiFlush(); }
+                        hline_dash(pixels, pad_x, paper as i32 - pad_x, y, 2, 4, 5, 0);
+                        draw_text(f_badge, text, pad_x + sc(4.0), y + 2 + pad_v, inner_w - sc(8.0), th, DT_CENTER | DT_WORDBREAK, 0x0000_0000);
+                        unsafe { GdiFlush(); }
+                        hline_dash(pixels, pad_x, paper as i32 - pad_x, y + bh - 2, 2, 4, 5, 0);
                     }
                     y += bh + sc(8.0);
                 }
                 Visual::Pill(text) => {
                     let (tw, th) = measure_text(f_badge, text, inner_w - sc(24.0), DT_CENTER | DT_WORDBREAK);
-                    let bw = (tw + sc(28.0)).min(inner_w);
-                    let bh = th + sc(12.0);
+                    let bw = (tw + sc(30.0)).min(inner_w);
+                    let bh = th + sc(14.0);
                     let bx = (paper as i32 - bw) / 2;
                     if draw {
-                        unsafe {
-                            let pen = CreatePen(PS_SOLID, 2, 0x0000_0000);
-                            let old_p = SelectObject(hdc, pen);
-                            let old_b = SelectObject(hdc, GetStockObject(WHITE_BRUSH));
-                            RoundRect(hdc, bx, y, bx + bw, y + bh, sc(12.0), sc(12.0));
-                            SelectObject(hdc, old_b);
-                            SelectObject(hdc, old_p);
-                            DeleteObject(pen);
-                        }
                         draw_text(f_badge, text, bx + sc(6.0), y + (bh - th) / 2, bw - sc(12.0), th, DT_CENTER | DT_WORDBREAK, 0x0000_0000);
+                        unsafe { GdiFlush(); }
+                        dashed_frame(pixels, bx, y, bx + bw, y + bh, 2, 4, 5);
                     }
                     y += bh + sc(8.0);
                 }
@@ -428,26 +476,19 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
                     let (_, lh) = measure_text(f_tot_lbl, label, inner_w / 2, DT_LEFT | DT_SINGLELINE);
                     let (aw, ah) = measure_text(f_tot_amt, amount, inner_w, DT_RIGHT | DT_SINGLELINE);
                     let th = lh.max(ah);
-                    let bh = th + sc(18.0);
+                    let bh = th + sc(20.0);
                     y += sc(4.0);
                     if draw {
-                        unsafe {
-                            let pen = CreatePen(PS_SOLID, 3, 0x0000_0000);
-                            let old_p = SelectObject(hdc, pen);
-                            let old_b = SelectObject(hdc, GetStockObject(WHITE_BRUSH));
-                            RoundRect(hdc, pad_x, y, paper as i32 - pad_x, y + bh, sc(14.0), sc(14.0));
-                            SelectObject(hdc, old_b);
-                            SelectObject(hdc, old_p);
-                            DeleteObject(pen);
-                        }
-                        let ip = sc(14.0);
+                        let ip = sc(12.0);
                         draw_text(f_tot_lbl, label, pad_x + ip, y + (bh - lh) / 2, inner_w - aw - ip * 2, lh, DT_LEFT | DT_SINGLELINE, 0x0000_0000);
                         draw_text(f_tot_amt, amount, pad_x + ip, y + (bh - ah) / 2, inner_w - ip * 2, ah, DT_RIGHT | DT_SINGLELINE, 0x0000_0000);
+                        unsafe { GdiFlush(); }
+                        dashed_frame(pixels, pad_x, y, paper as i32 - pad_x, y + bh, 3, 4, 5);
                     }
                     y += bh + sc(8.0);
                 }
                 Visual::TableHead(text) => {
-                    let row_h = cw * 2 + sc(4.0);
+                    let row_h = cw * 2 + sc(10.0);
                     if draw {
                         let w = wide_raw(text);
                         let dxs = vec![cw; w.len()];
@@ -455,18 +496,14 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
                             SelectObject(hdc, f_table_b);
                             SetTextColor(hdc, 0x0000_0000);
                             ExtTextOutW(hdc, table_x0, y, 0, null(), w.as_ptr(), w.len() as u32, dxs.as_ptr());
-                            let pen = CreatePen(PS_SOLID, 2, 0x0000_0000);
-                            let old = SelectObject(hdc, pen);
-                            MoveToEx(hdc, pad_x, y + row_h - 1, null_mut());
-                            LineTo(hdc, paper as i32 - pad_x, y + row_h - 1);
-                            SelectObject(hdc, old);
-                            DeleteObject(pen);
+                            GdiFlush();
                         }
+                        hline_dash(pixels, pad_x, paper as i32 - pad_x, y + row_h - 3, 2, 3, 5, 0);
                     }
                     y += row_h + sc(4.0);
                 }
                 Visual::TableRow { text, bold } => {
-                    let row_h = cw * 2 + sc(2.0);
+                    let row_h = cw * 2 + sc(4.0);
                     if draw {
                         let w = wide_raw(text);
                         if !w.is_empty() {
@@ -542,6 +579,7 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
             let old_bmp = SelectObject(hdc, hbmp);
             SetBkMode(hdc, TRANSPARENT as i32);
             run(true, pixels);
+            GdiFlush();
             SelectObject(hdc, old_bmp);
         }
         let out_row = paper.div_ceil(8);
@@ -553,7 +591,7 @@ fn render_modern(lines: &[Line], logo: Option<&Logo>, cols: usize) -> Option<(Ve
                 let g = (c >> 8) & 0xFF;
                 let b = c & 0xFF;
                 let lum = (r * 30 + g * 59 + b * 11) / 100;
-                if lum < 155 {
+                if lum < 180 {
                     mono[py * out_row + px / 8] |= 0x80 >> (px % 8);
                 }
             }
@@ -680,7 +718,7 @@ mod tests {
             assert_eq!(cmds[0], "ESC @");
             assert_eq!(cmds[1], "FS .");
             assert!(cmds.contains(&"ESC p".to_string()));
-            assert!(cmds.contains(&"RASTER 72x128".to_string()) && cmds.contains(&"RASTER 72x2".to_string()));
+            assert!(cmds.contains(&"RASTER 72x24".to_string()) && cmds.contains(&"RASTER 72x10".to_string()));
             assert_eq!(cmds.last().unwrap(), "GS V");
         }
     }
@@ -744,9 +782,17 @@ mod tests {
         let rows = vec!["101".to_string(), "010".to_string(), "111".to_string()];
         let mut b = Vec::new();
         qr(&mut b, &rows, 4, 48);
-        // 3 modules and 8 of white margin, 4 dots each: 44 dot rows of 72 bytes
-        assert_eq!(&b[..8], &[GS, b'v', b'0', 0, 72, 0, 44, 0]);
-        let row = |y: usize| &b[8 + y * 72..8 + (y + 1) * 72];
+        // 3 modules and 8 of white margin, 4 dots each: 44 dot rows of 72 bytes, in 24-row bands (24 + 20)
+        assert_eq!(&b[..8], &[GS, b'v', b'0', 0, 72, 0, 24, 0]);
+        assert_eq!(&b[8 + 24 * 72..8 + 24 * 72 + 8], &[GS, b'v', b'0', 0, 72, 0, 20, 0]);
+        let row = |y: usize| {
+            if y < 24 {
+                &b[8 + y * 72..8 + (y + 1) * 72]
+            } else {
+                let off = 8 + 24 * 72 + 8 + (y - 24) * 72;
+                &b[off..off + 72]
+            }
+        };
         let dots = |y: usize| -> Vec<usize> { (0..576).filter(|x| row(y)[x / 8] & (0x80 >> (x % 8)) != 0).collect() };
         // the white margin above, then the first module row: dots 282..286 and 290..294
         assert!(dots(15).is_empty());
@@ -770,5 +816,78 @@ mod tests {
         // 576 dots wide, 8 black dots in the middle: bytes 35 and 36 hold dots 284..292
         assert_eq!(row.iter().map(|x| x.count_ones()).sum::<u32>(), 8);
         assert_eq!((row[35], row[36]), (0x0F, 0xF0));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn modern_copy_and_original_use_clean_raster_header_and_safe_thermal_density() {
+        let lines = sample_lines(2100);
+        let totals = compute(&lines);
+        let pay = Payment { method: "cash".into(), tendered_cents: 3000, change_cents: 825, machine: None };
+        let shop = ShopInfo {
+            name: "Mi Tienda Móvil".into(),
+            address: "Calle Mayor, 12\n17600 Figueres".into(),
+            phone: "972 000 000".into(),
+            nif: "B12345674".into(),
+            footer: "¡Gracias por su visita!".into(),
+            ..Default::default()
+        };
+        for cols in [32u32, 48] {
+            let s = Settings { columns: cols, ticket_style: "modern".into(), ..Settings::default() };
+            let paper = (cols as usize * 12).min(576);
+            let row_bytes = paper / 8;
+            for copy in [false, true] {
+                let v = TicketView {
+                    shop: &shop,
+                    kind: "sale",
+                    number: "T2026-000042",
+                    issued_at: "2026-10-16T18:15:00",
+                    user_name: "Ana",
+                    lines: &lines,
+                    totals: &totals,
+                    payment: Some(&pay),
+                    refund_of: None,
+                    reason: None,
+                    vat: crate::tickets::VatView::Full,
+                    note: None,
+                    copy,
+                    voided: false,
+                    customer: None,
+                    training: false,
+                    qr: None,
+                };
+                let preview = layout::ticket(&v, &s, false);
+                let raw = document(&preview, None, &Opts::new(&s, !copy));
+                let (printed, cmds) = decode(&raw, CodePage::Cp858);
+                assert!(printed.is_empty(), "modern raster should emit no raw text lines");
+                assert_eq!(cmds[0], "ESC @");
+                // Never emit text-mode setup (FS ., ESC R, ESC t, ESC M, ESC 2) before GS v 0
+                assert!(!cmds.iter().any(|c| matches!(c.as_str(), "FS ." | "ESC R" | "ESC t" | "ESC M" | "ESC 2")), "{cmds:?}");
+                assert!(cmds.contains(&"ESC J".to_string()));
+                assert_eq!(cmds.contains(&"ESC p".to_string()), !copy);
+                assert_eq!(cmds.last().unwrap(), "GS V");
+                // Every raster band height must stay <= MAX_BAND (24) so POS-58 buffers never overflow
+                let raster_cmds: Vec<&str> = cmds.iter().map(String::as_str).filter(|c| c.starts_with("RASTER ")).collect();
+                assert!(!raster_cmds.is_empty());
+                for rc in raster_cmds {
+                    let dim = rc.strip_prefix("RASTER ").unwrap();
+                    let (w, h) = dim.split_once('x').unwrap();
+                    assert_eq!(w.parse::<usize>().unwrap(), row_bytes);
+                    assert!(h.parse::<usize>().unwrap() <= MAX_BAND, "{rc}");
+                }
+                // Thermal safety: no horizontal pixel row may exceed 50% black dot density
+                let (bits, row, h) = render_modern(&preview, None, cols as usize).unwrap();
+                let max_dots = (0..h)
+                    .map(|y| bits[y * row..(y + 1) * row].iter().map(|b| b.count_ones()).sum::<u32>())
+                    .max()
+                    .unwrap_or(0);
+                assert!(max_dots as usize <= paper / 2, "cols={cols} copy={copy} max_dots={max_dots}/{paper}");
+                if let Some(dir) = std::env::var_os("TIQUET_DUMP_MODERN") {
+                    let mut pbm = format!("P4\n{} {}\n", row * 8, h).into_bytes();
+                    pbm.extend_from_slice(&bits);
+                    let _ = std::fs::write(std::path::Path::new(&dir).join(format!("final_{cols}_copy_{copy}.pbm")), pbm);
+                }
+            }
+        }
     }
 }

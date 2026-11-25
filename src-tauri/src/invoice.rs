@@ -430,16 +430,18 @@ fn head(d: &mut Doc, y: f32, rec: &TicketRecord, logo: Option<&Logo>, copy: bool
     let shop = &rec.shop;
     let (name, legal) = names(shop);
     let full = rec.customer.as_ref().is_some_and(Customer::is_fiscal);
+    let show_legal = (full || shop.show_legal.unwrap_or(true)) && !legal.is_empty();
+    let legal_bottom = shop.legal_bottom.unwrap_or(false);
     l = d.para(LEFT, l, col, big, Align::Left, name) + 0.5;
     if (full || shop.show_tagline.unwrap_or(true)) && !shop.tagline.trim().is_empty() {
         l = d.para(LEFT, l, col, font(9.5, true), Align::Left, shop.tagline.trim());
     }
-    if (full || shop.show_legal.unwrap_or(true)) && !legal.is_empty() {
+    if show_legal && !legal_bottom {
         l = d.para(LEFT, l, col, small, Align::Left, legal);
     }
     // a full invoice always names the shop's NIF and address, whatever the
     // receipts show
-    if !shop.nif.trim().is_empty() {
+    if !legal_bottom && !shop.nif.trim().is_empty() {
         l = d.para(LEFT, l, col, small, Align::Left, &format!("NIF: {}", shop.nif.trim()));
     }
     for a in shop.address.lines().map(str::trim).filter(|a| !a.is_empty()) {
@@ -453,6 +455,18 @@ fn head(d: &mut Doc, y: f32, rec: &TicketRecord, logo: Option<&Logo>, copy: bool
     }
     if (full || shop.show_website.unwrap_or(true)) && !shop.website.trim().is_empty() {
         l = d.para(LEFT, l, col, small, Align::Left, shop.website.trim());
+    }
+    if legal_bottom {
+        if show_legal && !shop.nif.trim().is_empty() {
+            l = d.para(LEFT, l, col, small, Align::Left, &format!("{legal} · NIF: {}", shop.nif.trim()));
+        } else if show_legal {
+            l = d.para(LEFT, l, col, small, Align::Left, legal);
+        } else if !shop.nif.trim().is_empty() {
+            l = d.para(LEFT, l, col, small, Align::Left, &format!("NIF: {}", shop.nif.trim()));
+        }
+    }
+    for note in shop.header_note.lines().map(str::trim).filter(|n| !n.is_empty()) {
+        l = d.para(LEFT, l, col, small, Align::Left, note);
     }
 
     // the title as big as fits beside COPIA, its capitals level with the shop's
@@ -769,7 +783,7 @@ pub fn invoice(rec: &TicketRecord, logo: Option<&Logo>, opts: &InvoiceOpts) -> V
     // A bill says how it shows its VAT. One from before 1.13 does not: an
     // invoice with a customer always stated the VAT of each rate, a simple
     // one when Ajustes asked for it.
-    let view = rec.shop.vat.unwrap_or(if opts.vat_table || rec.customer.is_some() { VatView::Full } else { VatView::Note });
+    let view = rec.shop.vat.unwrap_or(if opts.vat_table || rec.customer.as_ref().is_some_and(Customer::is_fiscal) { VatView::Full } else { VatView::Note });
     let cols = cols(view);
     let mut banner = Vec::new();
     if rec.training {

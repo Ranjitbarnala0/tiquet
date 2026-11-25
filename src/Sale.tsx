@@ -1646,7 +1646,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
             <div className="till-client-row">
               <button
                 type="button"
-                className={`client-chip${hasCustomer || billA4 ? ' on' : ''}`}
+                className={`client-chip${hasCustomer || billA4 || wantBill ? ' on' : ''}`}
                 onMouseDown={keep}
                 onClick={() => openPay(method, true)}
                 disabled={busy}
@@ -1656,11 +1656,13 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                 <span>
                   {hasCustomer
                     ? [customer.name.trim(), customer.nif.trim() || customer.phone?.trim()].filter(Boolean).join(' · ')
-                    : tr('Cliente / Factura (opcional)', 'Customer / Invoice (optional)')}
+                    : wantBill || billA4
+                      ? tr('Factura (empresa fiscal)', 'Invoice (billing company)')
+                      : tr('Cliente / Factura (opcional)', 'Customer / Invoice (optional)')}
                   {billA4 && ' · A4'}
                 </span>
               </button>
-              {(hasCustomer || billA4) && (
+              {(hasCustomer || billA4 || wantBill) && (
                 <button
                   type="button"
                   className="icon-btn sm"
@@ -1875,7 +1877,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
                           <div className="bill-known" role="listbox">
                             {known.map((k) => (
                               <button
-                                key={`${k.nif}-${k.name}`}
+                                key={`${k.nif}-${k.name}-${k.phone ?? ''}`}
                                 type="button"
                                 role="option"
                                 aria-selected={false}
