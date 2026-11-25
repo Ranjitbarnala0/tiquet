@@ -246,9 +246,10 @@
   flex: 1;
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(145px, 1fr);
   gap: 10px;
   min-height: 0;
+  overflow-x: auto;
   user-select: none;
 }
 
@@ -267,28 +268,59 @@
   min-height: 0;
   overflow: hidden;
   border: 1px solid var(--line);
+  border-top: 3px solid var(--line-2);
   border-radius: 16px;
   background: var(--panel);
+  box-shadow: var(--shadow-1);
+}
+
+.board-col[data-kind='cash'] {
+  border-top-color: var(--cash);
+}
+
+.board-col[data-kind='card'] {
+  border-top-color: var(--card);
+}
+
+.board-col[data-kind='bizum'] {
+  border-top-color: #00a3b4;
+}
+
+.board-col[data-kind='recharge'] {
+  border-top-color: var(--recharge);
+}
+
+.board-col[data-kind='expense'] {
+  border-top-color: var(--expense);
 }
 
 .board-col h3 {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 10px 11px;
   border-bottom: 1px solid var(--line-soft);
-  font: 680 14px var(--display);
+  font: 680 13.5px var(--display);
+}
+
+.board-col h3 span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .board-col h3 small {
   margin-left: auto;
-  padding: 1px 7px;
+  flex: none;
+  padding: 2px 7px;
   border-radius: 9px;
   background: var(--hover);
-  color: var(--muted);
-  font: 600 12px var(--font);
+  color: var(--ink-2);
+  font: 650 11.5px var(--font);
+  font-variant-numeric: tabular-nums;
 }
 
 .board-col ul {
@@ -405,9 +437,10 @@
   flex: none;
   display: grid;
   grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  grid-auto-columns: minmax(98px, 1fr);
   gap: 2px;
   width: 100%;
+  overflow-x: auto;
   padding: 6px;
   border: 1px solid var(--line);
   border-radius: 18px;
@@ -767,6 +800,53 @@
   transform: translateX(16px);
 }
 
+.till-client-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.client-chip {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 36px;
+  padding: 0 12px;
+  border: 1px dashed var(--line-2);
+  border-radius: 11px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color 0.14s,
+    background 0.14s,
+    color 0.14s;
+}
+
+.client-chip:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-softer);
+}
+
+.client-chip.on {
+  border-style: solid;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.client-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tender {
   display: flex;
   align-items: center;
@@ -845,13 +925,14 @@
   letter-spacing: -0.01em;
   cursor: pointer;
   transition:
-    filter 0.12s,
-    transform 0.06s,
-    box-shadow 0.12s;
+    filter 0.14s,
+    transform 0.08s,
+    box-shadow 0.14s;
 }
 
 .pay-btn:hover:not(:disabled) {
-  filter: brightness(1.07);
+  filter: brightness(1.06);
+  transform: translateY(-1px);
 }
 
 .pay-btn:active:not(:disabled) {
@@ -871,9 +952,9 @@
   right: 8px;
   padding: 2px 5px;
   border: 0;
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.22);
   box-shadow: none;
-  color: rgba(255, 255, 255, 0.92);
+  color: rgba(255, 255, 255, 0.94);
   font-size: 10px;
 }
 
@@ -883,18 +964,24 @@
 }
 
 .pay-cash {
-  background: var(--cash);
-  box-shadow: 0 8px 20px rgba(12, 154, 99, 0.28);
+  background: linear-gradient(180deg, #12aa6e 0%, var(--cash) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 8px 20px rgba(12, 154, 99, 0.28);
 }
 
 .pay-card {
-  background: var(--card);
-  box-shadow: 0 8px 20px rgba(46, 91, 255, 0.28);
+  background: linear-gradient(180deg, #3c68ff 0%, var(--card) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 8px 20px rgba(46, 91, 255, 0.28);
 }
 
 .pay-bizum {
-  background: #00a3b4;
-  box-shadow: 0 8px 20px rgba(0, 163, 180, 0.26);
+  background: linear-gradient(180deg, #06b3c6 0%, #00a3b4 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 8px 20px rgba(0, 163, 180, 0.26);
 }
 
 .pay-grid.three .pay-btn {

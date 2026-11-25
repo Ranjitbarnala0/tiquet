@@ -1,10 +1,19 @@
-Download `Tiquet_1.13.4_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.14.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.13.4: **a bill with or without IVA, the A4 printer found by itself, and the whole till audited.**
+New in 1.14.0: **separate card machines on Venta, modern receipt typography, optional customer info and a separate billing company for invoices.**
+
+- **Each card terminal on its own in Venta.** When the shop has more than one card machine, **Venta** shows each terminal in its own column and in its own total at the bottom, with each column's € total right in the header. **Ajustes › Venta** and **Ajustes › Máquinas** let you switch back to one combined **Tarjeta** stack anytime.
+- **Crisp modern ticket design on the same roll.** USB and network receipt printers, Windows print drivers, PDFs and the on-screen preview now render smooth typography, solid rules, rounded badges and a framed **TOTAL** box at native 203 dpi on the same 58 mm or 80 mm paper (serial printers stay in text mode; **Ajustes › Ticket › Estilo de impresión** keeps the classic mode available).
+- **Unified, zero-friction customer & billing details.** **Venta** now has a one-tap **Cliente / Factura (opcional)** chip right over the pay buttons (and in the charge window), with saved customer lookup and optional **Nombre**, **Teléfono**, **Email**, **Dirección** and **NIF**. Below the Spanish simplified limit (3.000 € retail / 400 € with a repair), optional customer fields stay in the normal ticket series (`T`) without forcing a NIF; entering a NIF (or passing the limit) issues a full invoice (`TF`) and optionally prints on A4. **Facturas** also accepts optional phone, email and non-NIF customer details under the limit.
+- **Separate company details on invoices.** **Ajustes › Comercio** adds an optional **Datos distintos solo para facturas** section (name, legal name, NIF/CIF, address, phone, email) plus shop email. Counter tickets and repair receipts keep the storefront shop details, while bills and invoices use the billing company when filled.
+- **Repair intake upgrades.** Repairs gain optional **DNI / NIE**, **Fecha aprox. de entrega**, **Contraseña / PIN del equipo** (always on the internal workshop tag, and optionally on the customer resguardo via **Ajustes › Reparaciones**), plus **Precios con IVA incluido** on priced receipts.
+- **Refreshed dashboard & buttons.** Tactile, elevated pay buttons, color-accented columns with totals, and cleaner responsiveness.
+
+Also in 1.13.4: **a bill with or without IVA, the A4 printer found by itself, and the whole till audited.**
 
 - **A bill with IVA, or with nothing about it.** Each bill has a box, **Mostrar el IVA en la factura**. Unticked, the bill carries the items, their prices as typed and the total, and does not say "IVA incluido" or anything else about IVA, on A4 and on the roll. Ticked, it shows the base, the rate and the IVA of each rate, and prices can then be typed without IVA. A bill with no customer details starts unticked (**Ajustes › Facturas** can change that); one with name and NIF starts ticked, because a business needs its IVA, and the box can be unticked there too.
 - **The same choice for tickets.** **Ajustes › Ticket › IVA en el ticket**: the breakdown, only the words "IVA incluido", or nothing.

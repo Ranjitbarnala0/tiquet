@@ -540,6 +540,23 @@ CREATE TRIGGER tickets_frozen BEFORE UPDATE OF
 BEGIN SELECT RAISE(ABORT, 'issued tickets cannot be modified'); END;
 "#;
 
+// 1.14: optional phone/email on tickets, and optional DNI/NIE, passcode and
+// approximate delivery date on repairs.
+const SCHEMA_V15: &str = r#"
+ALTER TABLE tickets ADD COLUMN customer_phone TEXT;
+ALTER TABLE tickets ADD COLUMN customer_email TEXT;
+ALTER TABLE repairs ADD COLUMN customer_dni TEXT NOT NULL DEFAULT '';
+ALTER TABLE repairs ADD COLUMN passcode TEXT NOT NULL DEFAULT '';
+ALTER TABLE repairs ADD COLUMN approx_delivery TEXT NOT NULL DEFAULT '';
+
+DROP TRIGGER tickets_frozen;
+CREATE TRIGGER tickets_frozen BEFORE UPDATE OF
+  id, number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
+  shop, kind, refund_of, refund_reason, client_id,
+  customer_name, customer_nif, customer_address, customer_phone, customer_email, training, bill, replaces, note ON tickets
+BEGIN SELECT RAISE(ABORT, 'issued tickets cannot be modified'); END;
+"#;
+
 enum Step {
     Sql(&'static str),
     Code(fn(&Connection) -> Result<()>),
@@ -561,6 +578,7 @@ const MIGRATIONS: &[&[Step]] = &[
     &[Step::Sql(SCHEMA_V12)],
     &[Step::Sql(SCHEMA_V13)],
     &[Step::Sql(SCHEMA_V14)],
+    &[Step::Sql(SCHEMA_V15)],
 ];
 
 pub const VERSION: i64 = MIGRATIONS.len() as i64;

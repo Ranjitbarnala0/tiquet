@@ -51,7 +51,14 @@ export interface Settings {
   legalName: string;
   shopAddress: string;
   shopPhone: string;
+  shopEmail?: string;
   shopNif: string;
+  billCompanyName?: string;
+  billLegalName?: string;
+  billNif?: string;
+  billAddress?: string;
+  billPhone?: string;
+  billEmail?: string;
   footer: string;
   ticketPrefix: string;
   defaultVatBp: number;
@@ -124,14 +131,19 @@ export interface Settings {
   invoiceImei: boolean;
   // prices on bills typed without VAT
   invoiceNetPrices: boolean;
-  // what a repair cannot be taken in without: name, phone, device, fault
+  // what a repair cannot be taken in without: name, phone, dni, device, fault
   repairRequired: string;
+  repairPasscodeOnReceipt?: boolean;
+  splitCardMachines?: boolean;
+  ticketStyle?: 'modern' | 'classic';
 }
 
 export interface Customer {
   name: string;
   nif: string;
   address: string;
+  phone?: string;
+  email?: string;
 }
 
 export interface CashSession {
@@ -348,10 +360,13 @@ export type RepairStatus = 'received' | 'in_progress' | 'ready' | 'not_repaired'
 export interface RepairData {
   customerName: string;
   customerPhone: string;
+  customerDni?: string;
   brand: string;
   model: string;
   colour: string;
   imei: string;
+  passcode?: string;
+  approxDelivery?: string;
   fault: string;
   notes: string;
   estimateCents: number | null;
@@ -506,6 +521,15 @@ export interface MachineSum {
   salesCents: number;
   rechargeCents: number;
   count: number;
+}
+
+export interface KnownCustomer {
+  name: string;
+  nif: string;
+  address: string;
+  phone?: string;
+  email?: string;
+  last: string;
 }
 
 export interface DayList {

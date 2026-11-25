@@ -80,6 +80,8 @@ pub struct Page {
     pub lines: Vec<Line>,
     pub logo: Option<Logo>,
     pub cols: usize,
+    #[serde(default)]
+    pub modern: bool,
 }
 
 impl Job {
@@ -95,7 +97,7 @@ impl Job {
 
     pub fn push(&mut self, lines: &[Line], logo: Option<&Logo>, o: &Opts) {
         self.raw.extend(escpos::document(lines, logo, o));
-        self.pages.push(Page { lines: lines.to_vec(), logo: logo.cloned(), cols: o.cols });
+        self.pages.push(Page { lines: lines.to_vec(), logo: logo.cloned(), cols: o.cols, modern: o.modern });
     }
 
     pub fn append(&mut self, other: Job) {
@@ -1176,15 +1178,19 @@ mod win {
                         break;
                     }
                     SetBkMode(hdc, TRANSPARENT as i32);
-                    for line in &p.lines {
-                        let fine = match line {
-                            Line::Text { text, bold, size } => c.text(text, *bold, *size),
-                            Line::Logo => p.logo.as_ref().map_or(true, |l| c.logo(l)),
-                            Line::Qr { rows, module } => c.qr(rows, *module),
-                        };
-                        if !fine {
-                            ok = false;
-                            break;
+                    if p.modern {
+                        ok = c.draw_modern(&p.lines, cols as usize, p.logo.as_ref());
+                    } else {
+                        for line in &p.lines {
+                            let fine = match line {
+                                Line::Text { text, bold, size } => c.text(text, *bold, *size),
+                                Line::Logo => p.logo.as_ref().map_or(true, |l| c.logo(l)),
+                                Line::Qr { rows, module } => c.qr(rows, *module),
+                            };
+                            if !fine {
+                                ok = false;
+                                break;
+                            }
                         }
                     }
                     c.free();
@@ -1284,6 +1290,271 @@ mod win {
                     DeleteObject(f);
                 }
             }
+        }
+
+        fn sans_font(&mut self, tag: u8, h: i32, weight: u32) -> windows_sys::Win32::Graphics::Gdi::HFONT {
+            use windows_sys::Win32::Graphics::Gdi::{CreateFontW, ANTIALIASED_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, FF_SWISS, OUT_TT_PRECIS};
+
+            let key = (true, 0x80 | tag);
+            if let Some((_, f)) = self.fonts.iter().find(|(k, _)| *k == key) {
+                return *f;
+            }
+            let face = wide("Segoe UI");
+            let f = unsafe {
+                CreateFontW(
+                    -h,
+                    0,
+                    0,
+                    0,
+                    weight as i32,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET as u32,
+                    OUT_TT_PRECIS as u32,
+                    CLIP_DEFAULT_PRECIS as u32,
+                    ANTIALIASED_QUALITY as u32,
+                    (DEFAULT_PITCH | FF_SWISS) as u32,
+                    face.as_ptr(),
+                )
+            };
+            self.fonts.push((key, f));
+            f
+        }
+
+        fn measure_dt(&self, font: windows_sys::Win32::Graphics::Gdi::HFONT, text: &str, width: i32, flags: u32) -> (i32, i32) {
+            use windows_sys::Win32::Foundation::RECT;
+            use windows_sys::Win32::Graphics::Gdi::{DrawTextW, SelectObject, DT_CALCRECT, DT_NOPREFIX};
+
+            let w: Vec<u16> = text.encode_utf16().collect();
+            if w.is_empty() {
+                return (0, 0);
+            }
+            let mut r = RECT { left: 0, top: 0, right: width.max(1), bottom: 0 };
+            unsafe {
+                SelectObject(self.hdc, font);
+                DrawTextW(self.hdc, w.as_ptr(), w.len() as i32, &mut r, flags | DT_CALCRECT | DT_NOPREFIX);
+            }
+            (r.right - r.left, r.bottom - r.top)
+        }
+
+        fn draw_dt(&self, font: windows_sys::Win32::Graphics::Gdi::HFONT, text: &str, box_rect: [i32; 4], flags: u32, color: u32) {
+            use windows_sys::Win32::Foundation::RECT;
+            use windows_sys::Win32::Graphics::Gdi::{DrawTextW, SelectObject, SetTextColor, DT_NOPREFIX};
+
+            let [x, y, width, height] = box_rect;
+            let w: Vec<u16> = text.encode_utf16().collect();
+            if w.is_empty() {
+                return;
+            }
+            let mut r = RECT { left: x, top: y, right: x + width.max(1), bottom: y + height.max(1) };
+            unsafe {
+                SelectObject(self.hdc, font);
+                SetTextColor(self.hdc, color);
+                DrawTextW(self.hdc, w.as_ptr(), w.len() as i32, &mut r, flags | DT_NOPREFIX);
+            }
+        }
+
+        fn draw_modern(&mut self, lines: &[Line], cols: usize, logo: Option<&Logo>) -> bool {
+            use crate::layout::{classify, Visual};
+            use windows_sys::Win32::Graphics::Gdi::{
+                CreatePen, DeleteObject, ExtTextOutW, GetStockObject, LineTo, MoveToEx, RoundRect, SelectObject, SetTextColor, BLACK_BRUSH, DT_CENTER,
+                DT_LEFT, DT_RIGHT, DT_SINGLELINE, DT_WORDBREAK, FW_BOLD, FW_NORMAL, FW_SEMIBOLD, NULL_PEN, PS_SOLID, WHITE_BRUSH,
+            };
+
+            let dpi = self.dpi;
+            let sc = |v: f32| -> i32 { ((v * dpi as f32 / 203.0).round() as i32).max(1) };
+            let f_big = self.sans_font(1, sc(32.0), FW_BOLD);
+            let f_tall = self.sans_font(2, sc(26.0), FW_BOLD);
+            let f_badge = self.sans_font(3, sc(19.0), FW_BOLD);
+            let f_body = self.sans_font(4, sc(20.0), FW_NORMAL);
+            let f_semi = self.sans_font(5, sc(20.0), FW_SEMIBOLD);
+            let f_bold = self.sans_font(6, sc(20.0), FW_BOLD);
+            let f_tot_l = self.sans_font(7, sc(24.0), FW_BOLD);
+            let f_tot_a = self.sans_font(8, sc(32.0), FW_BOLD);
+            let f_tbl = self.font(false, Size::Normal);
+            let f_tbl_b = self.font(true, Size::Normal);
+
+            for item in classify(lines, cols) {
+                match item {
+                    Visual::Blank => {
+                        let h = sc(8.0);
+                        if !self.room(h) {
+                            return false;
+                        }
+                        self.y += h;
+                    }
+                    Visual::Logo => {
+                        if let Some(l) = logo {
+                            if !self.logo(l) {
+                                return false;
+                            }
+                            self.y += sc(6.0);
+                        }
+                    }
+                    Visual::Qr { rows, module } => {
+                        if !self.qr(rows, module) {
+                            return false;
+                        }
+                    }
+                    Visual::Rule { heavy } => {
+                        let thick = if heavy { sc(3.0) } else { sc(1.0) };
+                        let pad = sc(7.0);
+                        let adv = pad * 2 + thick;
+                        if !self.room(adv) {
+                            return false;
+                        }
+                        let ry = self.y + pad;
+                        unsafe {
+                            let pen = CreatePen(PS_SOLID, thick, 0x0000_0000);
+                            let old = SelectObject(self.hdc, pen);
+                            MoveToEx(self.hdc, self.x0, ry, null_mut());
+                            LineTo(self.hdc, self.x0 + self.width, ry);
+                            SelectObject(self.hdc, old);
+                            DeleteObject(pen);
+                        }
+                        self.y += adv;
+                    }
+                    Visual::Heading { text, big } => {
+                        let f = if big { f_big } else { f_tall };
+                        let (_, h) = self.measure_dt(f, text, self.width, DT_CENTER | DT_WORDBREAK);
+                        let adv = h + sc(4.0);
+                        if !self.room(adv) {
+                            return false;
+                        }
+                        self.draw_dt(f, text, [self.x0, self.y, self.width, h], DT_CENTER | DT_WORDBREAK, 0x0000_0000);
+                        self.y += adv;
+                    }
+                    Visual::Badge(text) => {
+                        let (tw, th) = self.measure_dt(f_badge, text, self.width - sc(20.0), DT_CENTER | DT_SINGLELINE);
+                        let bw = (tw + sc(26.0)).min(self.width);
+                        let bh = th + sc(12.0);
+                        let bx = self.x0 + (self.width - bw) / 2;
+                        if !self.room(bh + sc(8.0)) {
+                            return false;
+                        }
+                        unsafe {
+                            let ob = SelectObject(self.hdc, GetStockObject(BLACK_BRUSH));
+                            let op = SelectObject(self.hdc, GetStockObject(NULL_PEN));
+                            RoundRect(self.hdc, bx, self.y, bx + bw, self.y + bh, sc(12.0), sc(12.0));
+                            SelectObject(self.hdc, ob);
+                            SelectObject(self.hdc, op);
+                        }
+                        self.draw_dt(f_badge, text, [bx, self.y + (bh - th) / 2, bw, th], DT_CENTER | DT_SINGLELINE, 0x00FF_FFFF);
+                        self.y += bh + sc(8.0);
+                    }
+                    Visual::Pill(text) => {
+                        let (tw, th) = self.measure_dt(f_badge, text, self.width - sc(24.0), DT_CENTER | DT_WORDBREAK);
+                        let bw = (tw + sc(26.0)).min(self.width);
+                        let bh = th + sc(12.0);
+                        let bx = self.x0 + (self.width - bw) / 2;
+                        if !self.room(bh + sc(8.0)) {
+                            return false;
+                        }
+                        unsafe {
+                            let pen = CreatePen(PS_SOLID, sc(2.0), 0x0000_0000);
+                            let op = SelectObject(self.hdc, pen);
+                            let ob = SelectObject(self.hdc, GetStockObject(WHITE_BRUSH));
+                            RoundRect(self.hdc, bx, self.y, bx + bw, self.y + bh, sc(10.0), sc(10.0));
+                            SelectObject(self.hdc, ob);
+                            SelectObject(self.hdc, op);
+                            DeleteObject(pen);
+                        }
+                        self.draw_dt(f_badge, text, [bx + sc(6.0), self.y + (bh - th) / 2, bw - sc(12.0), th], DT_CENTER | DT_WORDBREAK, 0x0000_0000);
+                        self.y += bh + sc(8.0);
+                    }
+                    Visual::Total { label, amount } => {
+                        let (_, lh) = self.measure_dt(f_tot_l, label, self.width / 2, DT_LEFT | DT_SINGLELINE);
+                        let (aw, ah) = self.measure_dt(f_tot_a, amount, self.width, DT_RIGHT | DT_SINGLELINE);
+                        let bh = lh.max(ah) + sc(18.0);
+                        if !self.room(bh + sc(12.0)) {
+                            return false;
+                        }
+                        self.y += sc(4.0);
+                        unsafe {
+                            let pen = CreatePen(PS_SOLID, sc(3.0), 0x0000_0000);
+                            let op = SelectObject(self.hdc, pen);
+                            let ob = SelectObject(self.hdc, GetStockObject(WHITE_BRUSH));
+                            RoundRect(self.hdc, self.x0, self.y, self.x0 + self.width, self.y + bh, sc(12.0), sc(12.0));
+                            SelectObject(self.hdc, ob);
+                            SelectObject(self.hdc, op);
+                            DeleteObject(pen);
+                        }
+                        let ip = sc(12.0);
+                        self.draw_dt(f_tot_l, label, [self.x0 + ip, self.y + (bh - lh) / 2, self.width - aw - ip * 2, lh], DT_LEFT | DT_SINGLELINE, 0x0000_0000);
+                        self.draw_dt(f_tot_a, amount, [self.x0 + ip, self.y + (bh - ah) / 2, self.width - ip * 2, ah], DT_RIGHT | DT_SINGLELINE, 0x0000_0000);
+                        self.y += bh + sc(8.0);
+                    }
+                    Visual::TableHead(text) => {
+                        let row_h = self.lh + sc(4.0);
+                        if !self.room(row_h + sc(4.0)) {
+                            return false;
+                        }
+                        let w: Vec<u16> = text.trim_end().encode_utf16().collect();
+                        let dxs = vec![self.cw; w.len()];
+                        unsafe {
+                            SelectObject(self.hdc, f_tbl_b);
+                            SetTextColor(self.hdc, 0x0000_0000);
+                            ExtTextOutW(self.hdc, self.x0, self.y, 0, null(), w.as_ptr(), w.len() as u32, dxs.as_ptr());
+                            let pen = CreatePen(PS_SOLID, sc(2.0), 0x0000_0000);
+                            let old = SelectObject(self.hdc, pen);
+                            MoveToEx(self.hdc, self.x0, self.y + row_h - 1, null_mut());
+                            LineTo(self.hdc, self.x0 + self.width, self.y + row_h - 1);
+                            SelectObject(self.hdc, old);
+                            DeleteObject(pen);
+                        }
+                        self.y += row_h + sc(4.0);
+                    }
+                    Visual::TableRow { text, bold } => {
+                        let row_h = self.lh;
+                        if !self.room(row_h) {
+                            return false;
+                        }
+                        let w: Vec<u16> = text.trim_end().encode_utf16().collect();
+                        if !w.is_empty() {
+                            let dxs = vec![self.cw; w.len()];
+                            unsafe {
+                                SelectObject(self.hdc, if bold { f_tbl_b } else { f_tbl });
+                                SetTextColor(self.hdc, 0x0000_0000);
+                                ExtTextOutW(self.hdc, self.x0, self.y, 0, null(), w.as_ptr(), w.len() as u32, dxs.as_ptr());
+                            }
+                        }
+                        self.y += row_h;
+                    }
+                    Visual::Pair { left, right, bold } => {
+                        let f = if bold { f_bold } else { f_body };
+                        let (rw, rh) = self.measure_dt(f_semi, right, self.width, DT_RIGHT | DT_SINGLELINE);
+                        let lw = (self.width - rw - sc(10.0)).max(self.width / 3);
+                        let (_, lh) = self.measure_dt(f, left, lw, DT_LEFT | DT_WORDBREAK);
+                        let h = lh.max(rh);
+                        if !self.room(h + sc(4.0)) {
+                            return false;
+                        }
+                        self.draw_dt(f, left, [self.x0, self.y, lw, lh], DT_LEFT | DT_WORDBREAK, 0x0000_0000);
+                        self.draw_dt(if bold { f_bold } else { f_semi }, right, [self.x0, self.y, self.width, rh], DT_RIGHT | DT_SINGLELINE, 0x0000_0000);
+                        self.y += h + sc(4.0);
+                    }
+                    Visual::Center { text, bold } => {
+                        let f = if bold { f_bold } else { f_body };
+                        let (_, h) = self.measure_dt(f, text, self.width, DT_CENTER | DT_WORDBREAK);
+                        if !self.room(h + sc(3.0)) {
+                            return false;
+                        }
+                        self.draw_dt(f, text, [self.x0, self.y, self.width, h], DT_CENTER | DT_WORDBREAK, 0x0000_0000);
+                        self.y += h + sc(3.0);
+                    }
+                    Visual::Text { text, bold } => {
+                        let f = if bold { f_bold } else { f_body };
+                        let (_, h) = self.measure_dt(f, text, self.width, DT_LEFT | DT_WORDBREAK);
+                        if !self.room(h + sc(3.0)) {
+                            return false;
+                        }
+                        self.draw_dt(f, text, [self.x0, self.y, self.width, h], DT_LEFT | DT_WORDBREAK, 0x0000_0000);
+                        self.y += h + sc(3.0);
+                    }
+                }
+            }
+            true
         }
 
         fn text(&mut self, text: &str, bold: bool, size: Size) -> bool {
@@ -1503,7 +1774,7 @@ mod tests {
             Line::Qr { rows: (0..21).map(|r| (0..21).map(|c| if (r * c + r) % 3 == 0 { '1' } else { '0' }).collect()).collect(), module: 6 },
             text("        ¡Gracias por su visita! €", false, Size::Normal),
         ];
-        win::draw(&writer.name, "prueba", &[Page { lines, logo: None, cols: 48 }], Some(&out)).unwrap();
+        win::draw(&writer.name, "prueba", &[Page { lines, logo: None, cols: 48, modern: true }], Some(&out)).unwrap();
         // the spooler writes the file a moment after the job ends
         for _ in 0..100 {
             if out.metadata().map(|m| m.len() > 0).unwrap_or(false) {

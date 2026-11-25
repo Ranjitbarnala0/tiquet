@@ -203,7 +203,7 @@ export function RefundModal({ ticket, settings, logo, onClose, onDone, onSetupPr
         </div>
         <div className="refund-paper">
           {preview ? (
-            <Paper lines={preview.lines} logo={logo} cols={settings.columns} />
+            <Paper lines={preview.lines} logo={logo} cols={settings.columns} modern={settings.ticketStyle !== 'classic'} />
           ) : (
             <p className="muted refund-hint">{tr('Elige qué se devuelve para ver el ticket.', 'Pick what is returned to see the ticket.')}</p>
           )}

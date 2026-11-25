@@ -4,7 +4,7 @@
 // (Courier is one of the fonts every PDF reader has).
 
 use crate::codepage::{byte, CodePage};
-use crate::layout::{Line, Size};
+use crate::layout::{classify, Line, Size, Visual};
 use crate::printer::Page;
 
 const MM: f64 = 72.0 / 25.4;
@@ -19,7 +19,63 @@ fn cell(cols: usize) -> (f64, f64) {
     (cw, cw * 2.25)
 }
 
+fn wrap_modern(text: &str, max_w: f64, fs: f64) -> Vec<String> {
+    let approx_chars = (max_w / (fs * 0.52)).floor().max(8.0) as usize;
+    let mut out = Vec::new();
+    for para in text.split('\n') {
+        let mut cur = String::new();
+        for word in para.split_whitespace() {
+            if cur.is_empty() {
+                cur.push_str(word);
+            } else if cur.chars().count() + 1 + word.chars().count() <= approx_chars {
+                cur.push(' ');
+                cur.push_str(word);
+            } else {
+                out.push(cur);
+                cur = word.to_string();
+            }
+        }
+        out.push(cur);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+fn modern_height(p: &Page) -> f64 {
+    let (cw, _) = cell(p.cols);
+    let cols = p.cols.clamp(16, 64);
+    let width = cw * cols as f64;
+    let mut y = 2.0;
+    for item in classify(&p.lines, cols) {
+        y += match item {
+            Visual::Blank => 4.0,
+            Visual::Logo => p.logo.as_ref().map_or(0.0, |g| logo_size(g.w, g.h, width).1 + 4.0),
+            Visual::Qr { rows, module } => {
+                if rows.is_empty() { 0.0 } else { rows.len() as f64 * module as f64 * DOT + 10.0 }
+            }
+            Visual::Rule { heavy } => if heavy { 6.0 } else { 5.0 },
+            Visual::Heading { text, big } => wrap_modern(text, width, if big { 13.0 } else { 10.5 }).len() as f64 * (if big { 15.0 } else { 12.5 }) + 2.0,
+            Visual::Badge(_) => 15.0,
+            Visual::Pill(text) => wrap_modern(text, width - 16.0, 8.0).len() as f64 * 10.0 + 7.0,
+            Visual::Total { .. } => 24.0,
+            Visual::TableHead(_) => cw * 2.1 + 3.0,
+            Visual::TableRow { .. } => cw * 2.05,
+            Visual::Pair { left, right, .. } => {
+                let lw = (width - (right.chars().count() as f64 * 8.2 * 0.56) - 6.0).max(width * 0.35);
+                wrap_modern(left, lw, 8.2).len() as f64 * 10.2 + 1.5
+            }
+            Visual::Center { text, .. } | Visual::Text { text, .. } => wrap_modern(text, width, 8.2).len() as f64 * 10.2 + 1.5,
+        };
+    }
+    y + 4.0 + 2.0 * MARGIN
+}
+
 fn height(p: &Page) -> f64 {
+    if p.modern {
+        return modern_height(p);
+    }
     let (cw, lh) = cell(p.cols);
     let width = cw * p.cols.clamp(16, 64) as f64;
     let body: f64 = p
@@ -55,7 +111,163 @@ fn pdf_string(s: &str) -> Vec<u8> {
     out
 }
 
+fn draw_pdf_text(out: &mut Vec<u8>, font: &str, fs: f64, x: f64, y: f64, text: &str, tz: usize) {
+    if text.is_empty() {
+        return;
+    }
+    out.extend_from_slice(format!("BT /{font} {fs:.2} Tf {tz} Tz 1 0 0 1 {x:.2} {y:.2} Tm ").as_bytes());
+    out.extend(pdf_string(text));
+    out.extend_from_slice(b" Tj ET\n");
+}
+
+fn draw_modern_content(p: &Page, page_h: f64) -> Vec<u8> {
+    let (cw, _) = cell(p.cols);
+    let cols = p.cols.clamp(16, 64);
+    let width = cw * cols as f64;
+    let x0 = (PAPER - width) / 2.0;
+    let mut y = page_h - MARGIN - 2.0;
+    let mut out = Vec::new();
+    let est_w = |s: &str, fs: f64| s.chars().count() as f64 * fs * 0.52;
+
+    for item in classify(&p.lines, cols) {
+        match item {
+            Visual::Blank => y -= 4.0,
+            Visual::Logo => {
+                if let Some(g) = &p.logo {
+                    let (w, h) = logo_size(g.w, g.h, width);
+                    let x = x0 + (width - w) / 2.0;
+                    out.extend_from_slice(format!("q {w:.2} 0 0 {h:.2} {x:.2} {:.2} cm /Im1 Do Q\n", y - h).as_bytes());
+                    y -= h + 4.0;
+                }
+            }
+            Visual::Qr { rows, module } => {
+                if !rows.is_empty() {
+                    let m = module as f64 * DOT;
+                    let size = rows.len() as f64 * m;
+                    let x = x0 + (width - size) / 2.0;
+                    let top = y - 5.0;
+                    out.extend_from_slice(b"0 g\n");
+                    for (r, row) in rows.iter().enumerate() {
+                        for (c, ch) in row.chars().enumerate() {
+                            if ch == '1' {
+                                let (cx, cy) = (x + c as f64 * m, top - (r + 1) as f64 * m);
+                                out.extend_from_slice(format!("{cx:.2} {cy:.2} {m:.2} {m:.2} re\n").as_bytes());
+                            }
+                        }
+                    }
+                    out.extend_from_slice(b"f\n");
+                    y -= size + 10.0;
+                }
+            }
+            Visual::Rule { heavy } => {
+                let lw = if heavy { 1.1 } else { 0.45 };
+                let ry = y - if heavy { 3.0 } else { 2.5 };
+                out.extend_from_slice(format!("q 0.1 G {lw:.2} w {x0:.2} {ry:.2} m {:.2} {ry:.2} l S Q\n", x0 + width).as_bytes());
+                y -= if heavy { 6.0 } else { 5.0 };
+            }
+            Visual::Heading { text, big } => {
+                let (fs, step) = if big { (13.0, 15.0) } else { (10.5, 12.5) };
+                out.extend_from_slice(b"0 g\n");
+                for line in wrap_modern(text, width, fs) {
+                    let tw = est_w(&line, fs);
+                    let tx = x0 + ((width - tw) / 2.0).max(0.0);
+                    draw_pdf_text(&mut out, "F4", fs, tx, y - step * 0.78, &line, 100);
+                    y -= step;
+                }
+                y -= 2.0;
+            }
+            Visual::Badge(text) => {
+                let fs = 8.0;
+                let bw = (est_w(text, fs) + 14.0).min(width);
+                let bh = 12.0;
+                let bx = x0 + (width - bw) / 2.0;
+                out.extend_from_slice(format!("0.08 g {bx:.2} {:.2} {bw:.2} {bh:.2} re f\n1 g\n", y - bh).as_bytes());
+                let tx = bx + ((bw - est_w(text, fs)) / 2.0).max(3.0);
+                draw_pdf_text(&mut out, "F4", fs, tx, y - bh + 3.4, text, 100);
+                out.extend_from_slice(b"0 g\n");
+                y -= 15.0;
+            }
+            Visual::Pill(text) => {
+                let fs = 7.8;
+                let lines = wrap_modern(text, width - 16.0, fs);
+                let bh = lines.len() as f64 * 10.0 + 4.0;
+                out.extend_from_slice(format!("q 0.15 G 0.7 w {x0:.2} {:.2} {width:.2} {bh:.2} re S Q\n0 g\n", y - bh).as_bytes());
+                let mut py = y - 2.0;
+                for l in lines {
+                    let tx = x0 + ((width - est_w(&l, fs)) / 2.0).max(4.0);
+                    draw_pdf_text(&mut out, "F4", fs, tx, py - 7.5, &l, 100);
+                    py -= 10.0;
+                }
+                y -= bh + 3.0;
+            }
+            Visual::Total { label, amount } => {
+                let bh = 18.0;
+                out.extend_from_slice(format!("q 0.94 g {x0:.2} {:.2} {width:.2} {bh:.2} re f 0.1 G 1.1 w {x0:.2} {:.2} {width:.2} {bh:.2} re S Q\n0 g\n", y - bh - 2.0, y - bh - 2.0).as_bytes());
+                draw_pdf_text(&mut out, "F4", 10.5, x0 + 6.0, y - bh + 3.5, label, 100);
+                let aw = est_w(amount, 12.5);
+                draw_pdf_text(&mut out, "F4", 12.5, x0 + width - aw - 6.0, y - bh + 3.0, amount, 100);
+                y -= 24.0;
+            }
+            Visual::TableHead(text) => {
+                let row_h = cw * 2.1;
+                let fs = cw / 0.6;
+                out.extend_from_slice(format!("q 0.93 g {x0:.2} {:.2} {width:.2} {row_h:.2} re f Q\n0 g\n", y - row_h).as_bytes());
+                draw_pdf_text(&mut out, "F2", fs, x0, y - row_h * 0.76, text, 100);
+                y -= row_h + 3.0;
+            }
+            Visual::TableRow { text, bold } => {
+                let row_h = cw * 2.05;
+                let fs = cw / 0.6;
+                let t = text.trim_end();
+                if !t.is_empty() {
+                    out.extend_from_slice(b"0 g\n");
+                    draw_pdf_text(&mut out, if bold { "F2" } else { "F1" }, fs, x0, y - row_h * 0.76, t, 100);
+                }
+                y -= row_h;
+            }
+            Visual::Pair { left, right, bold } => {
+                let fs = 8.2;
+                let font = if bold { "F4" } else { "F3" };
+                let rw = est_w(right, fs);
+                let lw = (width - rw - 6.0).max(width * 0.35);
+                out.extend_from_slice(b"0 g\n");
+                draw_pdf_text(&mut out, font, fs, x0 + width - rw, y - 7.8, right, 100);
+                for line in wrap_modern(left, lw, fs) {
+                    draw_pdf_text(&mut out, font, fs, x0, y - 7.8, &line, 100);
+                    y -= 10.2;
+                }
+                y -= 1.5;
+            }
+            Visual::Center { text, bold } => {
+                let fs = 8.2;
+                let font = if bold { "F4" } else { "F3" };
+                out.extend_from_slice(b"0 g\n");
+                for line in wrap_modern(text, width, fs) {
+                    let tx = x0 + ((width - est_w(&line, fs)) / 2.0).max(0.0);
+                    draw_pdf_text(&mut out, font, fs, tx, y - 7.8, &line, 100);
+                    y -= 10.2;
+                }
+                y -= 1.5;
+            }
+            Visual::Text { text, bold } => {
+                let fs = 8.2;
+                let font = if bold { "F4" } else { "F3" };
+                out.extend_from_slice(b"0 g\n");
+                for line in wrap_modern(text, width, fs) {
+                    draw_pdf_text(&mut out, font, fs, x0, y - 7.8, &line, 100);
+                    y -= 10.2;
+                }
+                y -= 1.5;
+            }
+        }
+    }
+    out
+}
+
 fn content(p: &Page, page_h: f64) -> Vec<u8> {
+    if p.modern {
+        return draw_modern_content(p, page_h);
+    }
     let (cw, lh) = cell(p.cols);
     let cols = p.cols.clamp(16, 64) as f64;
     let width = cw * cols;
@@ -111,14 +323,22 @@ fn content(p: &Page, page_h: f64) -> Vec<u8> {
 }
 
 pub fn render(pages: &[Page], title: &str) -> Vec<u8> {
-    // 1 catalog, 2 page tree, 3 and 4 the fonts; then each page, its content
-    // and its logo; the document info last
+    // 1 catalog, 2 page tree, 3..4 Courier (+ 5..6 Helvetica when modern); then
+    // each page, its content and its logo; the document info last
+    let any_modern = pages.iter().any(|p| p.modern);
     let mut objects: Vec<Vec<u8>> = vec![
         b"<< /Type /Catalog /Pages 2 0 R >>".to_vec(),
         Vec::new(),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>".to_vec(),
         b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier-Bold /Encoding /WinAnsiEncoding >>".to_vec(),
     ];
+    let font_res = if any_modern {
+        objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_vec());
+        objects.push(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>".to_vec());
+        "/F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R"
+    } else {
+        "/F1 3 0 R /F2 4 0 R"
+    };
     let mut kids = Vec::new();
     for p in pages {
         let page_h = height(p);
@@ -130,7 +350,7 @@ pub fn render(pages: &[Page], title: &str) -> Vec<u8> {
         let xobject = image_id.map(|id| format!(" /XObject << /Im1 {id} 0 R >>")).unwrap_or_default();
         objects.push(
             format!(
-                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAPER:.2} {page_h:.2}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >>{xobject} >> /Contents {content_id} 0 R >>"
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {PAPER:.2} {page_h:.2}] /Resources << /Font << {font_res} >>{xobject} >> /Contents {content_id} 0 R >>"
             )
             .into_bytes(),
         );
@@ -200,8 +420,9 @@ mod tests {
             ],
             logo: Some(logo),
             cols: 32,
+            modern: false,
         };
-        let pdf = render(&[page.clone(), page], "T2026-000001");
+        let pdf = render(&[page.clone(), page.clone()], "T2026-000001");
         let has = |n: &[u8]| pdf.windows(n.len()).any(|w| w == n);
         assert!(pdf.starts_with(b"%PDF-1.4"));
         assert!(pdf.ends_with(b"%%EOF\n"));
@@ -217,5 +438,11 @@ mod tests {
         for (i, off) in entries.iter().enumerate() {
             assert!(pdf[*off..].starts_with(format!("{} 0 obj", i + 1).as_bytes()), "object {}", i + 1);
         }
+
+        // Modern roll PDF stays well-formed and includes Helvetica resources
+        let mod_page = Page { modern: true, ..page };
+        let mod_pdf = render(&[mod_page], "T2026-000001");
+        assert!(mod_pdf.starts_with(b"%PDF-1.4") && mod_pdf.ends_with(b"%%EOF\n"));
+        assert!(mod_pdf.windows(10).any(|w| w == b"/Helvetica"));
     }
 }

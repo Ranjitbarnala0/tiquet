@@ -24,11 +24,16 @@ const OPEN_SQL: &str = "status IN ('received', 'in_progress', 'ready', 'not_repa
 pub struct RepairIn {
     pub customer_name: String,
     pub customer_phone: String,
+    pub customer_dni: String,
     pub brand: String,
     pub model: String,
     pub colour: String,
     // IMEI or serial number
     pub imei: String,
+    // optional device passcode / PIN / pattern note
+    pub passcode: String,
+    // optional approximate delivery date/note
+    pub approx_delivery: String,
     // as the customer described it
     pub fault: String,
     // for the shop only: never printed
@@ -51,10 +56,13 @@ impl RepairIn {
         RepairIn {
             customer_name: one_line(&self.customer_name, 120),
             customer_phone: one_line(&self.customer_phone, 30),
+            customer_dni: one_line(&self.customer_dni, 30).to_uppercase(),
             brand: one_line(&self.brand, 40),
             model: one_line(&self.model, 60),
             colour: one_line(&self.colour, 30),
             imei: one_line(&self.imei, 40),
+            passcode: one_line(&self.passcode, 60),
+            approx_delivery: one_line(&self.approx_delivery, 40),
             fault: text(&self.fault, 500),
             notes: text(&self.notes, 1000),
             estimate_cents: self.estimate_cents,
@@ -62,7 +70,7 @@ impl RepairIn {
     }
 
     // Nothing is asked for unless the shop says so in Ajustes (`required`,
-    // comma separated: name, phone, device, fault): a customer who gives no
+    // comma separated: name, phone, dni, device, fault): a customer who gives no
     // name still leaves the phone, and the number on the resguardo finds it.
     fn checked(&self, required: &str) -> Result<RepairIn> {
         let r = self.cleaned();
@@ -72,6 +80,9 @@ impl RepairIn {
         }
         if need("phone") && r.customer_phone.is_empty() {
             return fail("E_INVALID:customerPhone");
+        }
+        if need("dni") && r.customer_dni.is_empty() {
+            return fail("E_INVALID:customerDni");
         }
         if need("device") && r.brand.is_empty() && r.model.is_empty() {
             return fail("E_INVALID:device");
@@ -190,7 +201,7 @@ fn held(conn: &Connection, ticket: Option<i64>) -> Result<i64> {
 pub fn load(conn: &Connection, id: i64) -> Result<Repair> {
     let row = conn
         .query_row(
-            "SELECT id, number, created_at, created_by, customer_name, customer_phone, brand, model, colour, imei, fault, notes,
+            "SELECT id, number, created_at, created_by, customer_name, customer_phone, customer_dni, brand, model, colour, imei, passcode, approx_delivery, fault, notes,
                     estimate_cents, status, closed_at, closed_by, cancel_reason, shop, terms, deposit_ticket, ticket_id
              FROM repairs WHERE id = ?1",
             [id],
@@ -198,13 +209,16 @@ pub fn load(conn: &Connection, id: i64) -> Result<Repair> {
                 let data = RepairIn {
                     customer_name: r.get(4)?,
                     customer_phone: r.get(5)?,
-                    brand: r.get(6)?,
-                    model: r.get(7)?,
-                    colour: r.get(8)?,
-                    imei: r.get(9)?,
-                    fault: r.get(10)?,
-                    notes: r.get(11)?,
-                    estimate_cents: r.get(12)?,
+                    customer_dni: r.get(6)?,
+                    brand: r.get(7)?,
+                    model: r.get(8)?,
+                    colour: r.get(9)?,
+                    imei: r.get(10)?,
+                    passcode: r.get(11)?,
+                    approx_delivery: r.get(12)?,
+                    fault: r.get(13)?,
+                    notes: r.get(14)?,
+                    estimate_cents: r.get(15)?,
                 };
                 let number: String = r.get(1)?;
                 Ok((
@@ -215,21 +229,21 @@ pub fn load(conn: &Connection, id: i64) -> Result<Repair> {
                         created_at: r.get(2)?,
                         created_by: r.get(3)?,
                         data,
-                        status: r.get(13)?,
+                        status: r.get(16)?,
                         deposit: None,
                         deposit_cents: 0,
                         due_cents: None,
                         ticket: None,
-                        closed_at: r.get(14)?,
-                        closed_by: r.get(15)?,
-                        cancel_reason: r.get(16)?,
+                        closed_at: r.get(17)?,
+                        closed_by: r.get(18)?,
+                        cancel_reason: r.get(19)?,
                         events: Vec::new(),
-                        shop: serde_json::from_str(&r.get::<_, String>(17)?).unwrap_or_default(),
-                        terms: r.get(18)?,
+                        shop: serde_json::from_str(&r.get::<_, String>(20)?).unwrap_or_default(),
+                        terms: r.get(21)?,
                         pay: String::new(),
                     },
-                    r.get::<_, Option<i64>>(19)?,
-                    r.get::<_, Option<i64>>(20)?,
+                    r.get::<_, Option<i64>>(22)?,
+                    r.get::<_, Option<i64>>(23)?,
                 ))
             },
         )
@@ -314,9 +328,9 @@ pub fn create(conn: &mut Connection, user: &SessionUser, s: &Settings, n: &NewRe
     let (series, seq, number) = next_number(&tx, &at)?;
     let shop = serde_json::to_string(&ShopInfo { logo: settings::logo_id(&tx)?, ..ShopInfo::from_settings(s) })?;
     tx.execute(
-        "INSERT INTO repairs (number, series, seq, created_at, created_by, client_id, customer_name, customer_phone, brand, model,
-                              colour, imei, fault, notes, estimate_cents, status, shop, terms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'received', ?16, ?17)",
+        "INSERT INTO repairs (number, series, seq, created_at, created_by, client_id, customer_name, customer_phone, customer_dni,
+                              brand, model, colour, imei, passcode, approx_delivery, fault, notes, estimate_cents, status, shop, terms)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 'received', ?19, ?20)",
         params![
             number,
             series,
@@ -326,10 +340,13 @@ pub fn create(conn: &mut Connection, user: &SessionUser, s: &Settings, n: &NewRe
             request,
             data.customer_name,
             data.customer_phone,
+            data.customer_dni,
             data.brand,
             data.model,
             data.colour,
             data.imei,
+            data.passcode,
+            data.approx_delivery,
             data.fault,
             data.notes,
             data.estimate_cents,
@@ -378,10 +395,13 @@ pub fn update(conn: &mut Connection, id: i64, by: &str, input: &RepairIn, requir
     let fields: Vec<&str> = [
         ("customerName", old.customer_name != data.customer_name),
         ("customerPhone", old.customer_phone != data.customer_phone),
+        ("customerDni", old.customer_dni != data.customer_dni),
         ("brand", old.brand != data.brand),
         ("model", old.model != data.model),
         ("colour", old.colour != data.colour),
         ("imei", old.imei != data.imei),
+        ("passcode", old.passcode != data.passcode),
+        ("approxDelivery", old.approx_delivery != data.approx_delivery),
         ("fault", old.fault != data.fault),
         ("notes", old.notes != data.notes),
         ("estimate", old.estimate_cents != data.estimate_cents),
@@ -393,16 +413,19 @@ pub fn update(conn: &mut Connection, id: i64, by: &str, input: &RepairIn, requir
         return Ok(cur);
     }
     tx.execute(
-        "UPDATE repairs SET customer_name = ?1, customer_phone = ?2, brand = ?3, model = ?4, colour = ?5, imei = ?6, fault = ?7,
-                            notes = ?8, estimate_cents = ?9
-         WHERE id = ?10",
+        "UPDATE repairs SET customer_name = ?1, customer_phone = ?2, customer_dni = ?3, brand = ?4, model = ?5, colour = ?6,
+                            imei = ?7, passcode = ?8, approx_delivery = ?9, fault = ?10, notes = ?11, estimate_cents = ?12
+         WHERE id = ?13",
         params![
             data.customer_name,
             data.customer_phone,
+            data.customer_dni,
             data.brand,
             data.model,
             data.colour,
             data.imei,
+            data.passcode,
+            data.approx_delivery,
             data.fault,
             data.notes,
             data.estimate_cents,
@@ -646,7 +669,8 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Summary>> {
                 COALESCE((SELECT CASE WHEN t.voided_at IS NULL
                                       THEN t.total_cents + COALESCE((SELECT SUM(x.total_cents) FROM tickets x WHERE x.refund_of = t.id AND x.voided_at IS NULL), 0)
                                       ELSE 0 END
-                          FROM tickets t WHERE t.id = repairs.deposit_ticket), 0)
+                          FROM tickets t WHERE t.id = repairs.deposit_ticket), 0),
+                customer_dni
          FROM repairs WHERE {filter} ORDER BY id DESC"
     ))?;
     let rows = stmt.query_map([], |r| {
@@ -668,6 +692,7 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Summary>> {
                 due_cents: estimate.map(|e| e - held),
             },
             r.get::<_, String>(8)?,
+            r.get::<_, String>(12)?,
         ))
     })?;
     let pay = q.pay.as_deref().unwrap_or("any");
@@ -676,13 +701,13 @@ pub fn list(conn: &Connection, q: &ListQuery) -> Result<Vec<Summary>> {
     }
     let mut out = Vec::new();
     for row in rows {
-        let (s, imei) = row?;
+        let (s, imei, dni) = row?;
         let due = ["unpaid", "partial", "unpriced"].contains(&s.pay.as_str());
         if (pay == "due" && !due) || (pay == "paid" && s.pay != "paid") {
             continue;
         }
         if !words.is_empty() {
-            let hay = fold(&format!("{} {} {} {imei} {} {} {}", s.number, s.customer_name, s.customer_phone, s.device, digits(&s.customer_phone), digits(&imei)));
+            let hay = fold(&format!("{} {} {} {dni} {imei} {} {} {}", s.number, s.customer_name, s.customer_phone, s.device, digits(&s.customer_phone), digits(&imei)));
             if !words.iter().all(|w| hay.contains(w)) {
                 continue;
             }
@@ -725,6 +750,7 @@ mod tests {
             fault: "No carga.\n\n  Pantalla rota  ".into(),
             notes: "Código 1234".into(),
             estimate_cents: Some(8000),
+            ..RepairIn::default()
         }
     }
 
@@ -931,7 +957,7 @@ mod tests {
         // a service over 400 EUR needs the customer's details
         let dear = vec![pickup(&r, 45_000)];
         assert_eq!(tickets::sell(&mut conn, &user, &s, dear.clone(), &cash(), &SaleOpts::default()).unwrap_err().0, "E_OVER_LIMIT_SERVICE");
-        let invoice = SaleOpts { customer: Some(Customer { name: "Joan García".into(), nif: "B12345674".into(), address: String::new() }), ..SaleOpts::default() };
+        let invoice = SaleOpts { customer: Some(Customer { name: "Joan García".into(), nif: "B12345674".into(), ..Customer::default() }), ..SaleOpts::default() };
         let (t, _) = tickets::sell(&mut conn, &user, &s, dear, &cash(), &invoice).unwrap();
         assert!(t.number.starts_with("TF"));
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM tickets", [], |r| r.get(0)).unwrap();

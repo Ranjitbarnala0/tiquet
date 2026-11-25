@@ -895,7 +895,7 @@ function Moves({ user, settings, logo, onSetupPrinter, onRepeat }: { user: User;
                 </div>
               </div>
               <div className="detail-paper">
-                <Paper lines={detail.lines} logo={detail.logo} cols={settings.columns} stamp={t.voidedAt ? tr('BORRADO', 'DELETED') : undefined} />
+                <Paper lines={detail.lines} logo={detail.logo} cols={settings.columns} modern={settings.ticketStyle !== 'classic'} stamp={t.voidedAt ? tr('BORRADO', 'DELETED') : undefined} />
               </div>
             </>
           )}

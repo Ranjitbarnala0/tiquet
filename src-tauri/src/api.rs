@@ -1220,6 +1220,8 @@ struct PreviewIn {
     show_vat: Option<bool>,
     #[serde(default)]
     note: Option<String>,
+    #[serde(default)]
+    bill: bool,
 }
 
 fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
@@ -1243,12 +1245,13 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
         None => (None, None),
     };
     let issued_at = tickets::correction_time(&conn, &s, a.replaces)?.unwrap_or_else(tickets::now);
-    let customer = a.customer.filter(|c| !c.name.trim().is_empty());
+    let customer = a.customer.filter(|c| !c.is_empty());
     // as it will be kept: six lines at most
     let note = tickets::note_of(a.note.as_deref());
-    let tag = tickets::series_tag("sale", customer.is_some(), s.training);
+    let fiscal = customer.as_ref().is_some_and(tickets::Customer::is_fiscal);
+    let tag = tickets::series_tag("sale", fiscal, s.training);
     let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
-    let shop = ShopInfo::from_settings(&s);
+    let shop = ShopInfo::from_settings_for(&s, fiscal || a.bill);
     let qr = verifactu::preview_qr(&s, &number, &issued_at, totals.total_cents);
     let v = TicketView {
         shop: &shop,
@@ -1261,7 +1264,7 @@ fn preview(st: &AppState, a: PreviewIn) -> Result<Value> {
         payment: payment.as_ref(),
         refund_of: None,
         reason: None,
-        vat: a.show_vat.map(VatView::bill).unwrap_or(if customer.is_some() { VatView::Full } else { VatView::of(&s) }),
+        vat: a.show_vat.map(VatView::bill).unwrap_or(if fiscal { VatView::Full } else { VatView::of(&s) }),
         note: note.as_deref(),
         copy: false,
         voided: false,
@@ -1317,9 +1320,10 @@ fn invoice_preview(st: &AppState, a: DraftIn) -> Result<Value> {
     let logo = settings::logo(&conn)?;
     let lines = if a.sample { crate::invoice::sample(&s).lines } else { tickets::clamp(a.lines) };
     let totals = tickets::compute(&lines);
-    let customer = a.customer.filter(|c| !c.name.trim().is_empty() || !c.nif.trim().is_empty());
+    let customer = a.customer.filter(|c| !c.is_empty());
     let issued_at = tickets::correction_time(&conn, &s, a.replaces)?.unwrap_or_else(tickets::now);
-    let tag = tickets::series_tag("sale", customer.is_some(), s.training);
+    let fiscal = customer.as_ref().is_some_and(tickets::Customer::is_fiscal);
+    let tag = tickets::series_tag("sale", fiscal, s.training);
     let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
     let method = a.payment.map(|p| p.method).filter(|m| !m.is_empty()).unwrap_or_else(|| "cash".into());
     let qr = verifactu::preview_qr(&s, &number, &issued_at, totals.total_cents);
@@ -1342,7 +1346,7 @@ fn invoice_preview(st: &AppState, a: DraftIn) -> Result<Value> {
         vat: totals.vat.clone(),
         prints: Vec::new(),
         payment_changes: Vec::new(),
-        shop: ShopInfo { vat: Some(VatView::bill(a.show_vat.unwrap_or(s.invoice_show_vat))), ..ShopInfo::from_settings(&s) },
+        shop: ShopInfo { vat: Some(VatView::bill(a.show_vat.unwrap_or(s.invoice_show_vat))), ..ShopInfo::from_settings_for(&s, true) },
         customer,
         training: s.training,
         qr,
@@ -1485,9 +1489,9 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
     let s = settings::load(&conn)?;
     let plan = tickets::plan_refund(&conn, r)?;
     let issued_at = tickets::now();
-    let tag = tickets::series_tag("refund", plan.original.customer.is_some(), plan.original.training);
+    let tag = tickets::series_tag("refund", plan.original.customer.as_ref().is_some_and(tickets::Customer::is_fiscal), plan.original.training);
     let (_, _, number) = tickets::next_number(&conn, &s.ticket_prefix, &tag, &issued_at)?;
-    let shop = ShopInfo::from_settings(&s);
+    let shop = ShopInfo::from_settings_for(&s, plan.original.bill || plan.original.customer.as_ref().is_some_and(tickets::Customer::is_fiscal));
     let lines = plan.sale_lines();
     let qr = verifactu::preview_qr(&s, &number, &issued_at, plan.totals.total_cents).filter(|_| !plan.original.training);
     let v = TicketView {
@@ -1501,7 +1505,7 @@ fn refund_preview(st: &AppState, me: &SessionUser, r: &RefundIn) -> Result<Value
         payment: Some(&plan.payment),
         refund_of: Some((&plan.original.number, &plan.original.issued_at)),
         reason: Some(&plan.reason),
-        vat: plan.original.shop.vat_view(plan.original.customer.is_some(), s.show_vat),
+        vat: plan.original.shop.vat_view(plan.original.customer.as_ref().is_some_and(tickets::Customer::is_fiscal), s.show_vat),
         note: None,
         copy: false,
         voided: false,
@@ -2053,7 +2057,7 @@ mod tests {
     fn a_ticket_prints_once_as_original_and_then_only_as_copies() {
         let st = state(|d| PrintSink::Dir(d.join("prints")));
         setup(&st);
-        dispatch(&st, "settings.save", json!({ "copies": 2 })).unwrap();
+        dispatch(&st, "settings.save", json!({ "copies": 2, "ticketStyle": "classic" })).unwrap();
         let t = dispatch(&st, "sale.finalize", sale()).unwrap();
         let id = t["ticket"]["id"].clone();
         dispatch(&st, "tickets.print", json!({ "id": id, "copy": false })).unwrap();
@@ -2133,6 +2137,7 @@ mod tests {
     fn closing_the_till_prints_a_z_report() {
         let st = state(|d| PrintSink::Dir(d.join("prints")));
         setup(&st);
+        dispatch(&st, "settings.save", json!({ "ticketStyle": "classic" })).unwrap();
         dispatch(&st, "cash.open", json!({ "floatCents": 5000 })).unwrap();
         dispatch(&st, "sale.finalize", sale()).unwrap();
         let d = dispatch(&st, "cash.move", json!({ "cents": -1000, "reason": "Compra de bolsas" })).unwrap();
@@ -2155,6 +2160,7 @@ mod tests {
     fn a_cashier_takes_a_phone_in_and_hands_it_back_but_only_an_admin_cancels() {
         let st = state(|d| PrintSink::Dir(d.join("prints")));
         setup(&st);
+        dispatch(&st, "settings.save", json!({ "ticketStyle": "classic" })).unwrap();
         let jordi = dispatch(&st, "users.save", json!({ "name": "Jordi", "role": "cashier", "password": "4321" })).unwrap();
         dispatch(&st, "logout", json!({})).unwrap();
         dispatch(&st, "login", json!({ "userId": jordi["id"], "password": "4321" })).unwrap();
@@ -2266,7 +2272,7 @@ mod tests {
         let st = state(|_| PrintSink::Spooler);
         setup(&st);
         let off = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        dispatch(&st, "settings.save", json!({ "printerKind": "network", "printerHost": "127.0.0.1", "printerPort": off })).unwrap();
+        dispatch(&st, "settings.save", json!({ "printerKind": "network", "printerHost": "127.0.0.1", "printerPort": off, "ticketStyle": "classic" })).unwrap();
         let t = dispatch(&st, "sale.finalize", sale()).unwrap();
         assert_eq!((t["printed"].as_bool(), t["printError"].as_str()), (Some(false), Some("E_PRINT:offline")));
         let id = t["ticket"]["id"].clone();
@@ -2286,7 +2292,7 @@ mod tests {
 
         // Ajustes tests the address typed in, saved or not
         let (port, got) = listen(3);
-        let draft = json!({ "printerKind": "network", "printerHost": "127.0.0.1", "printerPort": port });
+        let draft = json!({ "printerKind": "network", "printerHost": "127.0.0.1", "printerPort": port, "ticketStyle": "classic" });
         for kind in ["page", "charset", "drawer"] {
             assert_eq!(dispatch(&st, "printers.test", json!({ "settings": draft, "kind": kind })).unwrap()["warning"], Value::Null);
         }
@@ -2838,5 +2844,98 @@ mod tests {
         assert_eq!(dispatch(&st, "tickets.void", json!({ "id": hers })).unwrap()["ticket"]["voidedBy"], "Eva");
         let today = tickets::now()[..10].to_string();
         assert_eq!(dispatch(&st, "day.delete", json!({ "date": today })).unwrap_err(), "E_FORBIDDEN");
+    }
+
+    #[test]
+    fn optional_customer_separate_bill_company_and_repair_fields() {
+        let st = state(|d| PrintSink::Dir(d.join("prints")));
+        setup(&st);
+        dispatch(
+            &st,
+            "settings.save",
+            json!({
+                "shopName": "Tienda Frontal",
+                "shopLegalName": "Tienda Frontal SL",
+                "shopNif": "B12345674",
+                "billCompanyName": "Facturacion Central",
+                "billLegalName": "Facturacion Central SL",
+                "billNif": "A12345674",
+                "billAddress": "Calle Mayor 2",
+                "billPhone": "900111222",
+                "billEmail": "facturas@example.com",
+                "repairPasscodeOnReceipt": false
+            }),
+        )
+        .unwrap();
+
+        // Optional customer info without NIF keeps T series (simplified) and prints phone/email
+        let sold = dispatch(
+            &st,
+            "sale.finalize",
+            json!({
+                "saleId": "opt-cust-1",
+                "lines": [{ "name": "Funda", "qty": 1, "unitCents": 1200, "vatBp": 2100 }],
+                "payment": { "method": "cash", "tenderedCents": 2000 },
+                "customer": { "name": "Lucia", "phone": "611222333", "email": "lucia@example.com" },
+                "print": false
+            }),
+        )
+        .unwrap();
+        let tid = sold["ticket"]["id"].as_i64().unwrap();
+        assert!(sold["ticket"]["number"].as_str().unwrap().starts_with("T2"));
+        assert_eq!(sold["ticket"]["customer"]["phone"], "611222333");
+
+        // Counter ticket preview keeps shop name; bill preview uses separate billing company
+        let got_t = dispatch(&st, "tickets.get", json!({ "id": tid })).unwrap();
+        let t_txt: Vec<_> = got_t["lines"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect();
+        assert!(t_txt.iter().any(|t| t.contains("Tienda Frontal")));
+        assert!(t_txt.iter().any(|t| t.contains("611222333")));
+        assert!(!t_txt.iter().any(|t| t.contains("Facturacion Central")));
+
+        let bill_prev = dispatch(
+            &st,
+            "sale.preview",
+            json!({
+                "lines": [{ "name": "Funda", "qty": 1, "unitCents": 1200, "vatBp": 2100 }],
+                "bill": true
+            }),
+        )
+        .unwrap();
+        let bill_txt: Vec<_> = bill_prev["lines"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect();
+        assert!(bill_txt.iter().any(|t| t.contains("Facturacion Central")));
+
+        // Repairs store optional DNI, passcode and approxDelivery; passcode visibility follows setting
+        let rep = dispatch(
+            &st,
+            "repairs.create",
+            json!({
+                "customerName": "Mario",
+                "customerPhone": "699000111",
+                "customerDni": "12345678Z",
+                "brand": "Samsung",
+                "model": "S24",
+                "fault": "Pantalla",
+                "passcode": "9876",
+                "approxDelivery": "Mañana 18:00",
+                "estimateCents": 6500,
+                "print": false
+            }),
+        )
+        .unwrap();
+        let rid = rep["repair"]["id"].as_i64().unwrap();
+        assert_eq!(rep["repair"]["customerDni"], "12345678Z");
+        assert_eq!(rep["repair"]["passcode"], "9876");
+        assert_eq!(rep["repair"]["approxDelivery"], "Mañana 18:00");
+
+        let got_r = dispatch(&st, "repairs.get", json!({ "id": rid })).unwrap();
+        let slip_txt: String = got_r["slip"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect::<Vec<_>>().join("\n");
+        assert!(slip_txt.contains("9876") && slip_txt.contains("Mañana 18:00"));
+        let hide_txt: String = got_r["resguardo"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect::<Vec<_>>().join("\n");
+        assert!(hide_txt.contains("12345678Z") && hide_txt.contains("IVA incluido") && !hide_txt.contains("9876"));
+
+        dispatch(&st, "settings.save", json!({ "repairPasscodeOnReceipt": true })).unwrap();
+        let got_r2 = dispatch(&st, "repairs.get", json!({ "id": rid })).unwrap();
+        let show_txt: String = got_r2["resguardo"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect::<Vec<_>>().join("\n");
+        assert!(show_txt.contains("9876"));
     }
 }

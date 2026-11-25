@@ -180,6 +180,12 @@ export function MachinesTab({ d, set }: { d: Settings; set: <K extends keyof Set
             label={tr('Preguntar la máquina en cada cobro con tarjeta', 'Ask which machine on every card sale')}
             hint={tr('Apagado, se usa la predeterminada, y se puede cambiar después en el ticket.', 'Off, the default one is used, and it can be changed afterwards on the ticket.')}
           />
+          <Toggle
+            checked={d.splitCardMachines ?? true}
+            onChange={(v) => set('splitCardMachines', v)}
+            label={tr('Separar cada máquina de tarjetas en la pantalla de venta', 'Show each card machine separately on the sale screen')}
+            hint={tr('Encendido, ves cada datáfono en su propia columna y total.', 'On, each card terminal gets its own column and total.')}
+          />
         </>
       )}
 

@@ -412,6 +412,12 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
               <Field label={tr('Totales que se ven abajo', 'Totals shown at the bottom')} hint={tr('Toca para poner o quitar. Sin ninguno, la barra desaparece.', 'Tap to add or remove. With none, the bar goes away.')}>
                 <DayCells value={d.dayCells} onChange={(v) => set('dayCells', v)} />
               </Field>
+              <Toggle
+                checked={d.splitCardMachines ?? true}
+                onChange={(v) => set('splitCardMachines', v)}
+                label={tr('Separar cada máquina de tarjetas en la pantalla de venta', 'Show each card machine separately on the sale screen')}
+                hint={tr('Muestra una columna y su total para cada datáfono.', 'Shows a column and total for each card terminal.')}
+              />
 
               <h3 className="settings-title">{tr('Gastos y caja', 'Expenses and till')}</h3>
               <Field label={tr('Compras habituales (opcional)', 'Usual purchases (optional)')} hint={tr('Botones en la ventana de Gasto, separados por comas', 'Buttons in the Expense window, separated by commas')}>
@@ -486,19 +492,69 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                 <Field label={tr('Teléfono', 'Phone')}>
                   <input value={d.shopPhone} onChange={(e) => set('shopPhone', e.target.value)} />
                 </Field>
-                <Field
-                  label={tr('NIF / CIF (opcional)', 'NIF / CIF (optional)')}
-                  error={d.shopNif.trim() && !spanishNif(d.shopNif) ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}
-                  hint={!d.shopNif.trim() ? tr('Sin NIF los tickets salen como ticket sencillo, no como factura.', 'Without a NIF, tickets print as simple tickets, not invoices.') : undefined}
-                >
-                  <input value={d.shopNif} onChange={(e) => set('shopNif', e.target.value.toUpperCase())} />
+                <Field label={tr('Correo electrónico (opcional)', 'Email (optional)')}>
+                  <input value={d.shopEmail ?? ''} onChange={(e) => set('shopEmail', e.target.value)} maxLength={120} />
                 </Field>
               </div>
+              <Field
+                label={tr('NIF / CIF (opcional)', 'NIF / CIF (optional)')}
+                error={d.shopNif.trim() && !spanishNif(d.shopNif) ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}
+                hint={!d.shopNif.trim() ? tr('Sin NIF los tickets salen como ticket sencillo, no como factura.', 'Without a NIF, tickets print as simple tickets, not invoices.') : undefined}
+              >
+                <input value={d.shopNif} onChange={(e) => set('shopNif', e.target.value.toUpperCase())} />
+              </Field>
+              <section className="form-section">
+                <h2>{tr('Datos distintos solo para facturas (opcional)', 'Different company only for bills (optional)')}</h2>
+                <p className="muted small">
+                  {tr(
+                    'Útil si tu tienda tiene un nombre comercial y las facturas legales van a nombre de otra empresa o sociedad. Si se deja vacío, las facturas usan los mismos datos de arriba.',
+                    'Useful when the storefront uses one name and legal invoices are issued by another company. Left blank, invoices use the shop details above.',
+                  )}
+                </p>
+                <div className="grid2">
+                  <Field label={tr('Nombre en facturas', 'Company name on bills')}>
+                    <input value={d.billCompanyName ?? ''} onChange={(e) => set('billCompanyName', e.target.value)} maxLength={60} />
+                  </Field>
+                  <Field label={tr('Razón social en facturas', 'Legal name on bills')}>
+                    <input value={d.billLegalName ?? ''} onChange={(e) => set('billLegalName', e.target.value)} maxLength={80} />
+                  </Field>
+                </div>
+                <div className="grid3">
+                  <Field
+                    label={tr('NIF / CIF de facturación', 'Billing NIF / CIF')}
+                    error={(d.billNif ?? '').trim() && !spanishNif(d.billNif ?? '') ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}
+                  >
+                    <input value={d.billNif ?? ''} onChange={(e) => set('billNif', e.target.value.toUpperCase())} maxLength={20} />
+                  </Field>
+                  <Field label={tr('Teléfono en facturas', 'Billing phone')}>
+                    <input value={d.billPhone ?? ''} onChange={(e) => set('billPhone', e.target.value)} maxLength={40} />
+                  </Field>
+                  <Field label={tr('Email en facturas', 'Billing email')}>
+                    <input value={d.billEmail ?? ''} onChange={(e) => set('billEmail', e.target.value)} maxLength={120} />
+                  </Field>
+                </div>
+                <Field label={tr('Dirección en facturas', 'Billing address')}>
+                  <textarea rows={2} value={d.billAddress ?? ''} onChange={(e) => set('billAddress', e.target.value)} maxLength={240} />
+                </Field>
+              </section>
             </div>
           )}
 
           {tab === 'ticket' && (
             <div className="stack">
+              <Field
+                label={tr('Estilo de impresión del ticket', 'Ticket print style')}
+                hint={tr('El diseño moderno usa tipografía suave, líneas nítidas y recuadros; ambos conservan el mismo ancho de rollo.', 'Modern style uses crisp typography, solid dividers and badges; both keep the same roll width.')}
+              >
+                <Segmented
+                  value={d.ticketStyle === 'classic' ? 'classic' : 'modern'}
+                  onChange={(v) => set('ticketStyle', v)}
+                  options={[
+                    { value: 'modern', label: tr('Moderno (diseño limpio)', 'Modern (clean design)') },
+                    { value: 'classic', label: tr('Clásico (texto)', 'Classic (text)') },
+                  ]}
+                />
+              </Field>
               <Field label={tr('Pie del ticket', 'Ticket footer')} hint={tr('Agradecimiento, horario, política de cambios…', 'Thank-you note, opening hours, returns policy…')}>
                 <textarea rows={3} value={d.footer} onChange={(e) => set('footer', e.target.value)} />
               </Field>
@@ -984,6 +1040,7 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                   [
                     ['name', tr('Nombre del cliente', 'Customer name')],
                     ['phone', tr('Teléfono', 'Phone')],
+                    ['dni', tr('DNI / NIE', 'ID / NIE')],
                     ['device', tr('Marca o modelo', 'Make or model')],
                     ['fault', tr('Avería', 'Fault')],
                   ] as const
@@ -1000,6 +1057,12 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
                     />
                   );
                 })}
+                <Toggle
+                  checked={!!d.repairPasscodeOnReceipt}
+                  onChange={(v) => set('repairPasscodeOnReceipt', v)}
+                  label={tr('Imprimir contraseña/PIN de desbloqueo en el resguardo del cliente', 'Print device passcode on customer receipt')}
+                  hint={tr('Siempre sale en la etiqueta interna de taller.', 'Always printed on the internal workshop tag.')}
+                />
               </section>
               <section className="form-section">
                 <h2>{tr('Condiciones del resguardo', 'Receipt conditions')}</h2>
@@ -1303,9 +1366,9 @@ export function SettingsScreen({ onRestored, onDirty, request, settings, onSaved
             <SheetView sheets={sheets} />
           </div>
         ) : tab === 'repairs' ? (
-          <div className="paper-scroll">{resguardo && <Paper lines={resguardo} logo={logo} cols={d.columns} />}</div>
+          <div className="paper-scroll">{resguardo && <Paper lines={resguardo} logo={logo} cols={d.columns} modern={d.ticketStyle !== 'classic'} />}</div>
         ) : (
-          <div className="paper-scroll">{preview && <Paper lines={preview} logo={logo} cols={d.columns} />}</div>
+          <div className="paper-scroll">{preview && <Paper lines={preview} logo={logo} cols={d.columns} modern={d.ticketStyle !== 'classic'} />}</div>
         )}
       </aside>
     </div>

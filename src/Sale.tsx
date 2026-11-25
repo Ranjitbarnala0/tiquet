@@ -20,12 +20,13 @@ import {
   Star,
   Trash2,
   Undo2,
+  UserRound,
   Wallet,
   X,
 } from 'lucide-react';
 import { ApiError, call, toError } from './api';
 import { Board } from './Board';
-import { eur, fmt, isoDate, norm, parseMoney, rate } from './format';
+import { dateTime, eur, fmt, isoDate, norm, parseMoney, rate } from './format';
 import { errorText, isPrinterSetup, isTransient, printerStateText, tr, warningText } from './i18n';
 import { ClockModal } from './Clock';
 import { ItemDialog, type ItemDraft } from './ItemDialog';
@@ -35,7 +36,7 @@ import { Paper } from './Paper';
 import { BIG, ExpenseModal, RechargeModal, useEntrySave } from './Quick';
 import { ShareDialog } from './Share';
 import { useToast } from './toast';
-import type { CartLine, CashDrawer, CashSession, Customer, DayList, DaySummary, Finalized, Logo, Machine, Method, Preview, Product, Settings, TicketRecord } from './types';
+import type { CartLine, CashDrawer, CashSession, Customer, DayList, DaySummary, Finalized, KnownCustomer, Logo, Machine, Method, Preview, Product, Settings, TicketRecord } from './types';
 
 type Shown = Preview & { forLines: string };
 import { printerLabel, usePrinterStatus } from './usePrinter';
@@ -341,10 +342,25 @@ function Cell({ label, cents, dot, strong, minus }: { label: string; cents: numb
 function DayStrip({ s, settings }: { s: DaySummary; settings: Settings }) {
   const on = settings.dayCells.split(',').filter((c) => c && (c !== 'recharge' || settings.showRecharge));
   if (!on.length) return null;
+  const cards = cardMachines(settings);
+  const splitCards = settings.splitCardMachines !== false && cards.length > 1;
+  const sumById = new Map(s.machines.map((m) => [m.id, m.salesCents]));
+  const knownCardsSum = splitCards ? cards.reduce((acc, m) => acc + (sumById.get(m.id) ?? 0), 0) : 0;
+  const otherCardCents = splitCards ? s.cardCents - knownCardsSum : 0;
   return (
     <div className="strip">
       {on.includes('cash') && <Cell label={tr('Efectivo', 'Cash')} cents={s.cashCents} dot="cash" />}
-      {on.includes('card') && <Cell label={tr('Tarjeta', 'Card')} cents={s.cardCents} dot="card" />}
+      {on.includes('card') &&
+        (splitCards ? (
+          <>
+            {cards.map((m) => (
+              <Cell key={m.id} label={m.name} cents={sumById.get(m.id) ?? 0} dot="card" />
+            ))}
+            {otherCardCents !== 0 && <Cell label={tr('Otras tarj.', 'Other card')} cents={otherCardCents} dot="card" />}
+          </>
+        ) : (
+          <Cell label={tr('Tarjeta', 'Card')} cents={s.cardCents} dot="card" />
+        ))}
       {s.bizumCents !== 0 && on.includes('card') && <Cell label="Bizum" cents={s.bizumCents} dot="bizum" />}
       {on.includes('recharge') && <Cell label={tr('Recargas', 'Recharges')} cents={s.rechargeCents} dot="recharge" />}
       {on.includes('total') && <Cell label={tr('Total', 'Total')} cents={s.totalCents} strong />}
@@ -449,9 +465,12 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const [machine, setMachine] = useState(settings.cardMachine);
   const [choosing, setChoosing] = useState(false);
   const [given, setGiven] = useState('');
-  // a full invoice: the customer's details
+  // customer / invoice details (all optional unless legally required or NIF filled)
   const [invoice, setInvoice] = useState(false);
-  const [customer, setCustomer] = useState<Customer>({ name: '', nif: '', address: '' });
+  const [billA4, setBillA4] = useState(false);
+  const [customer, setCustomer] = useState<Customer>({ name: '', nif: '', address: '', phone: '', email: '' });
+  const [known, setKnown] = useState<KnownCustomer[]>([]);
+  const [suggest, setSuggest] = useState(false);
   const [preview, setPreview] = useState<Shown | null>(null);
   const [previewErr, setPreviewErr] = useState('');
   const [busy, setBusy] = useState(false);
@@ -616,14 +635,29 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const tendered = method === 'cash' ? parseMoney(given, 999_999_999) : null;
   const payload = lines.map(({ productId, name, qty, unitCents, vatBp, repairId }) => ({ productId, name, qty, unitCents, vatBp, repairId }));
   const linesKey = JSON.stringify(payload);
-  const customerOk = !invoice || (customer.name.trim().length > 0 && customerNif(customer.nif));
+  const hasCustomer = [customer.name, customer.nif, customer.address, customer.phone ?? '', customer.email ?? ''].some((v) => v.trim().length > 0);
+  const nifTrim = customer.nif.trim();
+  const nifBad = nifTrim.length > 0 && !customerNif(nifTrim);
   const floatCents = parseMoney(float || '0', 999_999_999);
+  const sendCustomer = hasCustomer && !nifBad && (!nifTrim || customer.name.trim().length > 0);
   const previewArgs = JSON.stringify({
     lines: payload,
     payment: paying ? { method, tenderedCents: tendered ?? undefined } : undefined,
-    customer: paying && invoice && customerOk ? customer : undefined,
+    customer: (paying && invoice) || hasCustomer ? (sendCustomer ? customer : undefined) : undefined,
+    bill: (paying && invoice) || hasCustomer || billA4 || undefined,
     replaces: fixing?.id,
   });
+
+  useEffect(() => {
+    if (!paying || !invoice || !suggest) return;
+    const q = customer.name.trim();
+    const t = window.setTimeout(() => {
+      call<KnownCustomer[]>('invoices.customers', { q })
+        .then(setKnown)
+        .catch(() => setKnown([]));
+    }, 150);
+    return () => window.clearTimeout(t);
+  }, [paying, invoice, suggest, customer.name]);
 
   // totals, VAT and the ticket itself always come from the core; requests can
   // overtake each other, so only the newest answer is applied, and each one
@@ -690,6 +724,8 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   const service = lines.some((l) => l.repairId);
   const limit = service ? 40_000 : 300_000;
   const overLimit = total > limit;
+  const needsFullCustomer = overLimit || nifTrim.length > 0;
+  const customerOk = !invoice ? true : !nifBad && (!needsFullCustomer || (customer.name.trim().length > 0 && nifTrim.length > 0));
   const blocked = short || badAmount || tooMuch || negative || !customerOk || (overLimit && !invoice);
 
   const commit = (next: CartLine[]) => {
@@ -917,7 +953,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     return true;
   };
 
-  const openPay = (m: Method = 'cash') => {
+  const openPay = (m: Method = 'cash', withInvoice = false) => {
     if (!ready()) return;
     searchRef.current?.blur();
     setQuery('');
@@ -926,8 +962,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     setGiven('');
     openedAt.current = performance.now();
     burst.current = { text: '', last: 0, fast: 0, given: '' };
-    setInvoice(total > limit);
-    setCustomer({ name: '', nif: '', address: '' });
+    setInvoice(withInvoice || total > limit || hasCustomer);
     setPaying(true);
   };
 
@@ -936,15 +971,15 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
   // the customer's details, so the window opens.
   const payNow = (m: Method, tenderedCents?: number) => {
     if (!ready()) return;
-    if (overLimit) openPay(m);
+    if (overLimit || nifBad || (nifTrim && !customer.name.trim())) openPay(m, true);
     else if (m === 'card' && several && settings.machineAsk) setChoosing(true);
-    else finish({ method: m, machine: m === 'card' ? firstCard || null : null, tendered: tenderedCents ?? null, print: printOn && !noPrinter, invoice: false });
+    else finish({ method: m, machine: m === 'card' ? firstCard || null : null, tendered: tenderedCents ?? null, print: printOn && !noPrinter, invoice: hasCustomer || invoice });
   };
 
   const pickMachine = (id: number) => {
     setChoosing(false);
     searchRef.current?.focus();
-    finish({ method: 'card', machine: id, tendered: null, print: printOn && !noPrinter, invoice: false });
+    finish({ method: 'card', machine: id, tendered: null, print: printOn && !noPrinter, invoice: hasCustomer || invoice });
   };
 
   const noPick = useCallback(() => {
@@ -1034,6 +1069,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
     // ticket on the screen may be emptied and start another sale, under
     // another id: what happens to this charge is noted under this one.
     let sentId = saleId.current;
+    const attachCust = (c.invoice || hasCustomer) && hasCustomer;
     const send = () =>
       call<Finalized>('sale.finalize', {
         lines: payload,
@@ -1042,7 +1078,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
         saleId: sentId,
         clockOk,
         expectedCents: total,
-        customer: c.invoice ? customer : undefined,
+        customer: attachCust ? customer : undefined,
+        bill: c.invoice || hasCustomer || billA4 || undefined,
+        format: billA4 ? 'a4' : undefined,
         replaces: fixing?.id,
       });
     try {
@@ -1074,6 +1112,9 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       setSel(next[next.length - 1]?.key ?? null);
       setPaying(false);
       setGiven('');
+      setInvoice(false);
+      setBillA4(false);
+      setCustomer({ name: '', nif: '', address: '', phone: '', email: '' });
       setLast({ ticket: r.ticket, printed: r.printed });
       if (fixing) toast.ok(`${fixing.number} ${tr('corregida', 'corrected')}: ${r.ticket.number}`);
       setFixing(null);
@@ -1598,6 +1639,43 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
             </button>
           )}
 
+          {lines.length > 0 && (
+            <div className="till-client-row">
+              <button
+                type="button"
+                className={`client-chip${hasCustomer || billA4 ? ' on' : ''}`}
+                onMouseDown={keep}
+                onClick={() => openPay(method, true)}
+                disabled={busy}
+                title={tr('Añadir datos del cliente o emitir factura', 'Add customer details or issue an invoice')}
+              >
+                <UserRound size={15} />
+                <span>
+                  {hasCustomer
+                    ? [customer.name.trim(), customer.nif.trim() || customer.phone?.trim()].filter(Boolean).join(' · ')
+                    : tr('Cliente / Factura (opcional)', 'Customer / Invoice (optional)')}
+                  {billA4 && ' · A4'}
+                </span>
+              </button>
+              {(hasCustomer || billA4) && (
+                <button
+                  type="button"
+                  className="icon-btn sm"
+                  onMouseDown={keep}
+                  onClick={() => {
+                    setCustomer({ name: '', nif: '', address: '', phone: '', email: '' });
+                    setBillA4(false);
+                    setInvoice(false);
+                  }}
+                  title={tr('Quitar datos del cliente', 'Clear customer details')}
+                  aria-label={tr('Quitar datos del cliente', 'Clear customer details')}
+                >
+                  <X size={14} />
+                </button>
+              )}
+            </div>
+          )}
+
           <div className={`tender${lines.length && !negative ? '' : ' off'}`}>
             <span>{tr('Entrega', 'Given')}</span>
             {quick(total, 3).map((c) => (
@@ -1752,35 +1830,100 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
               {invoice ? (
                 <div className="customer">
                   <div className="customer-head">
-                    <b>{tr('Factura con datos del cliente', 'Invoice with customer details')}</b>
+                    <b>{tr('Cliente / Factura', 'Customer / Invoice')}</b>
                     {!overLimit && (
-                      <button className="link" onMouseDown={keep} onClick={() => setInvoice(false)}>
+                      <button
+                        className="link"
+                        onMouseDown={keep}
+                        onClick={() => {
+                          setInvoice(false);
+                          setBillA4(false);
+                          setCustomer({ name: '', nif: '', address: '', phone: '', email: '' });
+                        }}
+                      >
                         {tr('Quitar', 'Remove')}
                       </button>
                     )}
                   </div>
-                  {overLimit && (
-                    <p className="pay-hint">
-                      {service
-                        ? tr('Con una reparación, más de 400 €: hace falta una factura con los datos del cliente.', 'With a repair, over 400 EUR: this needs an invoice with the customer details.')
-                        : tr('Más de 3.000 €: hace falta una factura con los datos del cliente.', 'Over 3,000 EUR: this needs an invoice with the customer details.')}
-                    </p>
-                  )}
+                  <p className="pay-hint">
+                    {overLimit
+                      ? service
+                        ? tr('Con una reparación, más de 400 €: hace falta una factura con nombre y NIF.', 'With a repair, over 400 EUR: needs a full invoice with name and NIF.')
+                        : tr('Más de 3.000 €: hace falta una factura con nombre y NIF.', 'Over 3,000 EUR: needs a full invoice with name and NIF.')
+                      : tr('Todos los campos son opcionales. Pon NIF solo si el cliente pide factura completa.', 'All fields are optional. Add a NIF only if the customer requests a full invoice.')}
+                  </p>
                   <div className="grid2">
-                    <Field label={tr('Nombre o razón social', 'Name or company')}>
-                      <input value={customer.name} onChange={(e) => setCustomer({ ...customer, name: e.target.value })} maxLength={120} />
+                    <Field label={tr('Nombre / Razón social', 'Name / Company')}>
+                      <div className="bill-suggest">
+                        <input
+                          value={customer.name}
+                          onChange={(e) => {
+                            setCustomer({ ...customer, name: e.target.value });
+                            setSuggest(true);
+                          }}
+                          onFocus={() => setSuggest(true)}
+                          onBlur={() => window.setTimeout(() => setSuggest(false), 150)}
+                          maxLength={120}
+                          autoComplete="off"
+                        />
+                        {suggest && known.length > 0 && (
+                          <div className="bill-known" role="listbox">
+                            {known.map((k) => (
+                              <button
+                                key={`${k.nif}-${k.name}`}
+                                type="button"
+                                role="option"
+                                aria-selected={false}
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => {
+                                  setCustomer({
+                                    name: k.name,
+                                    nif: k.nif,
+                                    address: k.address,
+                                    phone: k.phone ?? '',
+                                    email: k.email ?? '',
+                                  });
+                                  setSuggest(false);
+                                }}
+                              >
+                                <UserRound size={15} />
+                                <span>
+                                  <b>{k.name}</b>
+                                  <small>
+                                    {[k.nif, k.phone].filter(Boolean).join(' · ') || tr('sin NIF', 'no NIF')} · {tr('última', 'last')} {dateTime(k.last)}
+                                  </small>
+                                </span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </Field>
-                    <Field label="NIF" error={customer.nif.trim() && !customerNif(customer.nif) ? tr('Revisa el NIF', 'Check the NIF') : undefined}>
-                      <input value={customer.nif} onChange={(e) => setCustomer({ ...customer, nif: e.target.value.toUpperCase() })} maxLength={20} />
+                    <Field label={overLimit ? 'NIF' : tr('NIF (opcional)', 'NIF (optional)')} error={nifBad ? tr('Revisa el NIF', 'Check the NIF') : undefined}>
+                      <input value={customer.nif} onChange={(e) => setCustomer({ ...customer, nif: e.target.value.toUpperCase() })} maxLength={20} placeholder="B12345674" />
                     </Field>
                   </div>
-                  <Field label={tr('Dirección', 'Address')}>
+                  <div className="grid2">
+                    <Field label={tr('Teléfono (opcional)', 'Phone (optional)')}>
+                      <input value={customer.phone ?? ''} onChange={(e) => setCustomer({ ...customer, phone: e.target.value })} maxLength={30} inputMode="tel" />
+                    </Field>
+                    <Field label={tr('Email (opcional)', 'Email (optional)')}>
+                      <input value={customer.email ?? ''} onChange={(e) => setCustomer({ ...customer, email: e.target.value })} maxLength={120} inputMode="email" />
+                    </Field>
+                  </div>
+                  <Field label={tr('Dirección (opcional)', 'Address (optional)')}>
                     <input value={customer.address} onChange={(e) => setCustomer({ ...customer, address: e.target.value })} maxLength={200} />
                   </Field>
+                  {settings.invoicePrinter && (
+                    <label className="bill-check">
+                      <input type="checkbox" checked={billA4} onChange={(e) => setBillA4(e.target.checked)} />
+                      {tr('Imprimir como factura en hoja A4', 'Print as A4 invoice sheet')}
+                    </label>
+                  )}
                 </div>
               ) : (
                 <button className="link invoice-link" onMouseDown={keep} onClick={() => setInvoice(true)}>
-                  {tr('Factura con datos del cliente', 'Invoice with customer details')}
+                  {tr('+ Añadir cliente o factura (opcional)', '+ Add customer or invoice (optional)')}
                 </button>
               )}
             </div>
@@ -1827,7 +1970,7 @@ export function Sale({ cartKey, active, admin, incoming, onCatalogue, settings, 
       {seeTicket && preview && (
         <Modal title={tr('Así saldrá el ticket', 'This is how the ticket will look')} onClose={() => setSeeTicket(false)}>
           <div className="see-ticket">
-            <Paper lines={preview.lines} logo={logo} cols={settings.columns} />
+            <Paper lines={preview.lines} logo={logo} cols={settings.columns} modern={settings.ticketStyle !== 'classic'} />
           </div>
           {previewErr && <p className="form-error">{previewErr}</p>}
         </Modal>

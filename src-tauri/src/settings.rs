@@ -64,7 +64,15 @@ pub struct Settings {
     pub legal_name: String,
     pub shop_address: String,
     pub shop_phone: String,
+    pub shop_email: String,
     pub shop_nif: String,
+    // separate company details used only on bills/invoices when configured
+    pub bill_company_name: String,
+    pub bill_legal_name: String,
+    pub bill_nif: String,
+    pub bill_address: String,
+    pub bill_phone: String,
+    pub bill_email: String,
     pub footer: String,
     pub ticket_prefix: String,
     pub default_vat_bp: i64,
@@ -183,6 +191,12 @@ pub struct Settings {
     // what a repair cannot be taken in without, comma separated: name,
     // phone, device, fault; nothing by default
     pub repair_required: String,
+    // print the device passcode on the customer's repair receipt too (always on the workshop tag)
+    pub repair_passcode_on_receipt: bool,
+    // show each card machine separately on the main Venta dashboard
+    pub split_card_machines: bool,
+    // "modern" (smooth thermal graphics) or "classic" (raw printer text)
+    pub ticket_style: String,
     // a printer chosen for one print only, never saved
     #[serde(skip)]
     pub one_off: Option<OneOff>,
@@ -221,7 +235,14 @@ impl Default for Settings {
             legal_name: String::new(),
             shop_address: String::new(),
             shop_phone: String::new(),
+            shop_email: String::new(),
             shop_nif: String::new(),
+            bill_company_name: String::new(),
+            bill_legal_name: String::new(),
+            bill_nif: String::new(),
+            bill_address: String::new(),
+            bill_phone: String::new(),
+            bill_email: String::new(),
             footer: "¡Gracias por su visita!".into(),
             ticket_prefix: "T".into(),
             default_vat_bp: 2100,
@@ -286,6 +307,9 @@ impl Default for Settings {
             invoice_imei: true,
             invoice_net_prices: false,
             repair_required: String::new(),
+            repair_passcode_on_receipt: false,
+            split_card_machines: true,
+            ticket_style: "modern".into(),
             one_off: None,
         }
     }
@@ -367,6 +391,16 @@ impl Settings {
         }
         self.cert = self.cert.chars().filter(char::is_ascii_hexdigit).take(40).collect::<String>().to_uppercase();
         self.repair_terms = self.repair_terms.trim().chars().take(600).collect();
+        self.shop_email = self.shop_email.trim().chars().take(120).collect();
+        self.bill_company_name = self.bill_company_name.trim().chars().take(80).collect();
+        self.bill_legal_name = self.bill_legal_name.trim().chars().take(80).collect();
+        self.bill_nif = self.bill_nif.trim().chars().take(20).collect();
+        self.bill_address = self.bill_address.trim().chars().take(300).collect();
+        self.bill_phone = self.bill_phone.trim().chars().take(40).collect();
+        self.bill_email = self.bill_email.trim().chars().take(120).collect();
+        if !["modern", "classic"].contains(&self.ticket_style.as_str()) {
+            self.ticket_style = "modern".into();
+        }
         self
     }
 
@@ -630,6 +664,12 @@ pub fn save(conn: &Connection, s: Settings) -> Result<Settings> {
             return fail("E_INVALID:nif");
         }
         s.shop_nif = crate::nif::normalize(&s.shop_nif);
+    }
+    if !s.bill_nif.trim().is_empty() {
+        if !crate::nif::spanish(&s.bill_nif) {
+            return fail("E_INVALID:billNif");
+        }
+        s.bill_nif = crate::nif::normalize(&s.bill_nif);
     }
     crate::verifactu::check_settings(conn, &s)?;
     put(conn, "settings", &serde_json::to_string(&s)?)?;

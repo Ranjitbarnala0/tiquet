@@ -65,7 +65,8 @@ impl InvoiceOpts {
 // shop with no NIF.
 fn title(rec: &TicketRecord) -> &'static str {
     let fiscal = !rec.shop.nif.trim().is_empty();
-    match (rec.customer.is_some(), rec.kind == "refund", fiscal) {
+    let full = rec.customer.as_ref().is_some_and(Customer::is_fiscal);
+    match (full, rec.kind == "refund", fiscal) {
         (true, false, _) => "FACTURA",
         (true, true, _) => "FACTURA RECTIFICATIVA",
         (false, false, true) => "FACTURA SIMPLIFICADA",
@@ -443,6 +444,9 @@ fn head(d: &mut Doc, y: f32, rec: &TicketRecord, logo: Option<&Logo>, copy: bool
     if shop.show_phone.unwrap_or(true) && !shop.phone.trim().is_empty() {
         l = d.para(LEFT, l, col, small, Align::Left, &format!("Tel. {}", shop.phone.trim()));
     }
+    if !shop.email.trim().is_empty() {
+        l = d.para(LEFT, l, col, small, Align::Left, &format!("Email: {}", shop.email.trim()));
+    }
 
     // the title as big as fits beside COPIA, its capitals level with the shop's
     let refund = rec.kind == "refund";
@@ -492,12 +496,20 @@ fn customer(d: &mut Doc, y: f32, rec: &TicketRecord) -> f32 {
     let (name, body, head) = (font(10.5, true), font(9.5, false), font(8.0, true));
     // a simplified invoice is made out to nobody: no box at all
     let mut bottom = y;
-    if let Some(c) = &rec.customer {
+    if let Some(c) = rec.customer.as_ref().filter(|c| !c.is_empty()) {
         let mut lines: Vec<(Font, String)> = Vec::new();
         let mut add = |f: Font, s: &str| lines.extend(wrap(s, f, inner).into_iter().map(|l| (f, l)));
-        add(name, &c.name);
+        if !c.name.trim().is_empty() {
+            add(name, &c.name);
+        }
         if !c.nif.trim().is_empty() {
             add(body, &format!("NIF: {}", c.nif.trim()));
+        }
+        if !c.phone.trim().is_empty() {
+            add(body, &format!("Tel.: {}", c.phone.trim()));
+        }
+        if !c.email.trim().is_empty() {
+            add(body, &format!("Email: {}", c.email.trim()));
         }
         for a in c.address.lines().map(str::trim).filter(|a| !a.is_empty()) {
             add(body, a);
@@ -728,8 +740,8 @@ pub fn sample(s: &Settings) -> TicketRecord {
         vat: t.vat,
         prints: Vec::new(),
         payment_changes: Vec::new(),
-        shop: ShopInfo::from_settings(s),
-        customer: Some(Customer { name: "Cliente de prueba".into(), nif: "B12345674".into(), address: "Calle Mayor, 1\n17600 Figueres".into() }),
+        shop: ShopInfo::from_settings_for(s, true),
+        customer: Some(Customer { name: "Cliente de prueba".into(), nif: "B12345674".into(), address: "Calle Mayor, 1\n17600 Figueres".into(), ..Customer::default() }),
         training: true,
         qr: None,
         aeat: None,
@@ -1397,7 +1409,7 @@ mod tests {
     }
 
     fn acme() -> Customer {
-        Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: "Rambla Nova, 5, 2º 1ª\n17001 Girona".into() }
+        Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: "Rambla Nova, 5, 2º 1ª\n17001 Girona".into(), ..Customer::default() }
     }
 
     fn line(name: &str, qty: i64, unit_cents: i64, vat_bp: i64) -> SaleLine {

@@ -176,6 +176,7 @@ pub struct ShopInfo {
     pub name: String,
     pub address: String,
     pub phone: String,
+    pub email: String,
     pub nif: String,
     pub footer: String,
     pub legal_name: String,
@@ -199,6 +200,7 @@ impl Default for ShopInfo {
             name: String::new(),
             address: String::new(),
             phone: String::new(),
+            email: String::new(),
             nif: String::new(),
             footer: String::new(),
             legal_name: String::new(),
@@ -215,13 +217,32 @@ impl Default for ShopInfo {
 
 impl ShopInfo {
     pub fn from_settings(s: &Settings) -> ShopInfo {
+        Self::from_settings_for(s, false)
+    }
+
+    // Legal bills can carry a separate billing company identity when configured,
+    // while counter tickets and repairs keep the storefront shop details.
+    pub fn from_settings_for(s: &Settings, for_bill: bool) -> ShopInfo {
+        let has_bill = for_bill
+            && [&s.bill_company_name, &s.bill_legal_name, &s.bill_nif, &s.bill_address, &s.bill_phone, &s.bill_email]
+                .iter()
+                .any(|x| !x.trim().is_empty());
+        let pick = |bill: &str, shop: &str| if has_bill && !bill.trim().is_empty() { bill.trim().to_string() } else { shop.to_string() };
+        let legal_name = if has_bill && !s.bill_legal_name.trim().is_empty() {
+            s.bill_legal_name.trim().to_string()
+        } else if has_bill && !s.bill_company_name.trim().is_empty() {
+            String::new()
+        } else {
+            s.legal_name.clone()
+        };
         ShopInfo {
-            name: s.shop_name.clone(),
-            address: s.shop_address.clone(),
-            phone: s.shop_phone.clone(),
-            nif: s.shop_nif.clone(),
+            name: pick(&s.bill_company_name, &s.shop_name),
+            address: pick(&s.bill_address, &s.shop_address),
+            phone: pick(&s.bill_phone, &s.shop_phone),
+            email: pick(&s.bill_email, &s.shop_email),
+            nif: pick(&s.bill_nif, &s.shop_nif),
             footer: s.footer.clone(),
-            legal_name: s.legal_name.clone(),
+            legal_name,
             logo: -1,
             show_vat: Some(s.show_vat),
             vat: Some(VatView::of(s)),
@@ -245,26 +266,54 @@ impl ShopInfo {
     }
 }
 
-// who a full invoice is made out to
+// who an invoice or ticket with customer details is made out to; below the
+// simplified limit any field is optional, while a full fiscal invoice has both
+// name and NIF
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Customer {
     pub name: String,
     pub nif: String,
     pub address: String,
+    pub phone: String,
+    pub email: String,
 }
 
 impl Customer {
-    fn checked(&self) -> Result<Customer> {
-        let name = self.name.split_whitespace().collect::<Vec<_>>().join(" ");
-        if name.is_empty() || name.chars().count() > 120 {
+    pub fn is_empty(&self) -> bool {
+        self.name.trim().is_empty()
+            && self.nif.trim().is_empty()
+            && self.address.trim().is_empty()
+            && self.phone.trim().is_empty()
+            && self.email.trim().is_empty()
+    }
+
+    pub fn is_fiscal(&self) -> bool {
+        !self.name.trim().is_empty() && !self.nif.trim().is_empty()
+    }
+
+    pub fn cleaned(&self) -> Customer {
+        Customer {
+            name: self.name.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(120).collect(),
+            nif: if self.nif.trim().is_empty() { String::new() } else { crate::nif::normalize(&self.nif) },
+            address: self.address.trim().chars().take(300).collect(),
+            phone: self.phone.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(30).collect(),
+            email: self.email.trim().chars().take(120).collect(),
+        }
+    }
+
+    fn checked_for(&self, require_fiscal: bool) -> Result<Option<Customer>> {
+        let c = self.cleaned();
+        if c.is_empty() && !require_fiscal {
+            return Ok(None);
+        }
+        if require_fiscal && c.name.is_empty() {
             return fail("E_INVALID:customerName");
         }
-        if !crate::nif::customer(&self.nif) {
+        if (!c.nif.is_empty() || require_fiscal) && !crate::nif::customer(&c.nif) {
             return fail("E_INVALID:customerNif");
         }
-        let address: String = self.address.trim().chars().take(300).collect();
-        Ok(Customer { name, nif: crate::nif::normalize(&self.nif), address })
+        Ok(Some(c))
     }
 }
 
@@ -666,8 +715,10 @@ struct NewTicket<'a> {
 // then it is sealed. The triggers refuse lines for a sealed ticket, so an
 // issued ticket cannot gain lines later.
 fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> Result<i64> {
-    let mut shop = ShopInfo { logo: settings::logo_id(tx)?, ..ShopInfo::from_settings(s) };
-    let view = t.vat.unwrap_or(if t.customer.is_some() { VatView::Full } else { VatView::of(s) });
+    let fiscal = t.customer.is_some_and(Customer::is_fiscal);
+    let is_bill = t.bill || fiscal;
+    let mut shop = ShopInfo { logo: settings::logo_id(tx)?, ..ShopInfo::from_settings_for(s, is_bill) };
+    let view = t.vat.unwrap_or(if fiscal { VatView::Full } else { VatView::of(s) });
     shop.vat = Some(view);
     shop.show_vat = Some(view == VatView::Full);
     let shop = serde_json::to_string(&shop)?;
@@ -677,7 +728,7 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
     if !t.training && t.at.is_none() {
         check_clock(tx, &issued_at, t.clock_ok)?;
     }
-    let tag = series_tag(t.kind, t.customer.is_some(), t.training);
+    let tag = series_tag(t.kind, fiscal, t.training);
     let (series, seq, number) = next_number(tx, &s.ticket_prefix, &tag, &issued_at)?;
     let (totals, payment) = (t.totals, t.payment);
     let c = t.customer;
@@ -685,9 +736,9 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
     tx.execute(
         "INSERT INTO tickets (number, series, seq, issued_at, user_id, user_name, total_cents, item_count,
                               payment_method, tendered_cents, change_cents, shop, kind, refund_of, refund_reason,
-                              client_id, sealed, customer_name, customer_nif, customer_address, training,
+                              client_id, sealed, customer_name, customer_nif, customer_address, customer_phone, customer_email, training,
                               machine_id, machine_cost_cents, bill, replaces, note)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, 0, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
         params![
             number,
             series,
@@ -708,6 +759,8 @@ fn insert(tx: &Connection, user: &SessionUser, s: &Settings, t: &NewTicket) -> R
             c.map(|c| c.name.as_str()),
             c.map(|c| c.nif.as_str()),
             c.map(|c| c.address.as_str()),
+            c.map(|c| c.phone.as_str()),
+            c.map(|c| c.email.as_str()),
             t.training,
             machine.map(|m| m.id),
             machine.map_or(0, |m| m.sale_cost(totals.total_cents)),
@@ -790,15 +843,19 @@ pub fn check(s: &Settings, lines: Vec<SaleLine>, pay: &PaymentIn, opts: &SaleOpt
     if opts.expected_cents.is_some_and(|e| e != totals.total_cents) {
         return fail("E_TOTAL_CHANGED");
     }
-    let customer = opts.customer.as_ref().map(Customer::checked).transpose()?;
-    // an invoice made out to a customer names the shop's NIF
-    if customer.is_some() && s.shop_nif.trim().is_empty() {
+    let over_retail = totals.total_cents > SIMPLIFIED_LIMIT;
+    let over_service = totals.total_cents > SERVICE_LIMIT && lines.iter().any(|l| l.repair_id.is_some());
+    let customer = opts.customer.as_ref().map(|c| c.checked_for(over_retail || over_service)).transpose()?.flatten();
+    let fiscal = customer.as_ref().is_some_and(Customer::is_fiscal);
+    let is_bill = opts.bill || fiscal;
+    // a full fiscal invoice made out to a customer names the issuer's NIF
+    if fiscal && ShopInfo::from_settings_for(s, is_bill).nif.trim().is_empty() {
         return fail("E_SHOP_NIF");
     }
-    if customer.is_none() && totals.total_cents > SIMPLIFIED_LIMIT {
+    if !fiscal && over_retail {
         return fail("E_OVER_LIMIT");
     }
-    if customer.is_none() && totals.total_cents > SERVICE_LIMIT && lines.iter().any(|l| l.repair_id.is_some()) {
+    if !fiscal && over_service {
         return fail("E_OVER_LIMIT_SERVICE");
     }
     let payment = resolve_payment(pay, totals.total_cents)?;
@@ -1037,7 +1094,7 @@ pub fn refund(conn: &mut Connection, user: &SessionUser, s: &Settings, a: &Refun
         at: None,
         // as the sale it returns shows it, also one from before 1.13 (the
         // preview says the same)
-        vat: Some(plan.original.shop.vat_view(plan.original.customer.is_some(), s.show_vat)),
+        vat: Some(plan.original.shop.vat_view(plan.original.customer.as_ref().is_some_and(Customer::is_fiscal), s.show_vat)),
         note: None,
     };
     let id = insert(&tx, user, s, &t)?;
@@ -1063,7 +1120,7 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                     customer_name, customer_nif, customer_address, training, machine_id, bill,
                     (SELECT o.number FROM tickets o WHERE o.id = tickets.replaces),
                     (SELECT n.number FROM tickets n WHERE n.replaces = tickets.id ORDER BY n.id DESC LIMIT 1),
-                    note
+                    note, customer_phone, customer_email
              FROM tickets WHERE id = ?1",
             [id],
             |r| {
@@ -1092,6 +1149,8 @@ pub fn load(conn: &Connection, id: i64) -> Result<TicketRecord> {
                             name,
                             nif: r.get::<_, Option<String>>(17).ok().flatten().unwrap_or_default(),
                             address: r.get::<_, Option<String>>(18).ok().flatten().unwrap_or_default(),
+                            phone: r.get::<_, Option<String>>(25).ok().flatten().unwrap_or_default(),
+                            email: r.get::<_, Option<String>>(26).ok().flatten().unwrap_or_default(),
                         }),
                         training: r.get(19)?,
                         qr: None,
@@ -1178,23 +1237,28 @@ pub struct KnownCustomer {
     pub name: String,
     pub nif: String,
     pub address: String,
+    pub phone: String,
+    pub email: String,
     pub last: String,
 }
 
-// The customers of earlier invoices that fit what is typed (name or NIF),
+// The customers of earlier invoices that fit what is typed (name, NIF or phone),
 // the most recent first, each once.
 pub fn customers(conn: &Connection, q: &str) -> Result<Vec<KnownCustomer>> {
     let words: Vec<String> = q.to_lowercase().split_whitespace().map(str::to_string).collect();
     let mut stmt = conn.prepare(
-        "SELECT customer_name, COALESCE(customer_nif, ''), COALESCE(customer_address, ''), MAX(issued_at)
-         FROM tickets WHERE customer_name IS NOT NULL AND training = 0
-         GROUP BY UPPER(COALESCE(customer_nif, '')), customer_name ORDER BY MAX(issued_at) DESC LIMIT 500",
+        "SELECT COALESCE(customer_name, ''), COALESCE(customer_nif, ''), COALESCE(customer_address, ''),
+                COALESCE(customer_phone, ''), COALESCE(customer_email, ''), MAX(issued_at)
+         FROM tickets WHERE (COALESCE(customer_name, '') <> '' OR COALESCE(customer_nif, '') <> '' OR COALESCE(customer_phone, '') <> '') AND training = 0
+         GROUP BY UPPER(COALESCE(customer_nif, '')), COALESCE(customer_name, ''), COALESCE(customer_phone, '') ORDER BY MAX(issued_at) DESC LIMIT 500",
     )?;
-    let rows = stmt.query_map([], |r| Ok(KnownCustomer { name: r.get(0)?, nif: r.get(1)?, address: r.get(2)?, last: r.get(3)? }))?;
+    let rows = stmt.query_map([], |r| {
+        Ok(KnownCustomer { name: r.get(0)?, nif: r.get(1)?, address: r.get(2)?, phone: r.get(3)?, email: r.get(4)?, last: r.get(5)? })
+    })?;
     let mut out = Vec::new();
     for c in rows {
         let c = c?;
-        let hay = format!("{} {}", c.name, c.nif).to_lowercase();
+        let hay = format!("{} {} {} {}", c.name, c.nif, c.phone, c.email).to_lowercase();
         if words.iter().all(|w| hay.contains(w.as_str())) {
             out.push(c);
             if out.len() == 12 {
@@ -1585,7 +1649,7 @@ mod tests {
         }
         // an invoice with a customer made in Venta shows its VAT whatever
         // the receipts do, and so does its return
-        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: String::new() };
+        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), ..Customer::default() };
         let quiet = Settings { show_vat: false, vat_note: false, ..s.clone() };
         let (inv, _) = sell(&mut conn, &user, &quiet, vec![line("iPhone", 1, 69_900)], &cash(None), &SaleOpts { customer: Some(acme), ..SaleOpts::default() }).unwrap();
         assert_eq!(inv.shop.vat, Some(VatView::Full));
@@ -1601,7 +1665,7 @@ mod tests {
     #[test]
     fn a_bill_is_corrected_with_a_clean_new_one_and_the_old_keeps_why() {
         let (mut conn, user, s) = setup();
-        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: String::new() };
+        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), ..Customer::default() };
         let s = Settings { shop_nif: "B12345674".into(), ..s };
         let opts = SaleOpts { customer: Some(acme.clone()), bill: true, ..SaleOpts::default() };
         let (wrong, _) = sell(&mut conn, &user, &s, vec![line("iPhone 14", 1, 69_900)], &cash(None), &opts).unwrap();
@@ -1888,16 +1952,16 @@ mod tests {
     fn a_customer_makes_it_a_full_invoice_in_its_own_series() {
         let (mut conn, user, s) = setup();
         // an invoice names the shop's NIF: without one there is none
-        let bad = SaleOpts { customer: Some(Customer { name: "Acme SL".into(), nif: "B12345674".into(), address: String::new() }), ..SaleOpts::default() };
+        let bad = SaleOpts { customer: Some(Customer { name: "Acme SL".into(), nif: "B12345674".into(), ..Customer::default() }), ..SaleOpts::default() };
         let no_nif = Settings { shop_nif: String::new(), ..s.clone() };
         assert_eq!(sell(&mut conn, &user, &no_nif, vec![line("Funda", 1, 995)], &cash(None), &bad).unwrap_err().0, "E_SHOP_NIF");
         let s = Settings { shop_nif: "B12345674".into(), ..s };
         let year = now()[..4].to_string();
         let big = vec![line("Portátil", 1, 350_000)];
         assert_eq!(finalize(&mut conn, &user, &s, big.clone(), &cash(None)).unwrap_err().0, "E_OVER_LIMIT");
-        let bad = SaleOpts { customer: Some(Customer { name: "Acme SL".into(), nif: "B12345678".into(), address: String::new() }), ..SaleOpts::default() };
+        let bad = SaleOpts { customer: Some(Customer { name: "Acme SL".into(), nif: "B12345678".into(), ..Customer::default() }), ..SaleOpts::default() };
         assert_eq!(sell(&mut conn, &user, &s, big.clone(), &cash(None), &bad).unwrap_err().0, "E_INVALID:customerNif");
-        let acme = Customer { name: "  Acme   SL ".into(), nif: "b-12345674".into(), address: "Calle 1, Girona".into() };
+        let acme = Customer { name: "  Acme   SL ".into(), nif: "b-12345674".into(), address: "Calle 1, Girona".into(), ..Customer::default() };
         let opts = SaleOpts { customer: Some(acme), ..SaleOpts::default() };
         let (t, _) = sell(&mut conn, &user, &s, big, &cash(None), &opts).unwrap();
         assert_eq!(t.number, format!("TF{year}-000001"));

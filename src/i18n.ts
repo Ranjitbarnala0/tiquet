@@ -175,6 +175,10 @@ const errors: Record<string, [string, string]> = {
     'Esta caja ya ha enviado facturas reales a la AEAT con otro NIF, y solo puede facturar con ese.',
     'This till has already sent real invoices to the AEAT under another NIF, and can only invoice under that one.',
   ],
+  E_BILL_NIF_VERIFACTU: [
+    'Con VERI*FACTU encendido, el NIF de las facturas debe coincidir con el NIF del comercio.',
+    'With VERI*FACTU on, the invoice NIF must match the shop NIF.',
+  ],
   E_VAT_AEAT: [
     'Con VERI*FACTU solo valen el 21 %, 10 %, 4 % y 0 % de IVA. Revisa el IVA de los artículos.',
     'With VERI*FACTU only 21 %, 10 %, 4 % and 0 % VAT are accepted. Check the items’ VAT.',
@@ -211,8 +215,10 @@ const fields: Record<string, [string, string]> = {
   lines: ['líneas del ticket (máximo 500)', 'ticket lines (500 at most)'],
   saleId: ['identificador de la venta', 'sale identifier'],
   nif: ['NIF del comercio (revisa la letra)', 'shop NIF (check the letter)'],
+  billNif: ['NIF de facturación (revisa la letra)', 'billing NIF (check the letter)'],
   customerName: ['nombre del cliente', 'customer name'],
   customerNif: ['NIF del cliente (revisa la letra)', 'customer NIF (check the letter)'],
+  customerDni: ['DNI / NIE del cliente', 'customer DNI / NIE'],
   amount: ['importe', 'amount'],
   legalName: ['titular o razón social, en Ajustes > Comercio', 'owner or company name, in Settings > Shop'],
   customerPhone: ['teléfono del cliente', 'customer phone'],

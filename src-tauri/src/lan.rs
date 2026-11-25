@@ -1157,7 +1157,7 @@ mod tests {
         api::dispatch(
             &main,
             "settings.save",
-            json!({ "printerName": "POS-MAIN", "columns": 48, "paperAuto": false }),
+            json!({ "printerName": "POS-MAIN", "columns": 48, "paperAuto": false, "ticketStyle": "classic" }),
         )
         .unwrap();
         let eva = api::dispatch(

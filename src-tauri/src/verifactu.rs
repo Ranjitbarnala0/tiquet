@@ -353,7 +353,7 @@ fn recipient(x: &mut Xml, c: &Customer) {
 
 // F2 a ticket, F1 a full invoice, R5 and R1 their returns (art. 80 Dos LIVA)
 pub fn invoice_type(t: &TicketRecord) -> &'static str {
-    match (t.kind == "refund", t.customer.is_some()) {
+    match (t.kind == "refund", t.customer.as_ref().is_some_and(Customer::is_fiscal)) {
         (false, false) => "F2",
         (false, true) => "F1",
         (true, false) => "R5",
@@ -441,7 +441,7 @@ fn build_alta(t: &TicketRecord, issuer: &Issuer, env: Env, install: &str, prev: 
         }
     }
     x.el("DescripcionOperacion", &description(t));
-    if let Some(c) = &t.customer {
+    if let Some(c) = t.customer.as_ref().filter(|c| c.is_fiscal()) {
         recipient(&mut x, c);
     }
     x.open("Desglose");
@@ -769,6 +769,9 @@ pub fn check_settings(conn: &Connection, s: &Settings) -> Result<()> {
     }
     if issuer_name(&s.legal_name, &s.shop_name).is_empty() {
         return fail("E_INVALID:legalName");
+    }
+    if !s.bill_nif.trim().is_empty() && nif::normalize(&s.bill_nif) != nif::normalize(&s.shop_nif) {
+        return fail("E_BILL_NIF_VERIFACTU");
     }
     Ok(())
 }
@@ -1199,7 +1202,7 @@ mod tests {
     fn every_sale_return_and_void_is_chained_in_the_aeat_format() {
         let (mut conn, user, s, _) = setup("test");
         let sale = tickets::finalize(&mut conn, &user, &s, vec![line("Cable USB-C", 2, 690, 2100), line("Pilas AA", 1, 450, 1000)], &cash()).unwrap();
-        let acme = Customer { name: "Ana López & Hijos".into(), nif: "12345678Z".into(), address: "Rambla 5, Girona".into() };
+        let acme = Customer { name: "Ana López & Hijos".into(), nif: "12345678Z".into(), address: "Rambla 5, Girona".into(), ..Customer::default() };
         let opts = SaleOpts { customer: Some(acme), ..SaleOpts::default() };
         let (invoice, _) = tickets::sell(&mut conn, &user, &s, vec![line("Funda", 1, 1250, 2100)], &cash(), &opts).unwrap();
         let back = RefundIn {

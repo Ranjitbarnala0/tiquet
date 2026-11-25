@@ -249,26 +249,31 @@ code {
   gap: 8px;
   height: 40px;
   padding: 0 16px;
-  border-radius: 10px;
+  border-radius: 11px;
   border: 1px solid var(--line-2);
   background: var(--panel);
   color: var(--ink);
-  font-weight: 560;
+  font-weight: 580;
   cursor: pointer;
   white-space: nowrap;
-  box-shadow: var(--shadow-1);
+  box-shadow: 0 1px 2px rgba(16, 20, 32, 0.06);
   transition:
-    background 0.12s,
-    border-color 0.12s,
-    transform 0.06s;
+    background 0.14s,
+    border-color 0.14s,
+    box-shadow 0.14s,
+    transform 0.08s;
 }
 
 .btn:hover:not(:disabled) {
   background: var(--hover);
+  border-color: #c2c8d6;
+  transform: translateY(-0.5px);
+  box-shadow: 0 4px 12px rgba(16, 20, 32, 0.08);
 }
 
 .btn:active:not(:disabled) {
   transform: translateY(1px);
+  box-shadow: 0 1px 2px rgba(16, 20, 32, 0.06);
 }
 
 .btn:disabled {
@@ -277,14 +282,20 @@ code {
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: linear-gradient(180deg, #3c68ff 0%, var(--accent) 100%);
   border-color: var(--accent);
   color: #fff;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.2),
+    0 6px 16px rgba(46, 91, 255, 0.22);
 }
 
 .btn-primary:hover:not(:disabled) {
-  background: var(--accent-hover);
+  background: linear-gradient(180deg, #325eff 0%, var(--accent-hover) 100%);
   border-color: var(--accent-hover);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 8px 20px rgba(46, 91, 255, 0.28);
 }
 
 .btn-ghost {
@@ -753,6 +764,153 @@ code {
   padding: 2.4em 2.5ch 3.4em;
   -webkit-mask: conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) 50% / 1.1em 100%;
   mask: conic-gradient(from -45deg at bottom, #0000, #000 1deg 89deg, #0000 90deg) 50% / 1.1em 100%;
+}
+
+.paper.paper-modern {
+  font-family: var(--font);
+  font-size: calc(100cqi / ((var(--cols) + 4) * 0.5));
+  line-height: 1.38;
+  color: #14171f;
+  padding: 2.1em 1.7em 3.2em;
+}
+
+.pl-m-blank {
+  height: 0.6em;
+}
+
+.pl-m-rule {
+  border: 0;
+  border-top: 1px solid #d0d5df;
+  margin: 0.48em 0;
+}
+
+.pl-m-rule.heavy {
+  border-top: 2px solid #14171f;
+}
+
+.pl-m-head {
+  text-align: center;
+  font-family: var(--display);
+  font-weight: 760;
+  font-size: 1.24em;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  margin: 0.1em 0;
+}
+
+.pl-m-head.big {
+  font-size: 1.54em;
+}
+
+.pl-m-badge {
+  text-align: center;
+  margin: 0.4em 0;
+}
+
+.pl-m-badge span {
+  display: inline-block;
+  padding: 0.24em 0.9em;
+  border-radius: 999px;
+  background: #14171f;
+  color: #fff;
+  font-family: var(--display);
+  font-weight: 760;
+  font-size: 0.84em;
+  letter-spacing: 0.05em;
+}
+
+.pl-m-pill {
+  text-align: center;
+  margin: 0.4em 0;
+}
+
+.pl-m-pill span {
+  display: inline-block;
+  padding: 0.26em 0.85em;
+  border-radius: 999px;
+  border: 1.5px solid #14171f;
+  background: #f2f4f8;
+  color: #14171f;
+  font-family: var(--display);
+  font-weight: 720;
+  font-size: 0.86em;
+}
+
+.pl-m-total {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.6em;
+  margin: 0.48em 0;
+  padding: 0.52em 0.78em;
+  border: 2px solid #14171f;
+  border-radius: 0.65em;
+  background: #f4f6fa;
+  font-family: var(--display);
+}
+
+.pl-m-total span {
+  font-weight: 720;
+  font-size: 1.12em;
+}
+
+.pl-m-total strong {
+  font-weight: 820;
+  font-size: 1.48em;
+  font-variant-numeric: tabular-nums;
+}
+
+.pl-m-th,
+.pl-m-tr {
+  font-family: var(--mono);
+  font-size: 0.9em;
+  line-height: 1.35;
+  white-space: pre;
+}
+
+.pl-m-th {
+  font-weight: 750;
+  background: #eff2f7;
+  border-bottom: 1.5px solid #14171f;
+  padding: 0.24em 0.15em;
+  margin-bottom: 0.22em;
+}
+
+.pl-m-tr.b {
+  font-weight: 750;
+}
+
+.pl-m-pair {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.6em;
+  margin: 0.12em 0;
+}
+
+.pl-m-pair span:last-child {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  font-weight: 620;
+}
+
+.pl-m-pair.b,
+.pl-m-pair.b span:last-child {
+  font-weight: 760;
+}
+
+.pl-m-center {
+  text-align: center;
+  margin: 0.1em 0;
+}
+
+.pl-m-text {
+  margin: 0.1em 0;
+}
+
+.pl-m-center.b,
+.pl-m-text.b {
+  font-weight: 720;
 }
 
 .pl {

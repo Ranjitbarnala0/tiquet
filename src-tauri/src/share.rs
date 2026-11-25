@@ -36,7 +36,7 @@ pub fn pdf(rec: &TicketRecord, s: &Settings, logo: Option<&Logo>) -> Vec<u8> {
     }
     let s = Settings { codepage: "cp1252".into(), ..s.clone() };
     let lines = layout::record(rec, &s, logo.is_some(), copy(rec));
-    crate::pdf::render(&[Page { lines, logo: logo.cloned(), cols: s.columns as usize }], &rec.number)
+    crate::pdf::render(&[Page { lines, logo: logo.cloned(), cols: s.columns as usize, modern: s.ticket_style == "modern" }], &rec.number)
 }
 
 pub fn file_name(number: &str) -> String {

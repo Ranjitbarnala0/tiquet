@@ -30,6 +30,155 @@ pub enum Line {
     Qr { rows: Vec<String>, module: usize },
 }
 
+pub enum Visual<'a> {
+    Blank,
+    Logo,
+    Qr { rows: &'a [String], module: usize },
+    Rule { heavy: bool },
+    Badge(&'a str),
+    Pill(&'a str),
+    Total { label: &'a str, amount: &'a str },
+    Heading { text: &'a str, big: bool },
+    TableHead(&'a str),
+    TableRow { text: &'a str, bold: bool },
+    Pair { left: &'a str, right: &'a str, bold: bool },
+    Center { text: &'a str, bold: bool },
+    Text { text: &'a str, bold: bool },
+}
+
+fn is_rule(s: &str, ch: char) -> bool {
+    s.len() >= 8 && s.chars().all(|c| c == ch)
+}
+
+fn is_badge(s: &str) -> bool {
+    matches!(
+        s,
+        "FACTURA"
+            | "FACTURA SIMPLIFICADA"
+            | "FACTURA RECTIFICATIVA"
+            | "FACTURA SIMPLIFICADA RECTIFICATIVA"
+            | "TICKET"
+            | "TICKET DE DEVOLUCIÓN"
+            | "RESGUARDO DE REPARACIÓN"
+            | "JUSTIFICANTE DE ENTREGA"
+            | "JUSTIFICANTE DE RECARGA"
+            | "RESUMEN DE VENTAS"
+            | "CIERRE DE CAJA"
+            | "CÓDIGO DE RECUPERACIÓN"
+            | "PRUEBA DE IMPRESIÓN"
+    )
+}
+
+fn split_pair(text: &str) -> Option<(&str, &str)> {
+    let body = text.trim_end();
+    let trimmed = body.trim_start();
+    let lead = body.len() - trimmed.len();
+    if lead > 2 {
+        return None;
+    }
+    let gap = trimmed.find("  ")?;
+    let left = trimmed[..gap].trim_end();
+    let rest = trimmed[gap..].trim_start();
+    if left.is_empty() || rest.is_empty() || rest.contains("  ") {
+        return None;
+    }
+    Some((&body[..lead + left.len()], rest))
+}
+
+fn is_total_line(l: &Line) -> bool {
+    matches!(l, Line::Text { text, size: Size::Big, .. } if text.trim().starts_with("TOTAL"))
+}
+
+// Classifies fixed-width lines into visual elements for modern raster/GDI/PDF
+// rendering while keeping the underlying plain text unchanged.
+pub fn classify(lines: &[Line], cols: usize) -> Vec<Visual<'_>> {
+    let mut out = Vec::with_capacity(lines.len());
+    let mut in_table = false;
+    for (i, line) in lines.iter().enumerate() {
+        match line {
+            Line::Logo => {
+                in_table = false;
+                out.push(Visual::Logo);
+            }
+            Line::Qr { rows, module } => {
+                in_table = false;
+                out.push(Visual::Qr { rows, module: *module });
+            }
+            Line::Text { text, bold, size } => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    out.push(Visual::Blank);
+                    continue;
+                }
+                if is_rule(trimmed, '-') {
+                    in_table = false;
+                    out.push(Visual::Rule { heavy: false });
+                    continue;
+                }
+                if is_rule(trimmed, '=') {
+                    in_table = false;
+                    let around_total = lines.get(i + 1).is_some_and(is_total_line) || i.checked_sub(1).and_then(|k| lines.get(k)).is_some_and(is_total_line);
+                    if !around_total {
+                        out.push(Visual::Rule { heavy: true });
+                    }
+                    continue;
+                }
+                if is_rule(trimmed, '_') {
+                    in_table = false;
+                    out.push(Visual::Rule { heavy: false });
+                    continue;
+                }
+                if *size == Size::Big && trimmed.starts_with("TOTAL") {
+                    in_table = false;
+                    if let Some((l, r)) = split_pair(trimmed) {
+                        out.push(Visual::Total { label: l.trim(), amount: r.trim() });
+                    } else {
+                        out.push(Visual::Total { label: "TOTAL", amount: trimmed.strip_prefix("TOTAL").unwrap_or(trimmed).trim() });
+                    }
+                    continue;
+                }
+                if *size != Size::Normal {
+                    in_table = false;
+                    out.push(Visual::Heading { text: trimmed, big: *size == Size::Big });
+                    continue;
+                }
+                if *bold && is_badge(trimmed) {
+                    in_table = false;
+                    out.push(Visual::Badge(trimmed));
+                    continue;
+                }
+                if *bold && ((trimmed.starts_with("*** ") && trimmed.ends_with(" ***")) || trimmed.starts_with("PENDIENTE:") || trimmed.starts_with("COBRAR ")) {
+                    in_table = false;
+                    let inner = trimmed.strip_prefix("*** ").and_then(|s| s.strip_suffix(" ***")).unwrap_or(trimmed);
+                    out.push(Visual::Pill(inner));
+                    continue;
+                }
+                if (trimmed.starts_with("UDS ") && trimmed.contains("DESCRIPCI")) || (trimmed.starts_with("IVA ") && trimmed.contains("BASE")) {
+                    in_table = true;
+                    out.push(Visual::TableHead(trimmed));
+                    continue;
+                }
+                if in_table {
+                    out.push(Visual::TableRow { text: text.trim_end(), bold: *bold });
+                    continue;
+                }
+                if let Some((left, right)) = split_pair(text) {
+                    out.push(Visual::Pair { left, right, bold: *bold });
+                    continue;
+                }
+                let lead = text.chars().take_while(|c| *c == ' ').count();
+                let center_pad = cols.saturating_sub(len(trimmed)) / 2;
+                if lead >= 2 && lead == center_pad {
+                    out.push(Visual::Center { text: trimmed, bold: *bold });
+                } else {
+                    out.push(Visual::Text { text: trimmed, bold: *bold });
+                }
+            }
+        }
+    }
+    out
+}
+
 pub fn len(s: &str) -> usize {
     s.chars().count()
 }
@@ -297,6 +446,9 @@ fn header(d: &mut Doc, shop: &ShopInfo, invoice: bool) {
     if shop.show_phone.unwrap_or(true) && !shop.phone.trim().is_empty() {
         d.center(&format!("Tel. {}", shop.phone.trim()), false, Size::Normal);
     }
+    if !shop.email.trim().is_empty() {
+        d.center(&format!("Email: {}", shop.email.trim()), false, Size::Normal);
+    }
     if (invoice || shop.show_nif.unwrap_or(true)) && !shop.nif.trim().is_empty() {
         d.center(&format!("NIF: {}", shop.nif.trim()), false, Size::Normal);
     }
@@ -429,13 +581,13 @@ pub fn ticket(v: &TicketView, s: &Settings, logo: bool) -> Vec<Line> {
         d.center("VERI*FACTU", true, Size::Normal);
         d.blank();
     }
-    let full = v.customer.is_some();
+    let fiscal_customer = v.customer.is_some_and(Customer::is_fiscal);
     // each price without VAT too: only an invoice that shows its VAT
-    let detail = full && v.vat == VatView::Full;
-    header(&mut d, v.shop, full);
+    let detail = fiscal_customer && v.vat == VatView::Full;
+    header(&mut d, v.shop, fiscal_customer);
     d.blank();
     let refund = v.kind == "refund";
-    let title = match (full, refund, fiscal(v.shop)) {
+    let title = match (fiscal_customer, refund, fiscal(v.shop)) {
         (true, false, _) => "FACTURA",
         (true, true, _) => "FACTURA RECTIFICATIVA",
         (false, false, true) => "FACTURA SIMPLIFICADA",
@@ -446,8 +598,18 @@ pub fn ticket(v: &TicketView, s: &Settings, logo: bool) -> Vec<Line> {
     d.center(title, true, Size::Normal);
     d.pair(&format!("Nº {}", v.number), &datetime(v.issued_at), false, Size::Normal);
     if let Some(c) = v.customer {
-        d.left(&format!("Cliente: {}", c.name), false, Size::Normal);
-        d.left(&format!("NIF: {}", c.nif), false, Size::Normal);
+        if !c.name.trim().is_empty() {
+            d.left(&format!("Cliente: {}", c.name.trim()), false, Size::Normal);
+        }
+        if !c.nif.trim().is_empty() {
+            d.left(&format!("NIF: {}", c.nif.trim()), false, Size::Normal);
+        }
+        if !c.phone.trim().is_empty() {
+            d.left(&format!("Tel.: {}", c.phone.trim()), false, Size::Normal);
+        }
+        if !c.email.trim().is_empty() {
+            d.left(&format!("Email: {}", c.email.trim()), false, Size::Normal);
+        }
         for l in c.address.lines().map(str::trim).filter(|l| !l.is_empty()) {
             d.left(l, false, Size::Normal);
         }
@@ -596,7 +758,12 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
     d.rule('-');
     let x = &r.data;
     // what was not given is left out, not printed empty
-    for (label, value) in [("Cliente", x.customer_name.clone()), ("Teléfono", x.customer_phone.clone()), ("Equipo", device(r))] {
+    for (label, value) in [
+        ("Cliente", x.customer_name.clone()),
+        ("Teléfono", x.customer_phone.clone()),
+        ("DNI/NIE", x.customer_dni.clone()),
+        ("Equipo", device(r)),
+    ] {
         if !value.trim().is_empty() {
             d.left(&format!("{label}: {}", value.trim()), false, Size::Normal);
         }
@@ -605,6 +772,12 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
         d.left(&format!("IMEI/N.º serie: {}", x.imei), false, Size::Normal);
     }
     fault(&mut d, r);
+    if !x.approx_delivery.trim().is_empty() {
+        d.left(&format!("Entrega aprox.: {}", x.approx_delivery.trim()), false, Size::Normal);
+    }
+    if s.repair_passcode_on_receipt && !x.passcode.trim().is_empty() {
+        d.left(&format!("Contraseña: {}", x.passcode.trim()), false, Size::Normal);
+    }
     d.rule('-');
     let eur = |c: i64| format!("{} €", fmt(c));
     match x.estimate_cents {
@@ -616,6 +789,9 @@ pub fn resguardo(r: &Repair, s: &Settings, logo: bool) -> Vec<Line> {
         if let (Some(due), true) = (r.due_cents, r.open()) {
             d.pair("A pagar al recoger", &eur(due.max(0)), true, Size::Normal);
         }
+    }
+    if x.estimate_cents.is_some() || r.deposit_cents > 0 {
+        d.left("Precios con IVA incluido", false, Size::Normal);
     }
     // paid or not, as big as the paper allows: nobody has to work it out
     if r.open() {
@@ -695,6 +871,12 @@ pub fn repair_slip(r: &Repair, s: &Settings) -> Vec<Line> {
     }
     if !device(r).trim().is_empty() {
         d.left(&device(r), true, Size::Normal);
+    }
+    if !r.data.passcode.trim().is_empty() {
+        d.left(&format!("Contraseña: {}", r.data.passcode.trim()), true, Size::Normal);
+    }
+    if !r.data.approx_delivery.trim().is_empty() {
+        d.left(&format!("Entrega: {}", r.data.approx_delivery.trim()), false, Size::Normal);
     }
     fault(&mut d, r);
     // whoever hands it back sees at once whether there is money to take
@@ -1053,7 +1235,7 @@ mod tests {
         let totals = compute(&lines);
         let pay = Payment { method: "card".into(), tendered_cents: totals.total_cents, change_cents: 0, machine: None };
         let shop = ShopInfo { legal_name: "Juan Pérez García".into(), ..shop() };
-        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: "Rambla 5\n17001 Girona".into() };
+        let acme = Customer { name: "Acme Telecom SL".into(), nif: "B12345674".into(), address: "Rambla 5\n17001 Girona".into(), ..Customer::default() };
         let v = TicketView {
             shop: &shop,
             kind: "sale",
@@ -1218,6 +1400,7 @@ mod tests {
             fault: "No carga\nPantalla rota".into(),
             notes: "Código de desbloqueo 1234".into(),
             estimate_cents: Some(8000),
+            ..RepairIn::default()
         }
     }
 
@@ -1290,6 +1473,7 @@ mod tests {
             fault: format!("No enciende {long}\n\n{long} después de caerse al agua"),
             notes: String::new(),
             estimate_cents: Some(9_999_999),
+            ..RepairIn::default()
         };
         for cols in [32, 42, 48] {
             for cp in ["cp858", "cp1252", "cp850", "ascii"] {

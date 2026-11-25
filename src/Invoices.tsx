@@ -10,7 +10,7 @@ import { PrinterPick, type OneOff } from './PrinterPick';
 import { ShareDialog } from './Share';
 import { SheetView, type Sheet } from './Sheets';
 import { useToast } from './toast';
-import type { Finalized, Logo, Method, PLine, Product, SaleLine, Settings, TicketRecord, User } from './types';
+import type { Customer, Finalized, KnownCustomer, Logo, Method, PLine, Product, SaleLine, Settings, TicketRecord, User } from './types';
 import { Empty, Field, Modal, Segmented } from './ui';
 
 // Facturas: bills made on their own page. A simple bill needs nothing from
@@ -32,13 +32,6 @@ interface BillRow {
   customerNif: string;
   voidReason: string | null;
   replaces: string | null;
-}
-
-interface KnownCustomer {
-  name: string;
-  nif: string;
-  address: string;
-  last: string;
 }
 
 interface LineDraft {
@@ -325,7 +318,14 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
   const [net, setNet] = useState(start.net);
   const [note, setNote] = useState(draft?.note ?? from?.note ?? '');
   const [full, setFull] = useState(draft ? !!draft.full : !!from?.customer);
-  const [customer, setCustomer] = useState(() => draft?.customer ?? from?.customer ?? { name: '', nif: '', address: '' });
+  const [customer, setCustomer] = useState<Customer>(() => ({
+    name: '',
+    nif: '',
+    address: '',
+    phone: '',
+    email: '',
+    ...(draft?.customer ?? from?.customer ?? {}),
+  }));
   const [lines, setLines] = useState<LineDraft[]>(() => {
     const had = draft ? draft.lines.map((l) => ({ ...l, key: ++keys })) : from ? linesOf(from, start.net) : [];
     return had.length ? had : [blank(vat)];
@@ -434,10 +434,18 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
       productId: p.l.productId,
     }));
   const total = out.reduce((s, l) => s + l.qty * l.unitCents, 0);
-  const who = full && customer.name.trim() ? { name: customer.name.trim(), nif: customer.nif.trim(), address: customer.address.trim() } : undefined;
+  const custClean: Customer = {
+    name: customer.name.trim(),
+    nif: customer.nif.trim(),
+    address: customer.address.trim(),
+    phone: (customer.phone ?? '').trim(),
+    email: (customer.email ?? '').trim(),
+  };
+  const hasCust = !!(custClean.name || custClean.nif || custClean.address || custClean.phone || custClean.email);
+  const who = full && hasCust ? custClean : undefined;
 
   // what is typed is kept until the bill is issued
-  const typed = lines.some((l) => l.name.trim() || l.price.trim() || l.imei.trim()) || (full && !!(customer.name.trim() || customer.nif.trim() || customer.address.trim())) || !!note.trim();
+  const typed = lines.some((l) => l.name.trim() || l.price.trim() || l.imei.trim()) || (full && hasCust) || !!note.trim();
   useEffect(() => {
     if (!draftKey || from) return;
     try {
@@ -450,10 +458,12 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
 
   // what is still needed, said in words next to the button
   const missing: { text: string; focus: string }[] = [];
+  const needFiscal = total > SIMPLIFIED_LIMIT || !!custClean.nif;
   if (full) {
-    if (!customer.name.trim()) missing.push({ text: tr('el nombre del cliente', "the customer's name"), focus: 'bill-name' });
-    if (!customerNif(customer.nif)) missing.push({ text: customer.nif.trim() ? tr('un NIF válido del cliente', "a valid customer NIF") : tr('el NIF del cliente', "the customer's NIF"), focus: 'bill-nif' });
-    if (!settings.shopNif.trim()) missing.push({ text: tr('el NIF de la tienda (Ajustes › Comercio)', "the shop's NIF (Settings › Shop)"), focus: '' });
+    if (needFiscal && !custClean.name) missing.push({ text: tr('el nombre del cliente', "the customer's name"), focus: 'bill-name' });
+    if (custClean.nif && !customerNif(custClean.nif)) missing.push({ text: tr('un NIF válido del cliente', 'a valid customer NIF'), focus: 'bill-nif' });
+    if (total > SIMPLIFIED_LIMIT && !custClean.nif) missing.push({ text: tr('el NIF del cliente (pasa de 3.000 €)', "the customer's NIF (over 3,000 EUR)"), focus: 'bill-nif' });
+    if (needFiscal && !settings.shopNif.trim()) missing.push({ text: tr('el NIF de la tienda (Ajustes › Comercio)', "the shop's NIF (Settings › Shop)"), focus: '' });
   }
   if (filled.length === 0) missing.push({ text: tr('lo que se vende', 'what is sold'), focus: `line-${lines[0]?.key}-name` });
   filled.forEach((p, i) => {
@@ -520,7 +530,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
         call<Finalized>('sale.finalize', {
           lines: out,
           payment: { method, machine: method === 'card' ? machine : undefined },
-          customer: full ? { name: customer.name.trim(), nif: customer.nif.trim(), address: customer.address.trim() } : undefined,
+          customer: full && hasCust ? custClean : undefined,
           saleId: saleId.current,
           expectedCents: total,
           print,
@@ -604,8 +614,8 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
             <button type="button" className={full ? 'on' : ''} onClick={() => setKind(true)}>
               <Building2 size={20} />
               <span>
-                <b>{tr('Con nombre y NIF', 'With name and NIF')}</b>
-                <small>{tr('Factura completa, para empresas o quien la pida.', 'Full invoice, for businesses or whoever asks.')}</small>
+                <b>{tr('Con datos del cliente', 'With customer details')}</b>
+                <small>{tr('Factura completa con NIF, o simplificada con los datos opcionales que dé.', 'Full invoice with NIF, or simplified with whatever optional details are given.')}</small>
               </span>
               {full && <Check size={18} className="bill-tick" />}
             </button>
@@ -613,7 +623,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
           {full && (
             <div className="bill-customer">
               <div className="grid2">
-                <Field label={tr('Nombre o razón social', 'Name or company')}>
+                <Field label={tr('Nombre o razón social (opcional bajo 3.000 €)', 'Name or company (optional under 3,000 EUR)')}>
                   <div className="bill-suggest">
                     <input
                       data-id="bill-name"
@@ -637,7 +647,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
                             aria-selected={false}
                             onMouseDown={(e) => e.preventDefault()}
                             onClick={() => {
-                              setCustomer({ name: k.name, nif: k.nif, address: k.address });
+                              setCustomer({ name: k.name, nif: k.nif, address: k.address, phone: k.phone ?? '', email: k.email ?? '' });
                               setSuggest(false);
                             }}
                           >
@@ -645,7 +655,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
                             <span>
                               <b>{k.name}</b>
                               <small>
-                                {k.nif} · {tr('última', 'last')} {dateTime(k.last)}
+                                {[k.nif, k.phone].filter(Boolean).join(' · ') || tr('sin NIF', 'no NIF')} · {tr('última', 'last')} {dateTime(k.last)}
                               </small>
                             </span>
                           </button>
@@ -654,8 +664,16 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
                     )}
                   </div>
                 </Field>
-                <Field label="NIF / CIF / NIE" error={customer.nif.trim() && !customerNif(customer.nif) ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}>
+                <Field label={tr('NIF / CIF / NIE (opcional si no pide factura completa)', 'NIF / CIF / NIE (optional unless full invoice)')} error={customer.nif.trim() && !customerNif(customer.nif) ? tr('Revisa el NIF: la letra no coincide', 'Check the NIF: the letter does not match') : undefined}>
                   <input data-id="bill-nif" value={customer.nif} onChange={(e) => setCustomer({ ...customer, nif: e.target.value.toUpperCase() })} placeholder="B12345674" autoComplete="off" />
+                </Field>
+              </div>
+              <div className="grid2">
+                <Field label={tr('Teléfono (opcional)', 'Phone (optional)')}>
+                  <input value={customer.phone ?? ''} onChange={(e) => setCustomer({ ...customer, phone: e.target.value })} maxLength={30} inputMode="tel" />
+                </Field>
+                <Field label={tr('Email (opcional)', 'Email (optional)')}>
+                  <input value={customer.email ?? ''} onChange={(e) => setCustomer({ ...customer, email: e.target.value })} maxLength={120} inputMode="email" />
                 </Field>
               </div>
               <Field label={tr('Dirección (opcional)', 'Address (optional)')}>
@@ -820,7 +838,7 @@ function BillEditor({ settings, products, logo, from, onDone, onCancel, onSetupP
             ]}
           />
         </div>
-        <div className="bill-paper">{format === 'a4' ? <SheetView sheets={sheets} busy={previewing} /> : <Paper lines={ticket} logo={logo} cols={settings.columns} />}</div>
+        <div className="bill-paper">{format === 'a4' ? <SheetView sheets={sheets} busy={previewing} /> : <Paper lines={ticket} logo={logo} cols={settings.columns} modern={settings.ticketStyle !== 'classic'} />}</div>
       </aside>
 
       <footer className="bill-foot">
@@ -1102,7 +1120,7 @@ function BillList({ user, settings, selId, setSelId, reload, onCount, onFix, onN
             </div>
             <p className="bill-reprint">{tr('Así la recibió el cliente. Si se vuelve a imprimir, sale con «COPIA», como pide la ley.', 'As the customer got it. Printed again, it says "COPIA", as the law asks.')}</p>
             <div className="bill-paper">
-              {format === 'ticket' ? paper && <Paper lines={paper.lines} logo={paper.logo} cols={settings.columns} /> : <SheetView sheets={sheets} />}
+              {format === 'ticket' ? paper && <Paper lines={paper.lines} logo={paper.logo} cols={settings.columns} modern={settings.ticketStyle !== 'classic'} /> : <SheetView sheets={sheets} />}
             </div>
           </div>
         ) : (

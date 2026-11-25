@@ -82,12 +82,15 @@ const FILTERS: { id: Filter; label: () => string }[] = [
 const FIELD: Record<string, [string, string]> = {
   customerName: ['nombre', 'name'],
   customerPhone: ['teléfono', 'phone'],
+  customerDni: ['DNI / NIE', 'ID / NIE'],
   brand: ['marca', 'make'],
   model: ['modelo', 'model'],
   colour: ['color', 'colour'],
   imei: ['IMEI', 'IMEI'],
   fault: ['avería', 'fault'],
   notes: ['notas', 'notes'],
+  passcode: ['contraseña', 'passcode'],
+  approxDelivery: ['entrega aprox.', 'approx. delivery'],
 };
 
 const price = (c: number | null | undefined) => (c === null || c === undefined ? tr('sin precio', 'no price') : eur(c));
@@ -123,12 +126,15 @@ function device(r: { brand: string; model: string; colour: string }) {
 const dataOf = (r: Repair): RepairData => ({
   customerName: r.customerName,
   customerPhone: r.customerPhone,
+  customerDni: r.customerDni ?? '',
   brand: r.brand,
   model: r.model,
   colour: r.colour,
   imei: r.imei,
   fault: r.fault,
   notes: r.notes,
+  passcode: r.passcode ?? '',
+  approxDelivery: r.approxDelivery ?? '',
   estimateCents: r.estimateCents,
 });
 
@@ -153,19 +159,36 @@ const newId = () => crypto.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.
 interface Draft {
   customerName: string;
   customerPhone: string;
+  customerDni: string;
   brand: string;
   model: string;
   colour: string;
   imei: string;
   fault: string;
   notes: string;
+  passcode: string;
+  approxDelivery: string;
   estimate: string;
   deposit: string;
 }
 
-const BLANK: Draft = { customerName: '', customerPhone: '', brand: '', model: '', colour: '', imei: '', fault: '', notes: '', estimate: '', deposit: '' };
+const BLANK: Draft = { customerName: '', customerPhone: '', customerDni: '', brand: '', model: '', colour: '', imei: '', fault: '', notes: '', passcode: '', approxDelivery: '', estimate: '', deposit: '' };
 
-const toDraft = (r: Repair): Draft => ({ ...dataOf(r), estimate: r.estimateCents === null ? '' : fmt(r.estimateCents), deposit: '' });
+const toDraft = (r: Repair): Draft => ({
+  customerName: r.customerName,
+  customerPhone: r.customerPhone,
+  customerDni: r.customerDni ?? '',
+  brand: r.brand,
+  model: r.model,
+  colour: r.colour,
+  imei: r.imei,
+  fault: r.fault,
+  notes: r.notes,
+  passcode: r.passcode ?? '',
+  approxDelivery: r.approxDelivery ?? '',
+  estimate: r.estimateCents === null ? '' : fmt(r.estimateCents),
+  deposit: '',
+});
 
 interface FormProps {
   repair: Repair | null;
@@ -207,12 +230,15 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
   const data: RepairData = {
     customerName: d.customerName,
     customerPhone: d.customerPhone,
+    customerDni: d.customerDni,
     brand: d.brand,
     model: d.model,
     colour: d.colour,
     imei: d.imei,
     fault: d.fault,
     notes: d.notes,
+    passcode: d.passcode,
+    approxDelivery: d.approxDelivery,
     estimateCents: badEstimate ? null : estimate,
   };
   // only what Ajustes › Reparaciones asks for; the rest may stay blank
@@ -224,6 +250,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
   const missing: string[] = [];
   if (need('name') && !d.customerName.trim()) missing.push(tr('el nombre del cliente', "the customer's name"));
   if (need('phone') && !d.customerPhone.trim()) missing.push(tr('el teléfono', 'the phone'));
+  if (need('dni') && !d.customerDni.trim()) missing.push(tr('el DNI / NIE', 'the ID / NIE'));
   if (need('device') && !(d.brand.trim() || d.model.trim())) missing.push(tr('la marca o el modelo', 'the make or model'));
   if (need('fault') && !d.fault.trim()) missing.push(tr('la avería', 'the fault'));
   const complete = missing.length === 0;
@@ -352,12 +379,15 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
       <div className="repair-form">
         <div className="stack">
           {required.length === 0 && !repair && <p className="muted small">{tr('Todo es opcional: pon lo que el cliente quiera dar.', 'Everything is optional: fill in what the customer wants to give.')}</p>}
-          <div className="grid2">
+          <div className="grid3">
             <Field label={tr('Cliente', 'Customer') + opt('name')}>
               <input autoFocus value={d.customerName} onChange={(e) => set('customerName', e.target.value)} maxLength={120} />
             </Field>
             <Field label={tr('Teléfono', 'Phone') + opt('phone')}>
               <input value={d.customerPhone} onChange={(e) => set('customerPhone', e.target.value)} inputMode="tel" maxLength={30} />
+            </Field>
+            <Field label={'DNI / NIE' + opt('dni')}>
+              <input value={d.customerDni} onChange={(e) => set('customerDni', e.target.value.toUpperCase())} maxLength={24} />
             </Field>
           </div>
           <div className="picks" role="group" aria-label={tr('Marca', 'Make')}>
@@ -425,6 +455,14 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
           <Field label={tr('Notas internas', 'Internal notes')} hint={tr('Solo para la tienda: no se imprimen.', 'For the shop only: never printed.')}>
             <textarea rows={2} value={d.notes} onChange={(e) => set('notes', e.target.value)} maxLength={1000} />
           </Field>
+          <div className="grid2">
+            <Field label={tr('Contraseña / PIN del equipo', 'Device passcode / PIN')} hint={tr('Siempre en etiqueta interna; en resguardo según Ajustes', 'Always on workshop tag; on receipt per Settings')}>
+              <input value={d.passcode} onChange={(e) => set('passcode', e.target.value)} maxLength={40} placeholder={tr('PIN, patrón… (opcional)', 'PIN, pattern… (optional)')} />
+            </Field>
+            <Field label={tr('Fecha aprox. de entrega', 'Approx. delivery date')}>
+              <input value={d.approxDelivery} onChange={(e) => set('approxDelivery', e.target.value)} maxLength={40} placeholder={tr('Ej. mañana 18:00', 'e.g. tomorrow 18:00')} />
+            </Field>
+          </div>
           <div className="grid2">
             <Field
               label={tr('Presupuesto', 'Estimate')}
@@ -515,7 +553,7 @@ function RepairForm({ repair, settings, logo, onClose, onSaved, onSetupPrinter }
               { value: 'slip', label: tr('Etiqueta', 'Tag') },
             ]}
           />
-          {paper && <Paper lines={show === 'resguardo' ? paper.resguardo : paper.slip} logo={show === 'resguardo' ? logo : null} cols={settings.columns} />}
+          {paper && <Paper lines={show === 'resguardo' ? paper.resguardo : paper.slip} logo={show === 'resguardo' ? logo : null} cols={settings.columns} modern={settings.ticketStyle !== 'classic'} />}
         </div>
       </div>
       {clock && (
@@ -819,7 +857,9 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                   <StatusBadge s={r.status} />
                 </h2>
                 <p className="ref-note">
-                  <b>{r.customerName || tr('Sin nombre', 'No name')}</b>{r.customerPhone && <> · {r.customerPhone}</>}
+                  <b>{r.customerName || tr('Sin nombre', 'No name')}</b>
+                  {r.customerPhone && <> · {r.customerPhone}</>}
+                  {r.customerDni && <> · DNI {r.customerDni}</>}
                 </p>
                 <p className="muted">
                   {device(r)}
@@ -829,6 +869,8 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                       <span className="mono">{r.imei}</span>
                     </>
                   )}
+                  {r.approxDelivery && <> · {tr('Entrega aprox.', 'Approx. delivery')}: {r.approxDelivery}</>}
+                  {r.passcode && <> · {tr('PIN', 'Passcode')}: {r.passcode}</>}
                 </p>
                 {open && <PayBlock r={r} />}
                 <p className="ref-note">
@@ -951,6 +993,7 @@ export function Repairs({ user, settings, logo, onSetupPrinter, onCharge }: Prop
                   lines={show === 'resguardo' ? detail.resguardo : detail.slip}
                   logo={show === 'resguardo' ? detail.logo : null}
                   cols={settings.columns}
+                  modern={settings.ticketStyle !== 'classic'}
                   stamp={r.status === 'cancelled' ? tr('CANCELADO', 'CANCELLED') : undefined}
                 />
               </div>
