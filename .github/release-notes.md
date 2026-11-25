@@ -1,10 +1,15 @@
-Download `Tiquet_1.14.0_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
+Download `Tiquet_1.14.1_x64-setup.exe` below and run it. Runs on Windows 10 and 11 (64-bit) and needs no administrator rights. Built and tested on a clean GitHub Windows machine, not on a developer's PC.
 
 The installer is not code-signed yet: if Windows says "Windows protected your PC", click **More info** and then **Run anyway**.
 
 **Upgrading:** from 1.8.2 or later there is nothing to do, Tiquet updates itself when the till is free. **From 1.3 to 1.8.1:** Tiquet offers this version by itself; press **Actualizar ahora** once. **From 1.0, 1.1 or 1.2:** run this installer once over the old version. The database upgrades itself on first start, after a copy of it is kept.
 
-New in 1.14.0: **separate card machines on Venta, modern receipt typography, optional customer info and a separate billing company for invoices.**
+New in 1.14.1: **faster, self-healing automatic updates** on top of all 1.14.0 features.
+
+- Checks for new releases within 3 seconds of opening, every 5 minutes while running, and whenever the window regains focus or network connectivity returns.
+- Shows live download progress in the update banner, retries failed downloads after 30 seconds instead of waiting 15 minutes, tracks idle time continuously so already-idle tills install promptly (~60 s empty / ~15 s on the sign-in screen), and never permanently locks out auto-updates after a transient error before launch.
+
+Also new in 1.14.0: **separate card machines on Venta, modern receipt typography, optional customer info and a separate billing company for invoices.**
 
 - **Each card terminal on its own in Venta.** When the shop has more than one card machine, **Venta** shows each terminal in its own column and in its own total at the bottom, with each column's € total right in the header. **Ajustes › Venta** and **Ajustes › Máquinas** let you switch back to one combined **Tarjeta** stack anytime.
 - **Crisp modern ticket design on the same roll.** USB and network receipt printers, Windows print drivers, PDFs and the on-screen preview now render smooth typography, solid rules, rounded badges and a framed **TOTAL** box at native 203 dpi on the same 58 mm or 80 mm paper (serial printers stay in text mode; **Ajustes › Ticket › Estilo de impresión** keeps the classic mode available).

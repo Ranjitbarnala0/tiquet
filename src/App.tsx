@@ -135,7 +135,7 @@ export function App() {
     return l;
   });
   // on the sign-in screen nobody is working: a new version goes in straight away
-  const updates = useUpdate(false, { on: !!boot && !boot.needsSetup && !user && !fatal, auto: !!boot?.autoUpdate, quiet: 20_000 });
+  const updates = useUpdate(false, { on: !!boot && !boot.needsSetup && !user && !fatal, auto: !!boot?.autoUpdate, quiet: 15_000 });
 
   const changeLang = useCallback((l: Lang) => {
     setLang(l);
